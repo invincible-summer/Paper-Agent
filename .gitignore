@@ -1,0 +1,101 @@
+# ============================================================
+# Secrets and local credentials
+# ============================================================
+# Keep the example template tracked; never commit real credentials.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+.streamlit/secrets.toml
+
+# ============================================================
+# Python, local environments and tooling caches
+# ============================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.venv/
+venv/
+.env_conda/
+
+# ============================================================
+# Runtime data and user content
+#
+# The application creates these directories while downloading papers,
+# receiving user uploads, extracting figures, building vector indexes,
+# writing exports, or persisting conversations. They are local data,
+# not source code, and must never be uploaded to Git.
+# Keep the root and backend/CWD layouts covered because development and
+# production commands may resolve relative paths from different CWDs.
+# ============================================================
+# Ignore the complete runtime roots, not only today's known subdirectories.
+# This also covers future SQLite databases, attachment ownership indexes,
+# temporary files, downloaded PDFs, Chroma/Docling state and user exports.
+/data/
+/backend/data/
+/data/pdfs/
+/data/uploads/
+/data/assets/
+/data/exports/
+/data/chroma/
+/data/openai_api/
+/data/metadata.db
+/data/paper_agent.db
+/data/users.db
+/data/*.db-journal
+/data/graph.html
+
+/backend/data/pdfs/
+/backend/data/uploads/
+/backend/data/assets/
+/backend/data/exports/
+/backend/data/chroma/
+/backend/data/openai_api/
+/backend/data/metadata.db
+/backend/data/paper_agent.db
+/backend/data/users.db
+/backend/data/*.db
+/backend/data/*.db-journal
+/backend/data/graph.html
+
+# Conversation history and traces (web channel and local runtime).
+/history_record/
+/backend/history_record/
+
+# Other local runtime files.
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.log
+*.pid
+*.tmp
+
+# ============================================================
+# IDE and OS files
+# ============================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ============================================================
+# Node / Next.js build artifacts
+# ============================================================
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+*.tsbuildinfo
+
+# Generic build artifacts
+/dist/
+/build/

@@ -1,0 +1,260 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   Paper Agent · 「纸墨书院」设计令牌（仿 Edu_Agent 风格）
+   浅色 = 宣纸底 + 墨色 + 黛青主色 + 朱砂点缀
+   深色 = 墨夜底 + 同系高明度色
+   ========================================================================== */
+
+:root {
+  /* 基底 */
+  --bg: 246 245 241;            /* 宣纸 */
+  --surface: 255 254 250;       /* 纸面 */
+  --surface-hover: 240 238 231; /* 纸面悬浮 */
+  --surface-sunken: 238 236 229;/* 凹陷区（代码块/表格头） */
+  --border: 224 221 212;
+  --border-light: 233 230 223;
+  /* 墨色 */
+  --fg: 30 30 36;
+  --fg-secondary: 82 80 74;
+  --muted: 140 137 128;
+  /* 黛青（主色） */
+  --accent: 37 109 102;
+  --accent-hover: 29 86 80;
+  --accent-soft: 221 234 230;
+  /* 朱砂（点缀：标记/角色徽章） */
+  --accent2: 194 64 42;
+  --accent2-hover: 160 50 32;
+  --accent2-soft: 245 227 221;
+  /* 语义 */
+  --success: 46 125 82;
+  --error: 180 56 46;
+  --warning: 176 126 12;
+  /* 阴影：低存在感 */
+  --shadow-sm: 0 1px 2px 0 rgb(30 26 18 / 0.05);
+  --shadow-md: 0 4px 14px -4px rgb(30 26 18 / 0.08), 0 2px 4px -1px rgb(30 26 18 / 0.03);
+  --shadow-lg: 0 10px 30px -8px rgb(30 26 18 / 0.12), 0 4px 8px -2px rgb(30 26 18 / 0.05);
+  --font-sans: "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-serif: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", Georgia, ui-serif, serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+.dark {
+  --bg: 16 18 22;
+  --surface: 24 27 33;
+  --surface-hover: 33 36 44;
+  --surface-sunken: 20 22 28;
+  --border: 45 48 58;
+  --border-light: 36 39 48;
+  --fg: 232 230 225;
+  --fg-secondary: 192 190 182;
+  --muted: 138 141 150;
+  --accent: 86 173 161;
+  --accent-hover: 122 199 187;
+  --accent-soft: 25 51 49;
+  --accent2: 226 108 82;
+  --accent2-hover: 238 138 114;
+  --accent2-soft: 60 32 27;
+  --success: 84 176 120;
+  --error: 224 106 94;
+  --warning: 212 164 42;
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.25);
+  --shadow-md: 0 4px 14px -4px rgb(0 0 0 / 0.3), 0 2px 4px -1px rgb(0 0 0 / 0.18);
+  --shadow-lg: 0 10px 30px -8px rgb(0 0 0 / 0.35), 0 4px 8px -2px rgb(0 0 0 / 0.22);
+}
+
+html, body {
+  background-color: rgb(var(--bg));
+  color: rgb(var(--fg));
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  border-color: rgb(var(--border));
+}
+
+html, body, * {
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.15s ease;
+}
+
+/* Serif display headings（书院感） */
+.font-serif-display {
+  font-family: var(--font-serif);
+  letter-spacing: 0.01em;
+}
+
+/* Tabular numbers（统计数字等宽） */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgb(var(--border)); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--muted)); }
+.sidebar-scroll::-webkit-scrollbar { width: 4px; }
+
+/* Inputs */
+input, textarea, select {
+  background-color: rgb(var(--bg));
+  color: rgb(var(--fg));
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: rgb(var(--accent));
+  box-shadow: 0 0 0 3px rgb(var(--accent) / 0.12);
+}
+input[type="radio"], input[type="checkbox"], input[type="number"] {
+  accent-color: rgb(var(--accent));
+}
+
+/* Utility classes */
+.card {
+  background: rgb(var(--surface));
+  border: 1px solid rgb(var(--border-light));
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+}
+.card-hover {
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.card-hover:hover {
+  box-shadow: var(--shadow-md);
+  border-color: rgb(var(--border));
+}
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 10px;
+  background: rgb(var(--accent));
+  color: white;
+  font-weight: 600;
+  font-size: 0.875rem;
+  padding: 0.625rem 1.5rem;
+  box-shadow: 0 1px 3px rgb(37 109 102 / 0.3);
+  transition: all 0.15s;
+}
+.btn-primary:hover:not(:disabled) {
+  background: rgb(var(--accent-hover));
+  box-shadow: 0 2px 8px rgb(37 109 102 / 0.35);
+}
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.badge-accent {
+  background: rgb(var(--accent-soft));
+  color: rgb(var(--accent));
+}
+.badge-accent2 {
+  background: rgb(var(--accent2-soft));
+  color: rgb(var(--accent2));
+}
+.badge-success {
+  background: rgb(var(--success) / 0.12);
+  color: rgb(var(--success));
+}
+.badge-muted {
+  background: rgb(var(--surface-hover));
+  color: rgb(var(--muted));
+}
+.input-base {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid rgb(var(--border));
+  background: rgb(var(--bg));
+  padding: 0.5rem 0.875rem;
+  font-size: 0.875rem;
+  color: rgb(var(--fg));
+}
+.label-text {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: rgb(var(--fg-secondary));
+}
+.hint-text {
+  font-size: 0.75rem;
+  color: rgb(var(--muted));
+  line-height: 1.4;
+}
+
+/* Markdown prose styles for chat messages */
+.chat-prose {
+  font-size: 14px;
+  line-height: 1.75;
+  color: rgb(var(--fg));
+}
+.chat-prose h1, .chat-prose h2, .chat-prose h3 {
+  font-weight: 600;
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+  color: rgb(var(--fg));
+}
+.chat-prose h1 { font-size: 1.25em; }
+.chat-prose h2 { font-size: 1.125em; }
+.chat-prose h3 { font-size: 1em; }
+.chat-prose p { margin: 0.5em 0; }
+.chat-prose ul, .chat-prose ol {
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+.chat-prose li { margin: 0.25em 0; }
+.chat-prose code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background: rgb(var(--surface-hover));
+  padding: 0.125em 0.25em;
+  border-radius: 3px;
+}
+.chat-prose pre {
+  background: rgb(var(--surface-sunken));
+  padding: 0.75em;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.chat-prose pre code {
+  background: none;
+  padding: 0;
+}
+.chat-prose blockquote {
+  border-left: 3px solid rgb(var(--border));
+  padding-left: 0.75em;
+  color: rgb(var(--muted));
+  margin: 0.5em 0;
+}
+.chat-prose table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.92em;
+}
+.chat-prose th, .chat-prose td {
+  border: 1px solid rgb(var(--border-light));
+  padding: 0.375em 0.75em;
+  text-align: left;
+}
+.chat-prose th {
+  background: rgb(var(--surface-sunken));
+  font-weight: 600;
+}
+.chat-prose a {
+  color: rgb(var(--accent));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

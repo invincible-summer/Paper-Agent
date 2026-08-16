@@ -1,0 +1,118 @@
+# Skill dispatch golden set — utterance → expected skill (or null = no skill).
+#
+# Dispatch quality guardrail: the model should autonomously pick the right
+# skill from the metadata section (or pick none). Scored by
+# run_dispatch_eval.py: accuracy + per-skill precision/recall.
+# Mode: online only (the dispatch decision IS an LLM judgment); the offline
+# half (yaml parse + scorer) is unit-tested in tests/test_dispatch_eval.py.
+
+- id: compare_table
+  utterance: "把这几篇论文做个对比表格，看看方法上有什么区别"
+  expect: compare_papers
+- id: compare_two
+  utterance: "GraphRec 和 LightGCN 哪个更好？区别在哪"
+  expect: compare_papers
+- id: compare_benchmark
+  utterance: "横向评测一下这几个推荐方法"
+  expect: compare_papers
+
+- id: gap_what_next
+  utterance: "这个方向还有什么可以做的？"
+  expect: research_gap
+- id: gap_evaluate_idea
+  utterance: "我有个选题构想，帮我评估一下靠不靠谱"
+  expect: research_gap
+- id: gap_future
+  utterance: "这个领域的研究空白和未来方向是什么"
+  expect: research_gap
+
+- id: critique_basic
+  utterance: "批判一下这篇论文，有什么硬伤"
+  expect: paper_critique
+- id: critique_review
+  utterance: "帮我写一份审稿意见"
+  expect: paper_critique
+- id: critique_rebuttal
+  utterance: "审稿人质疑实验不充分，rebuttal 怎么应对"
+  expect: paper_critique
+
+- id: prep_group_meeting
+  utterance: "我下周组会要讲这篇论文，帮我准备一下"
+  expect: presentation_prep
+- id: prep_outline
+  utterance: "帮我做个汇报大纲"
+  expect: presentation_prep
+
+- id: draft_look
+  utterance: "这是我写的草稿，帮我看看有什么问题"
+  expect: draft_review
+- id: draft_related_check
+  utterance: "检查一下我论文的相关工作是不是引全了"
+  expect: draft_review
+
+- id: rw_write
+  utterance: "帮我写相关工作这一节"
+  expect: related_work
+- id: rw_organize
+  utterance: "把这些论文组织成 related work"
+  expect: related_work
+
+# --- negative cases: plain tools or chitchat must NOT trigger a skill ---
+- id: neg_direction
+  utterance: "这篇文章研究的是什么方向"
+  expect: null
+- id: neg_search
+  utterance: "帮我检索图神经网络的论文"
+  expect: null
+- id: neg_review
+  utterance: "帮我写一份完整的文献综述"
+  expect: null
+- id: neg_citation
+  utterance: "把核心集论文导出成国标参考文献格式"
+  expect: null
+- id: neg_read
+  utterance: "精读一下这几篇论文"
+  expect: null
+- id: neg_chitchat
+  utterance: "你好，介绍一下你自己"
+  expect: null
+
+# --- writing-family skills (v2 expansion) ---
+- id: topic_pick
+  utterance: "我研一了，帮我选个毕业论文的题，方向是推荐系统"
+  expect: topic_advisor
+- id: topic_focus
+  utterance: "我的研究问题太宽泛了，帮我聚焦一下"
+  expect: topic_advisor
+- id: structure_outline
+  utterance: "我的论文应该有哪些章节？帮我搭个提纲"
+  expect: structure_advisor
+- id: structure_thesis
+  utterance: "本科毕业论文的结构怎么安排"
+  expect: structure_advisor
+- id: format_check_spec
+  utterance: "这是我们学校的格式要求，帮我看看论文符不符合"
+  expect: format_compliance
+- id: format_gbt
+  utterance: "按 GB/T 7714 帮我整理一下格式"
+  expect: format_compliance
+- id: write_draft
+  utterance: "帮我起草一下论文的引言部分初稿"
+  expect: paper_writing
+- id: write_polish
+  utterance: "帮我润色这段英文摘要"
+  expect: paper_writing
+- id: format_uploaded
+  utterance: "检查一下我上传论文的格式"
+  expect: format_compliance
+
+# --- evidence_anchor (per-paragraph evidence check) ---
+- id: evidence_which_cite
+  utterance: "这段话该引哪些文献"
+  expect: evidence_anchor
+- id: evidence_check_support
+  utterance: "帮我检查这段论证有没有文献支撑"
+  expect: evidence_anchor
+- id: evidence_boundary_draft_review
+  utterance: "帮我评审一下我整篇草稿"
+  expect: draft_review

@@ -1,0 +1,30 @@
+[Unit]
+Description=Paper Agent OpenAI API storage cleanup
+Documentation=file:/opt/paper-agent/Website_deployment_plan.md
+After=local-fs.target
+ConditionPathExists=/opt/paper-agent/.venv/bin/python
+ConditionPathExists=/opt/paper-agent/scripts/cleanup_openai_api_storage.py
+
+[Service]
+Type=oneshot
+User=paper-agent
+Group=paper-agent
+WorkingDirectory=/opt/paper-agent
+EnvironmentFile=/opt/paper-agent/.env
+ExecStart=/opt/paper-agent/.venv/bin/python /opt/paper-agent/scripts/cleanup_openai_api_storage.py --scheduled --reconcile
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+CPUWeight=20
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/opt/paper-agent/data/openai_api
+ReadOnlyPaths=/opt/paper-agent
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

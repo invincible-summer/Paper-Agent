@@ -1,0 +1,50 @@
+# Paper Agent configuration
+# Values in .env override these defaults
+
+llm:
+  base_url: "https://api.deepseek.com"
+  model_light: "deepseek-v4-flash"     # DeepSeek V4 Flash, for light tasks
+  model_reasoning: "deepseek-v4-flash" # DeepSeek V4 Flash (pro 暂不使用)
+  temperature: 0.3
+  max_retries: 3
+  timeout: 120
+
+# 多模态（视觉）端点：仅用于论文图/表/公式理解与扫描页 OCR，独立于文本 LLM。
+# 留空（默认）即禁用视觉，系统回退到纯文本（与引入本层之前一致）。
+# .env 的 MULTIMODAL_* 覆盖此处默认值。
+multimodal:
+  base_url: ""        # 例如 https://www.cctq.ai/v1
+  model: ""           # 例如 gpt-5.6-luna
+  temperature: 0.2
+  max_retries: 3
+  timeout: 120
+  max_concurrent: 2
+
+search:
+  results_per_source: 20
+  dedup_similarity_threshold: 0.95
+  verify_fulltext: true            # 检索时只探测每篇 OA PDF 文件头（不下载全文；深读时才实际下载）
+  fulltext_verify_timeout_seconds: 180
+  fulltext_status_ttl_days: 30
+  sources:
+    openalex: true
+    semantic_scholar: true   # 可无 key 低频使用；配 S2_API_KEY 更稳
+    arxiv: true
+    crossref: true           # D-083: all-discipline DOI metadata (humanities/SS/medicine)
+    europepmc: true          # D-083: biomedicine / life sciences + preprints (bioRxiv/medRxiv) + OA PDFs
+    doaj: true               # D-083: OA all-discipline journals, humanities-strong
+    hal: true                # 法国国家开放知识库：人文社科/欧洲学位论文，OA 全文
+    openaire: true           # 欧盟 OA 研究图谱：全球仓储 OA 记录
+    core: true               # core.ac.uk 仓储聚合；需 CORE_API_KEY（免费），无 key 自动跳过
+
+reader:
+  pdf_dir: "data/pdfs"
+  structure_backend: "docling"   # 论文结构解析后端：docling（主，layout/OCR/表格）| pymupdf（降级）
+  assets_dir: "data/assets"      # 抽取的图/表/公式图像资产目录
+  read_chunk_chars: 12000  # per-chunk char budget for section-aware full-text extraction
+
+storage:
+  sqlite_path: "data/metadata.db"
+  chroma_dir: "data/chroma"
+  embedding_model: "paraphrase-multilingual-MiniLM-L12-v2"  # local bilingual embedder (~120MB, CPU, offline)
+  reranker_model: "BAAI/bge-reranker-base"  # cross-encoder reranker (~1.1GB, CPU; "" disables, falls back to RRF order)

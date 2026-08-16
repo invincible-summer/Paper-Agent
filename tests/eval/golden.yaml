@@ -1,0 +1,84 @@
+# Phase 4 Eval golden set (update_plan.md §7.2)
+#
+# Each case is a topic + expectations the search/graph pipeline should satisfy.
+# Scoring (see run_eval.py::score_run):
+#   - keyword_recall: fraction of expected_keywords appearing in any core paper title/abstract/keywords
+#   - classic-hit:   at least one expected_titles (fuzzy) present in core layer
+#   - core-count-ok: len(core) within [min_core, max_core]
+# A case passes when ALL enabled checks pass.
+#
+# Mode: offline = run against a recorded fixture (no API); online = real search (manual).
+
+- id: transformers_attention
+  topic: "Transformer attention mechanism"
+  language: en
+  expected_keywords: ["attention", "transformer", "self-attention"]
+  min_core: 5
+  max_core: 30
+  notes: "Canonical NLP topic; 'Attention Is All You Need' should surface."
+
+- id: graph_neural_networks
+  topic: "Graph neural networks"
+  language: en
+  expected_keywords: ["graph", "neural", "message passing"]
+  min_core: 5
+  max_core: 30
+  notes: "GNN core literature."
+
+- id: reinforcement_learning
+  topic: "Reinforcement learning algorithms"
+  language: en
+  expected_keywords: ["reinforcement", "policy", "reward"]
+  min_core: 5
+  max_core: 30
+
+- id: sentiment_analysis
+  topic: "情感分析与文本分类"
+  language: zh
+  expected_keywords: ["情感", "分类", "sentiment"]
+  min_core: 3
+  max_core: 30
+  notes: "Chinese NLP topic; bilingual keywords."
+
+- id: federated_learning
+  topic: "Federated learning privacy"
+  language: en
+  expected_keywords: ["federated", "privacy", "distributed"]
+  min_core: 5
+  max_core: 30
+
+- id: diffusion_models
+  topic: "Diffusion models for image generation"
+  language: en
+  expected_keywords: ["diffusion", "generation", "denoising"]
+  min_core: 5
+  max_core: 30
+
+- id: causal_inference
+  topic: "Causal inference methods"
+  language: en
+  expected_keywords: ["causal", "inference", "treatment"]
+  min_core: 3
+  max_core: 30
+
+- id: large_language_models
+  topic: "Large language models and reasoning"
+  language: en
+  expected_keywords: ["language model", "reasoning", "prompt"]
+  min_core: 5
+  max_core: 30
+  notes: "Hot area; recall on keywords should be high."
+
+- id: knowledge_graphs
+  topic: "知识图谱构建与推理"
+  language: zh
+  expected_keywords: ["知识图谱", "推理", "entity"]
+  min_core: 3
+  max_core: 30
+
+- id: contrastive_learning
+  topic: "Contrastive self-supervised learning"
+  language: en
+  expected_keywords: ["contrastive", "self-supervised", "representation"]
+  min_core: 5
+  max_core: 30

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Paper Agent OpenAI API storage cleanup hourly
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Persistent=true
+RandomizedDelaySec=5min
+Unit=paper-agent-cleanup.service
+
+[Install]
+WantedBy=timers.target

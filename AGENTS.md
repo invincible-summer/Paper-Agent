@@ -1,0 +1,85 @@
+# Repository Guidelines
+
+## Project Structure & Architecture
+
+- `backend/app/` is the FastAPI HTTP layer: `/api/v1` for the web UI, `/v1` for OpenAI-compatible clients, `/files` for generated artifacts, and `/elements/assets/{paper_id}/{file}` for figure/table/formula crop images.
+- `agents/orchestrator.py` is the sole orchestration path. `agents/` contains specialist agents and tool dispatch; `core/` contains shared LLM, prompts, sessions, embeddings, tracing, configuration, and protocols.
+- `tools/` contains search, OA-only PDF/ingestion, retrieval, storage, export, and writing modules. `skills/builtin/<name>/SKILL.md` contains zero-code workflow skills.
+- `frontend/` is the Next.js/React chat UI; `tests/` contains pytest coverage and `tests/eval/` golden datasets. Runtime settings are in `config/`; local artifacts live in `data/` and `history_record/`.
+- Read `README.md` for current usage and `docs/DESIGN.md` for the architecture before changing cross-layer behavior. The design document describes implemented behavior, not historical decisions.
+
+The conversation is the product’s only interaction entry point. Prefer deterministic typed tools for data/rule operations and skills for workflow/methodology guidance. Preserve session-level RAG isolation, cross-session zero memory, and the single-worker constraint: in-process session memory, circuit breakers, and rate-limit semaphores must not be designed as multi-process state.
+
+### OpenAI-compatible administration and deployment
+
+- `/v1/models` and `/v1/chat/completions` are the 清小搭/OpenAI-compatible channel. Preserve strict request validation, first role frame, `delta.reasoning`/`delta.content`, one stop frame with usage, and terminal `[DONE]`. `/v1` uses administrator-issued long-lived Agent API keys stored hash-only in `data/users.db`; `AGENT_API_KEY` is migration/emergency fallback only. Full database keys are shown once, remain valid until revoked, and must never enter logs, fixtures, docs, or screenshots.
+- Bootstrap the fixed administrator identity interactively with `scripts/bootstrap_administrator.py`; it is idempotent and must never reset or auto-promote an existing account. The browser management route is `/admin/agent-keys`; production uses `AUTH_REQUIRED=true`, `REGISTRATION_OPEN=false`, and `GUEST_ACCESS=false`.
+- OpenAI compatibility does not transport this repository’s React tool cards. 清小搭 receives text/reasoning and `x_soda.attachments`; research maps emit a Markdown report plus portable static SVG graph. Keep the interactive `GenealogyGraph` in the self-hosted frontend and do not invent undocumented protocol fields.
+- The supported single-server target is 3–6 mixed concurrent users on 4 vCPU / 16 GiB, 100 GiB storage, 10 Mbps, and 4 GiB swap, always one Uvicorn worker. Follow `Website_deployment_plan.md`; upgrade capacity before attempting multi-worker state sharing.
+- `/v1` storage is isolated under `data/openai_api/`: 7-day structured Checkpoints/private uploads, 24-hour exports, 30-day public PDFs, 90-day caches, API Trace off by default, and 75/85/95/98 disk thresholds. The cleanup service may only write/delete inside that root. Never route web history/uploads/Chroma/assets through API retention or pressure cleanup.
+- API Checkpoints never persist complete messages, reasoning/thoughts, raw keys, raw file bytes, complete PDF text or default Trace. API public PDFs use SHA-256 dedup; private uploads use session-bound HMAC ids; exports use unique public aliases. Administrator policy lives at `/admin/api-storage`; dangerous changes require preview plus one-time confirmation.
+- API-only 2 vCPU / 4 GiB is a constrained light-use tier (no Next.js, one concurrent heavy task). The supported 3–6 mixed-user production target remains 4 vCPU / 16 GiB; always one Uvicorn worker. Install the API cleanup systemd timer from `deploy/systemd/`.
+
+### Streaming thinking and identifier boundaries
+
+- Provider-native `reasoning_content`, explicit `<thinking>...</thinking>` content, and text emitted immediately before a tool call stream into the user-visible thinking fold and are persisted in history. Preserve this raw dual-channel behavior rather than filtering names or routing details that the provider itself writes. `use_skill` remains an internal instruction-loading event: its tool start/result, tool card, and public history tool-call entry stay suppressed even though raw model thinking is not sanitized.
+- Network-paper ids and uploaded-attachment ids are separate namespaces and must remain session-scoped. Exact stable ids are authoritative. Provider tolerance is deliberately narrow: paper lookup may normalize a unique DOI alias (`doi:`/doi.org prefix and case only), and attachment lookup may accept an exact unique filename inside the current session. Unknown or ambiguous aliases must be rejected rather than guessed.
+
+### Upload and artifact invariants
+
+- Uploads persist the original `<uuid>.<ext>` plus extracted-text sidecar `<uuid>.txt`; raw bytes never enter history JSON. Upload registration performs no VLM call. PDF layout/OCR, DOCX embedded-image analysis, and standalone-image vision run lazily on deep read or modality questions, with graceful text/caption fallback. PNG/JPG/WebP preview uses the authenticated raw endpoint and a frontend Blob URL.
+- Generated `.md`, `.txt`, `.docx`, `.tex`, and portable research-map `.svg` artifacts are served only through basename-enforced `GET /files/{filename}`. Keep Unicode/long Chinese filenames working and preserve the extension/MIME whitelist. `export_manuscript` currently emits `md`, `docx`, or `tex`; the route also accepts text artifacts produced elsewhere.
+
+### Multimodal paper-understanding pipeline (PDF → RAG)
+
+`agents/reader_agent.py::parse_and_understand` is the single chokepoint shared by `deep_read` and on-demand full-text escalation (`tools_impl._ensure_fulltext`) — both follow the exact same path, so a paper escalated after a deep_read reuses cached understanding for zero VLM cost. Four stages, strict division of labor (the structure layer answers “what elements exist and where”; the VLM answers “what each element means”):
+
+- **Stage 1 — structure parse** (`tools/pdf/structure/`): `get_structure_parser()` returns the Docling backend (layout + OCR + table-structure) with automatic PyMuPDF fallback. Produces `ParsedPaperDocument` = sections **with page numbers** + a `PaperElement` inventory (figure/table/formula with bbox, `asset_path` PNG crop, `image_hash`) + `raw_text` + `is_scanned` + `doc_fingerprint` (PDF sha256). The legacy `tools/pdf/parser.py` has been removed — do not reintroduce it.
+- **Stage 1.5 — scanned-page recovery** (`core/multimodal/ocr.py::recover_scanned_pages`): when `is_scanned`, VLM-OCR the first pages Docling’s OCR couldn’t recover. This replaces the old hard `no_text` failure.
+- **Stage 2 — VLM element understanding** (`core/multimodal/analyzers.py::understand_elements`): bounded async fan-out with partial-failure tolerance (per-element try/except), figures>tables>formulas prioritization, hard caps `ELEMENTS_PER_PAPER_CAP` / `VISION_CALLS_PER_PAPER` (cache hits are free and never count against the budget), image-hash cache (`core/multimodal/cache.py` + SQLite `vision_cache`), circuit-broken under key `multimodal.vision`. Kind-specific merge: tables keep Docling TableFormer markdown (VLM backfills only when absent); formula VLM LaTeX authoritatively upgrades `docling_extract.latex`.
+- **Stage 3 — global persist**: `paper_elements` SQLite table (GLOBAL, `doc_fingerprint`-gated — a matching fingerprint hydrates stored understanding for free, with no VLM call and no re-persist) + `elements` Chroma collection (GLOBAL, **no session_id**) + light `summary.elements` refs. Session isolation is preserved at retrieval time by filtering on the caller’s paper-id set.
+- **Stage 4 — cross-modal retrieval** (`tools_impl._hybrid_retrieve`): element understanding text enters the same RRF pool as text chunks and BM25 caption passages; `_detect_modality(query)` (rule-based, zero LLM) narrows the element vector track to one kind. RRF + cross-encoder rerank are unchanged.
+
+There are **two independent LLM clients**: DeepSeek for text (`core/llm.py`) and the VLM (`core/multimodal/vision_client.py`, `MULTIMODAL_*` config) — the text pipeline is never touched by vision work. Vision is an enhancement, never a hard dependency: when `MULTIMODAL_*` is unset, the breaker is open, or a provider call fails, every path degrades to text + caption only. Vision prompts are registered as `vision.figure` / `vision.table` / `vision.formula` / `vision.ocr` in `core/multimodal/prompt_templates.py` (bump the version to invalidate the cache). The `explain_element` tool reads one element’s full detail from `paper_elements`; its `asset_url` is built by `_element_asset_url` (paper_id sanitized with `tools.pdf.fetcher._sanitize_filename_component`, matching how the parser names asset dirs).
+
+## Build, Test, and Development Commands
+
+Use the existing Miniconda environment; do not reinstall toolchains unnecessarily.
+
+```bash
+./start.sh                                          # Development backend + frontend
+./start.sh backend                                  # FastAPI on 127.0.0.1:8000
+./start.sh frontend                                 # Next.js on port 3000
+./start.sh prod                                     # Production build and services
+./.env_conda/bin/python -m pytest tests/ -q         # Default non-slow suite
+./.env_conda/bin/python -m pytest tests/test_x.py -q   # One file
+./.env_conda/bin/python -m pytest tests/ -m slow -q    # Real Docling/network (downloads models)
+cd frontend && pnpm lint                            # Frontend lint
+cd frontend && pnpm build                           # Type-check and Next.js build
+```
+
+The dev server runs with CWD `backend/`, so relative data paths (`data/metadata.db`, `data/assets/`, `history_record/`) resolve under `backend/` in dev — keep this in mind when inspecting artifacts a run produced. Slow tests are excluded by default because they may download models or use a network. Docling caches its layout/table/OCR models under `~/.cache/docling` on first use (~hundreds of MB, one-time). Run the relevant `tests/eval/` regression checks after changing prompts, dispatch descriptions, or models.
+
+## Coding Style & Change Conventions
+
+Use 4-space Python indentation, English `snake_case` identifiers, and idiomatic TypeScript/React (`camelCase` variables, `PascalCase` components). Keep comments and user-facing documentation in Chinese when matching existing project conventions. Keep imports within established module boundaries; `agents/chat_agent.py` is a compatibility facade and must not gain new orchestration logic.
+
+For a new typed tool, update all four locations: `agents/chat_tools.py` (Pydantic schema and precise trigger/non-trigger description), `agents/tools_impl.py` (implementation in `_IMPLS`, returning `ToolResult`), the relevant frontend tool label/result card in `frontend/components/chat/ChatMessage.tsx` (`TOOL_META` + a `<Name>Card` component + the `ToolCard` dispatch chain), and focused tests. Also add the tool to the system prompt (`core/prompts/system.py`) and, when its result carries a heavy payload, to the orchestrator’s large-field strip set (`agents/orchestrator.py::_STRIP`). For a new skill, add `skills/builtin/<name>/SKILL.md` with frontmatter and workflow, then add positive and boundary cases to `tests/eval/dispatch_golden.yaml`.
+
+Register prompts in `core/prompts/registry.py` with an ID and version (vision prompts live in `core/multimodal/prompt_templates.py` under the `vision.*` namespace). Use `ainvoke_utility` for auxiliary summarization/rewriting calls, set explicit LLM budgets, and strip large fields before done events where existing helpers require it. The multimodal layer and any new VLM use must remain gracefully degrading — never make the read pipeline hard-fail when vision is unavailable.
+
+## Testing Guidelines
+
+Name tests `test_<feature>.py` with functions named `test_<behavior>`. Drive async code with `asyncio.run(...)` (this project does not use pytest-asyncio). Stub external APIs and LLM/VLM/Docling calls — ordinary tests must not require credentials, live services, or downloaded models. For multimodal tests, monkeypatch `get_vision_client` / `get_structure_parser` / `recover_scanned_pages` and use in-memory or `tmp_path` databases. Run the focused test first, then the full suite. Add coverage for schema validation, guards, core pure functions, and fallback/degradation paths when adding tools or integrations.
+
+Real-browser E2E checks are manual release verification, not ordinary CI: start `./start.sh`, drive `http://127.0.0.1:3000/chat` through the real frontend with Playwright, and use the locally configured real LLM/VLM only when explicitly validating production behavior. Never print credentials or commit generated attachments, screenshots, `history_record/`, runtime `data/`, or `.next`. At minimum verify thinking privacy, one uploaded image/DOCX multimodal turn, and a long-Unicode DOCX download whose response is 200 and whose bytes start with the ZIP `PK` signature.
+
+## Security, Data, and Documentation
+
+Keep API keys only in local `.env` files; use `.env.example` placeholders. Never commit or expose `.env*`, `*.key`, or `*.pem` contents. Preserve OA-only full-text rules, per-source rate limiting, SSRF/public-URL validation, constrained filenames/file IDs, parameterized SQL, and explicit CORS allowlists. Do not put secrets in code, docs, logs, screenshots, or commits.
+
+Figure/table/formula crops and scanned-page images are sent to the third-party VLM at the `MULTIMODAL_*` endpoint for semantic understanding — the same privacy posture as sending paper text to DeepSeek, not a new risk surface. Element asset serving (`/elements/assets/...`) is basename-enforced and image-extension-only; `paper_id` is sanitized to match the on-disk asset dir. `doc_fingerprint` (PDF sha256) gates element staleness so a changed PDF re-extracts.
+
+When behavior changes, update the corresponding `README.md` feature/usage text and rewrite the relevant `docs/DESIGN.md` section. PRs should describe the behavior change, list verification commands, link an issue when applicable, and include screenshots or recordings for UI changes. Use focused imperative commit subjects; `type(scope): summary` is preferred (for example, `fix(D-065): preserve SSE event ordering`).
+
+注意最后这个项目要按照 Website_deployment_plan.md 手册在服务器上部署，如果增加了什么依赖的化记得补充到 Website_deployment_plan.md 内。
