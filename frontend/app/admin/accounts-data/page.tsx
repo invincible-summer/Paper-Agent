@@ -3,11 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  ArrowLeft,
   Database,
   HardDrive,
   Loader2,
-  RefreshCw,
   ShieldCheck,
   Trash2,
   UserRound,
@@ -22,6 +20,7 @@ import {
   listAccountStorage,
   type AccountStorageItem,
 } from "@/lib/admin-api";
+import { AdminHeader } from "@/components/admin/AdminUI";
 import { useAuthStore } from "@/stores/auth";
 
 function bytes(value: number): string {
@@ -160,28 +159,9 @@ export default function AccountsDataAdminPage() {
   return (
     <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-8">
       <div className="mx-auto max-w-6xl space-y-6">
-        <header className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <button onClick={() => router.push("/chat")}
-              className="rounded-lg border border-border-light p-2">
-              <ArrowLeft className="h-4 w-4" />
-            </button>
-            <div>
-              <h1 className="text-2xl font-bold">账号数据清理</h1>
-              <p className="text-sm text-muted">统一查看并不可恢复地清除各账号的历史、上传文件、Trace 与 API 私有数据。</p>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <button onClick={() => router.push("/admin/api-storage")}
-              className="rounded-lg border border-border-light px-3 py-2 text-sm">API 存储策略</button>
-            <button onClick={() => router.push("/admin/agent-keys")}
-              className="rounded-lg border border-border-light px-3 py-2 text-sm">Agent Keys</button>
-            <button onClick={() => void refresh()} disabled={busy !== null}
-              className="rounded-lg border border-border-light p-2">
-              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-            </button>
-          </div>
-        </header>
+        <AdminHeader title="账号数据清理" icon={<Trash2 className="h-5 w-5" />}
+          subtitle="统一查看并不可恢复地清除各账号的历史、上传文件、Trace 与 API 私有数据。"
+          current="/admin/accounts-data" onRefresh={() => void refresh()} refreshing={loading} />
 
         {error && <div className="rounded-lg border border-red-400/40 bg-red-500/10 p-3 text-sm text-red-500">{error}</div>}
         {notice && <div className="rounded-lg border border-success/40 bg-success/10 p-3 text-sm text-success">{notice}</div>}

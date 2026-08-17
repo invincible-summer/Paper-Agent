@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, ArrowLeft, Database, HelpCircle, KeyRound, Loader2, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
+import { AlertTriangle, Database, HelpCircle, Loader2, ShieldCheck, Trash2 } from "lucide-react";
 import {
   AdminApiError, executeApiStorageCleanup, executeApiStorageLegacyScan,
   getApiStorageCleanupRuns, getApiStoragePolicy, getApiStorageStatus,
   getApiStorageUsage, previewApiStorageAction, updateApiStoragePolicy,
   type ApiStoragePolicy, type StorageHelpItem,
 } from "@/lib/admin-api";
+import { AdminHeader } from "@/components/admin/AdminUI";
 import { useAuthStore } from "@/stores/auth";
 
 const PRESETS: Record<string, Partial<ApiStoragePolicy>> = {
@@ -122,10 +123,9 @@ export default function ApiStorageAdminPage() {
   const show = (key: string) => setHelpItem(help[key]);
   return <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-8">
     <div className="mx-auto max-w-6xl space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3"><button onClick={() => router.push("/chat")} className="rounded-lg border border-border-light p-2"><ArrowLeft className="h-4 w-4" /></button><div><h1 className="text-2xl font-bold">OpenAI API 存储管理</h1><p className="text-sm text-muted">仅管理清小搭 /v1 数据，不影响自制前端持久化。</p></div></div>
-        <div className="flex gap-2"><button onClick={() => router.push("/admin/accounts-data")} className="flex items-center gap-2 rounded-lg border border-border-light px-3 py-2 text-sm"><Trash2 className="h-4 w-4" />账号数据</button><button onClick={() => router.push("/admin/agent-keys")} className="flex items-center gap-2 rounded-lg border border-border-light px-3 py-2 text-sm"><KeyRound className="h-4 w-4" />Agent Keys</button><button onClick={() => void refresh()} className="rounded-lg border border-border-light p-2"><RefreshCw className="h-4 w-4" /></button></div>
-      </header>
+      <AdminHeader title="OpenAI API 存储管理" icon={<Database className="h-5 w-5" />}
+        subtitle="仅管理清小搭 /v1 数据，不影响自制前端持久化。"
+        current="/admin/api-storage" onRefresh={() => void refresh()} refreshing={loading} />
       {error && <div className="rounded-lg border border-red-400/40 bg-red-500/10 p-3 text-sm text-red-500">{error}</div>}
       <section className="grid gap-4 md:grid-cols-3">
         <div className="rounded-xl border border-border-light bg-surface p-4"><Database className="mb-2 h-5 w-5 text-accent" /><div className="text-2xl font-bold">{bytes(usage?.total_bytes ?? 0)}</div><div className="text-sm text-muted">API artifact 逻辑容量</div></div>
