@@ -88,6 +88,7 @@ conda activate ./.env_conda
 pip install -r requirements-cpu.txt
 
 # 安装受 constraints.txt 约束的已验证依赖组合；后端依赖一并装上
+# backend/pyproject.toml 会自动安装上传接口必需的 python-multipart。
 pip install -r requirements.txt -e backend
 
 # 安装前端依赖（只在第一次做）

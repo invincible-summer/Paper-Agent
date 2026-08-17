@@ -3,6 +3,8 @@
 > 读者：① 想把自研 agent 接入清小搭智能体广场的**开发者**；② 帮开发者改造 / 生成服务的 **AI coding agent**。
 > 目标：照本文实现一个服务端，即可通过接入向导的「探测」与「试聊」，被广场零代码接入。
 > 关联：OpenAI 兼容协议规范、接入探测规则、内置 mock 上游服务。
+>
+> **更新（2026-07-21）**：新增输入侧 **§5.3 音频输入**（`input_audio`）、**§5.4 文件输入**（`file`，pdf/word 等）与输出侧 **§5.5 文件产物输出**（`x_soda.attachments`，返回 PDF/PPT/Word 等）。均为可选进阶能力，不影响既有文本对话接入，预计7.31日前上线。详见 attachments 协议设计提案。
 
 ---
 
@@ -10,10 +12,12 @@
 
 把你的 agent 暴露成一个 **OpenAI 兼容的 HTTP 服务**，提供两个端点、用 Bearer 鉴权，即可接入：
 
-| 端点 | 必须 | 用途 |
-|---|---|---|
-| `POST {baseUrl}/chat/completions` | ✅ 必须 | 对话（流式 SSE + 非流式 JSON） |
-| `GET {baseUrl}/models` | 🟡 强烈建议 | 连通性 / 凭证校验（缺失可被最小对话兜底） |
+
+| 端点                                | 必须      | 用途                     |
+| --------------------------------- | ------- | ---------------------- |
+| `POST {baseUrl}/chat/completions` | ✅ 必须    | 对话（流式 SSE + 非流式 JSON）  |
+| `GET {baseUrl}/models`            | 🟡 强烈建议 | 连通性 / 凭证校验（缺失可被最小对话兜底） |
+
 
 接入向导主要填 2 个值即可：`baseUrl`（填到版本段，如 `https://your.host/v1`）、`credential`（你的密钥）。
 
@@ -62,12 +66,14 @@
 用于探测连通性与凭证是否有效。它是 OpenAI 兼容协议的常见端点，建议实现；如果暂时不实现，也可以依赖最小对话兜底。
 
 **请求**：
+
 ```
 GET {baseUrl}/models
 Authorization: Bearer <credential>
 ```
 
 **响应（200）**：
+
 ```jsonc
 {
   "object": "list",
@@ -78,6 +84,7 @@ Authorization: Bearer <credential>
 ```
 
 要点：
+
 - 凭证无效 → 返回 `401`（探测据此判 `credential` 失败）。
 - 不实现该端点也能接入：探测会继续用最小对话兜底。你的核心工作仍然是让 `/chat/completions` 可调用、可返回 OpenAI 兼容结构。
 
@@ -86,6 +93,7 @@ Authorization: Bearer <credential>
 ## 3. 端点二：`POST {baseUrl}/chat/completions`（对话）
 
 **请求体（你需要接受的字段）**：
+
 ```jsonc
 {
   "messages": [
@@ -93,9 +101,11 @@ Authorization: Bearer <credential>
     { "role": "user",    "content": "你好" }
   ],
   "stream": false,          // 或 true
-  "max_tokens": 1024        // 探测会发 max_tokens:1，需能接受
+  "max_tokens": 1024,       // 探测会发 max_tokens:1，需能接受
+  "sessionId": "c1a2b3c4d5e6"  // 同一通对话每轮相同；见 §3.3
 }
 ```
+
 - 至少支持 `role ∈ {system, user, assistant}`；`content` 为字符串。
 - 必须**严格按 JSON 布尔**解析 `stream`（不要把字符串 `"false"` 当真）。
 - `model` 可能缺失、为空或为 `null`；普通自研 agent 直接忽略即可。
@@ -117,6 +127,7 @@ Authorization: Bearer <credential>
   "usage": { "prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20 }
 }
 ```
+
 > 探测判定「OpenAI 兼容」的关键：响应里能取到 `choices[0].message.content`（非流式）或 `choices[0].delta`（流式）。
 >
 > 关于响应里的 `model` 字段：探测与网关**不强校验**，也**不会用它做路由或能力判断**。普通自研 agent 可以不返回，或返回固定值。
@@ -138,12 +149,35 @@ data: [DONE]
 ```
 
 帧序列规范：
+
 1. **role 帧**（恰好一次，首帧）：`delta:{"role":"assistant"}`
 2. **content 帧**（0..N 次）：`delta:{"content":"增量文本"}`
 3. **stop 帧**（恰好一次）：`delta:{}` + `finish_reason:"stop"`，usage 建议合并在此帧
-4. **`data: [DONE]`**（必须，终止哨兵）
+4. `**data: [DONE]**`（必须，终止哨兵）
 
 > 探测会发 `stream:true` 的最小对话：**收到任意 `data:` SSE chunk** 即判定 `streaming=true（verified）`；若你忽略 stream 返回整段 JSON，则 `streaming=false`，但只要能对话仍可接入（「能否对话」与「是否流式」解耦）。
+
+### 3.3 多轮会话：`sessionId`（建议支持）
+
+清小搭网关在转发给你的请求 body 顶层带 `sessionId`，值等于本端会话 `conv_id`。**同一通对话每一轮都是同一个值**；新对话换新值。探测 / 试聊可能不带此字段，按新会话处理即可。
+
+约定：
+
+- 用 `sessionId` 做你自己的会话记忆；**不必在响应里回传**。
+- `messages` 仍会带全量历史。你可以只认 `sessionId`，也可以继续用 `messages`。
+- 字段缺失或为空 → 当作新会话，不要沿用上一通记忆。
+
+```jsonc
+// 第 1 轮
+{ "sessionId": "c1a2b3c4d5e6", "messages": [{ "role": "user", "content": "我叫小明" }] }
+
+// 第 2 轮（同一通对话）
+{ "sessionId": "c1a2b3c4d5e6", "messages": [
+    { "role": "user", "content": "我叫小明" },
+    { "role": "assistant", "content": "已记住。" },
+    { "role": "user", "content": "我叫什么？" }
+]}
+```
 
 ---
 
@@ -153,13 +187,15 @@ data: [DONE]
 
 出口处**只允许**这 5 个值，传其它值会导致标准客户端解析失败：
 
-| 值 | 含义 |
-|---|---|
-| `stop` | 正常结束 / 命中停止序列（**异常也兜底归一为它**） |
-| `length` | 触达 token 上限 |
-| `tool_calls` | 发起工具调用 |
-| `content_filter` | 内容安全拦截 |
-| `function_call` | （已废弃，新实现不要用） |
+
+| 值                | 含义                           |
+| ---------------- | ---------------------------- |
+| `stop`           | 正常结束 / 命中停止序列（**异常也兜底归一为它**） |
+| `length`         | 触达 token 上限                  |
+| `tool_calls`     | 发起工具调用                       |
+| `content_filter` | 内容安全拦截                       |
+| `function_call`  | （已废弃，新实现不要用）                 |
+
 
 - **不存在 `error` 值**：你的服务出错时，要么在未产出内容前返回 HTTP 非 2xx，要么在流式中发一个 `finish_reason:"stop"` 的 stop 帧并附 `error` 字段（见 §5.3），绝不要把 `error` 塞进 `finish_reason`。
 
@@ -167,44 +203,161 @@ data: [DONE]
 
 统一字段：`prompt_tokens` / `completion_tokens` / `total_tokens`。无法统计时填 `0`。流式放在 stop 帧。
 
-### 4.3 角色
+### 4.3 角色（`role`）
 
-至少支持 `system` / `user` / `assistant`。不支持 `tool` 角色时可忽略（网关侧会处理）。
+请求 `messages[].role` 可能出现四种值，你的服务处理规则：
+
+
+| role        | 含义                                     | 你要做什么                                       |
+| ----------- | -------------------------------------- | ------------------------------------------- |
+| `system`    | 系统提示词                                  | **必须支持**                                    |
+| `user`      | 用户发言                                   | **必须支持**                                    |
+| `assistant` | 历史轮次里 AI 说过的话（多轮上下文）                   | **必须支持**                                    |
+| `tool`      | 工具调用的返回结果（仅当对话用了 function calling 才出现） | **可选**：你的 agent 不用工具就用不到，可以直接忽略这类消息，不影响正常对话 |
+
+
+> 说明：绝大多数 agent 只需处理前三种。`tool` 消息只有在工具调用场景才出现；如果你的服务不支持工具，收到时跳过即可——清小搭网关会按你声明的能力自动处理这类消息（不支持则丢弃并记告警），不会因此报错。
 
 ---
 
 ## 5. 进阶能力（可选，L1 / L2）
 
-不做也能接入；做了能在广场获得更好体验。
+不做也能接入；做了能在广场获得更好体验。含思考过程（§5.1）、图片输入（§5.2）、**音频输入（§5.3）**、**文件输入（§5.4，pdf/word 等）**、**文件产物输出（§5.5，如 PDF/PPT/Word）**、流式出错处理（§5.6）。
+
+> 🚧 **能力状态声明（2026-07-22）**
+> 以下能力**正在开发中，计划 2026-07-31 前上线**，届时按本文字段约定生效——你可以**提前按本文实现**你的服务，上线后即可用：
+>
+> - **§5.3 音频输入**（`input_audio`）
+> - **§5.4 文件输入**（`file`，pdf/word/excel/ppt 等）
+> - **§5.5 文件产物输出**（`x_soda.attachments`）
+>
+> 已上线可用：§5.1 思考过程、§5.2 图片输入、§5.6 流式出错处理，以及 §1–§4 的文本对话全部能力。
 
 ### 5.1 思考过程（L1 `reasoning`，建议做）
 
 把"思考中"内容放进 `delta.reasoning`，广场会渲染成"思考中"动画：
+
 ```jsonc
 data: {"id":"chatcmpl-x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning":"正在检索…"},"finish_reason":null}]}
 ```
+
 - 入口也兼容 `reasoning_content` 字段、或正文里的 `<think>…</think>` 标签。
 - 注意：reasoning **只出不入**，不要要求把它回传到下一轮 messages。
 
 ### 5.2 图片输入（vision）
 
-若支持图片，接受 OpenAI 多模态 `content` 数组：
+> 🔴 **多模态准入前提（图片/音频/文件通用，MUST）**：清小搭前端会把用户上传的文件先传到 OSS，**只把公网 URL** 通过 `image_url`/`input_audio.url`/`file.url` 传给你。**UAP 入参只承诺给 URL，不会给 base64**——平台不下载、不转 base64。因此你的服务**必须能主动 HTTP GET 拉取这些 URL 的内容**（清小搭 OSS 域名），否则多模态不可用。要点：
+>
+> - **你只会收到 URL**：按 URL 拉取即可，无需实现 base64 解码分支。
+> - URL 可能带签名有效期，**在收到请求的当次就拉取**，别缓存 URL 稍后再取（会过期）。
+> - 拉取 + 推理总耗时 **< 120 秒**（网关超时），否则本次对话判超时失败。
+> - 建议**校验域名**（只拉清小搭 OSS host）防 SSRF；不能处理的文件优雅忽略，别 500。
+
+若支持图片，接受 OpenAI 多模态 `content` 数组（`image_url.url` 为清小搭 OSS 公网 URL）：
+
 ```jsonc
 { "role":"user", "content":[
   { "type":"text", "text":"这是什么" },
-  { "type":"image_url", "image_url": { "url":"https://... | data:image/...;base64,..." } }
+  { "type":"image_url", "image_url": { "url":"https://oss.xiaoda.../pic.png" } }
 ]}
 ```
+
 > 探测不会主动发图，vision 能力默认按 `inferred` 处理（以实测为准）。
 
-### 5.3 流式中途出错
+### 5.3 音频输入（audio）🚧 开发中（计划 2026-07-31 前上线）
+
+若你的 agent 支持音频输入（转写、语音问答等），接受 `input_audio` content part（`url` 为清小搭 OSS 公网地址）：
+
+```jsonc
+{ "role":"user", "content":[
+  { "type":"text", "text":"帮我转写这段录音" },
+  { "type":"input_audio", "input_audio": { "url":"https://oss.xiaoda.../voice.mp3", "format":"mp3" } }
+]}
+```
+
+- **格式**：`wav` / `mp3` / `m4a` / `webm`，**原样透传不转码**——能否处理取决于你服务背后的模型，不支持可忽略该 part。
+- **大小**：文件走 URL，文件大小上限25M。不做时长限制。
+- **能力/探测**：与图片一致——探测不主动发音频，audio 能力按 `inferred` 处理，以实测为准。
+
+### 5.4 文件输入（file，pdf/word 等）🚧 开发中（计划 2026-07-31 前上线）
+
+若你的 agent 支持文档输入（PDF/Word/Excel/PPT/txt 等，做阅读/问答/总结），接受 `file` content part。**承载方式同图片/音频：优先 URL**：
+
+```jsonc
+{ "role":"user", "content":[
+  { "type":"text", "text":"总结这份文档" },
+  { "type":"file", "file": { "url":"https://.../doc.pdf", "filename":"doc.pdf" } }
+  // 或用平台上传接口拿到的 file_id：
+  // { "type":"file", "file": { "file_id":"...", "filename":"doc.pdf" } }
+]}
+```
+
+- **字段**：`file.url`（URL，推荐）或 `file.file_id`（二选一）+ `file.filename`。
+- **格式**：pdf / word / excel / ppt / txt / markdown 等，**原样透传不解析**——能否读取取决于你服务背后的模型/知识库能力，不支持可忽略该 part。
+- **大小**：文件走 URL，沿用平台全局上限（当前 200MB）。
+- **能力/探测**：同图片——探测不主动发文件，file 能力按 `inferred` 处理。
+
+### 5.5 文件产物输出（attachments，L2）🚧 开发中（计划 2026-07-31 前上线）
+
+当你的 agent 产出文件（PDF 调研报告、PPT、Word、Excel、图片等）要回传给用户时，用 L2 扩展字段 `x_soda.attachments` 承载。**只传文件的可下载 URL，不内嵌文件字节**——你的服务先把文件上传到可公网访问的存储拿到 URL，再把 URL 放进 attachments。
+
+**非流式**：挂在响应顶层：
+
+```jsonc
+{
+  "id": "chatcmpl-xxx", "object": "chat.completion", "created": 1735689600,
+  "choices": [{ "index":0, "message":{"role":"assistant","content":"报告已生成，请查收附件。"}, "finish_reason":"stop" }],
+  "usage": { "prompt_tokens":12, "completion_tokens":8, "total_tokens":20 },
+  "x_soda": {
+    "attachments": [
+      {
+        "fileUrl":  "https://your.host/files/report.pdf",  // 必填，可直接 GET 下载
+        "fileName": "调研报告.pdf",                          // 必填
+        "fileType": "pdf",                                 // 必填，类型枚举（见下）
+        "mimeType": "application/pdf",                     // 必填，= HTTP Content-Type
+        "fileSize": 240532                                 // 选填，字节数
+      }
+    ]
+  }
+}
+```
+
+**流式**：把 `x_soda.attachments` 挂在 **stop 帧**上（与 usage 同帧）：
+
+```jsonc
+data: {"id":"chatcmpl-x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{...},"x_soda":{"attachments":[{"fileUrl":"https://your.host/files/report.pdf","fileName":"调研报告.pdf","fileType":"pdf","mimeType":"application/pdf"}]}}
+
+data: [DONE]
+```
+
+**字段**（4 必填 + 3 选填）：
+
+
+| 字段           | 必填  | 说明                             |
+| ------------ | --- | ------------------------------ |
+| `fileUrl`    | ✅   | 可直接 GET 下载的 URL                |
+| `fileName`   | ✅   | 文件名                            |
+| `fileType`   | ✅   | 类型枚举（见下表）                      |
+| `mimeType`   | ✅   | MIME 类型（= HTTP `Content-Type`） |
+| `fileSize`   | ⬜   | 字节数                            |
+| `previewUrl` | ⬜   | 缩略图 URL                        |
+| `expiresAt`  | ⬜   | 签名 URL 过期时间（ISO8601）           |
+
+
+`**fileType` 枚举**：`image` / `audio` / `video` / `pdf` / `word` / `excel` / `ppt` / `text` / `archive` / `file`（兜底）。由 `mimeType` 推导；精确格式判断读 `mimeType`。
+
+> 兼容性：`x_soda` 是 L2 扩展字段，标准 OpenAI 客户端不认识会**安全忽略**，不影响对话主线。清小搭前端会解析它并渲染成可下载的文件卡片。不产出文件的 agent 无需关心本节。
+
+### 5.6 流式中途出错
 
 HTTP 头已发出后出错：发一个 `finish_reason:"stop"` 的 stop 帧 + `error` 字段，再 `[DONE]`：
+
 ```jsonc
 data: {"id":"chatcmpl-x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"error":{"type":"upstream_error","message":"..."}}
 
 data: [DONE]
 ```
+
 未产出任何内容就失败 → 直接返回 HTTP `5xx`，不要发半截 SSE。
 
 ---
@@ -213,11 +366,13 @@ data: [DONE]
 
 接入向导的 `authType` 决定网关如何带凭证，你的服务按其一校验即可：
 
-| authType | 网关发送的请求头 | 你的服务校验 |
-|---|---|---|
+
+| authType        | 网关发送的请求头                             | 你的服务校验         |
+| --------------- | ------------------------------------ | -------------- |
 | `bearer`（默认，推荐） | `Authorization: Bearer <credential>` | 取 Bearer token |
-| `x-api-key` | `x-api-key: <credential>` | 取该头 |
-| `custom-header` | `<你指定的头名>: <credential>` | 取该头 |
+| `x-api-key`     | `x-api-key: <credential>`            | 取该头            |
+| `custom-header` | `<你指定的头名>: <credential>`             | 取该头            |
+
 
 无效凭证一律返回 `401`。
 
@@ -229,14 +384,16 @@ data: [DONE]
 
 ### 7.1 探测的 4 项检查（你的服务要让它们全绿）
 
-| # | 检查 | 你的服务要满足 | 是否决定放行 |
-|---|---|---|---|
-| 1 | connectivity | `GET {baseUrl}/models` 能返回**任意 HTTP 响应**（别让它 DNS 失败 / 连接超时） | ✅ 是 |
-| 2 | credential | 凭证有效时**非 401/403** | ✅ 是 |
-| 3 | minimalChat | `POST /chat/completions`（`stream:true, max_tokens:1`）返回 **2xx 且响应可解析为 OpenAI 结构** | ✅ 是 |
-| 4 | responseFormat | 响应含 `choices[].delta`（流式优先）或 `choices[].message` | ⬜ 否（仅提示） |
 
-放行公式：**`connected = connectivity && credential && minimalChat`**。
+| #   | 检查             | 你的服务要满足                                                                           | 是否决定放行   |
+| --- | -------------- | --------------------------------------------------------------------------------- | -------- |
+| 1   | connectivity   | `GET {baseUrl}/models` 能返回**任意 HTTP 响应**（别让它 DNS 失败 / 连接超时）                       | ✅ 是      |
+| 2   | credential     | 凭证有效时**非 401/403**                                                                | ✅ 是      |
+| 3   | minimalChat    | `POST /chat/completions`（`stream:true, max_tokens:1`）返回 **2xx 且响应可解析为 OpenAI 结构** | ✅ 是      |
+| 4   | responseFormat | 响应含 `choices[].delta`（流式优先）或 `choices[].message`                                  | ⬜ 否（仅提示） |
+
+
+放行公式：`**connected = connectivity && credential && minimalChat**`。
 能力判定：`streaming` 实测（收到 SSE chunk = verified）；`vision`/`tools` 推断（inferred，以实测为准）。
 
 ### 7.2 试聊（第 2 步可选）
@@ -251,12 +408,14 @@ data: [DONE]
 
 第 1 步「平台信息」里有一块**高级配置（选填）**，默认值适用于绝大多数 OpenAI 兼容服务，多数情况下**不用动**。各项与你服务的对应关系如下：
 
-| 高级配置项 | 默认值 | 对应你的服务 | 说明 |
-|---|---|---|---|
-| 鉴权方式 | Bearer Token | §6 的校验逻辑 | 决定网关带凭证的请求头：`bearer` / `x-api-key` / `custom-header` |
-| 流式终止符 | `[DONE]` | 你的 SSE 结束哨兵 | 默认 `data: [DONE]`；若你的服务用别的终止符，在此声明，网关据此判定流结束 |
-| usage 位置 | stop 帧内 | 你把 `usage` 放哪 | 默认按「合并在 stop 帧」解析；建议你就放 stop 帧（见 §3.2 / §4.2），可省心 |
-| 能力声明 | 流式 / 视觉 / 工具 | 你支持哪些能力 | 仅用于展示与默认值；**最终以第 2 步探测/实测为准**，声明与实测不符时以实测覆盖 |
+
+| 高级配置项    | 默认值          | 对应你的服务        | 说明                                                   |
+| -------- | ------------ | ------------- | ---------------------------------------------------- |
+| 鉴权方式     | Bearer Token | §6 的校验逻辑      | 决定网关带凭证的请求头：`bearer` / `x-api-key` / `custom-header` |
+| 流式终止符    | `[DONE]`     | 你的 SSE 结束哨兵   | 默认 `data: [DONE]`；若你的服务用别的终止符，在此声明，网关据此判定流结束         |
+| usage 位置 | stop 帧内      | 你把 `usage` 放哪 | 默认按「合并在 stop 帧」解析；建议你就放 stop 帧（见 §3.2 / §4.2），可省心    |
+| 能力声明     | 流式 / 视觉 / 工具 | 你支持哪些能力       | 仅用于展示与默认值；**最终以第 2 步探测/实测为准**，声明与实测不符时以实测覆盖          |
+
 
 > 说明：「标准协议接入」在后端统一按 **OpenAI 兼容端点** 处理。把服务做成本指南描述的 OpenAI 兼容形态即可，无需任何额外的协议声明。
 
@@ -285,12 +444,15 @@ curl -N -X POST "$BASE/chat/completions" \
 ```
 
 自测清单：
+
 - [ ] `GET /models` 返回 200；错误凭证返回 401
 - [ ] 非流式响应含 `choices[0].message.content` 与 `usage`
 - [ ] 流式：首帧 role、中间 content 增量、stop 帧 `finish_reason:"stop"`、结尾 `data: [DONE]`
 - [ ] `finish_reason` 只用 5 个白名单值
 - [ ] `stream` 严格按布尔解析
+
 - [ ]（可选）`delta.reasoning` 思考过程
+- [ ]（可选）按 `sessionId` 续同一通对话记忆，响应不必回传该字段
 
 ---
 
@@ -300,14 +462,17 @@ curl -N -X POST "$BASE/chat/completions" \
 
 ### 9.1 第 1 步「平台信息」怎么填
 
-| 字段 | 示例值 |
-|---|---|
-| 智能体平台 | 标准协议接入 |
+
+| 字段     | 示例值                                      |
+| ------ | ---------------------------------------- |
+| 智能体平台  | 标准协议接入                                   |
 | API 地址 | `http://<admin_host>:8088/mock/agent/v1` |
-| API 密钥 | 任意非空字符串，如 `sk-mock-123` |
-| 鉴权方式 | Bearer Token |
+| API 密钥 | 任意非空字符串，如 `sk-mock-123`                  |
+| 鉴权方式   | Bearer Token                             |
+
 
 提交到第 2 步后，正常场景应看到：
+
 - 连通性检测、凭证校验、发起最小对话、校验响应格式均为通过。
 - 能力标签里「流式输出」为通过。
 - 试聊框可以发送「你好」，mock 会返回类似 `你说了：「你好」。我是 mock 智能体，这是模拟回复。`
@@ -316,14 +481,16 @@ curl -N -X POST "$BASE/chat/completions" \
 
 需要验证失败态时，在 API 地址后加 `?scene=<名字>`：
 
-| API 地址后缀 | 表现 | 用途 |
-|---|---|---|
-| 不加 | 4 项全绿，支持流式 | 正常接入 |
-| `?scene=noauth` | 凭证校验红叉 | 验证密钥错误提示 |
+
+| API 地址后缀          | 表现                           | 用途                  |
+| ----------------- | ---------------------------- | ------------------- |
+| 不加                | 4 项全绿，支持流式                   | 正常接入                |
+| `?scene=noauth`   | 凭证校验红叉                       | 验证密钥错误提示            |
 | `?scene=nomodels` | `/models` 返回 404，但可继续用最小对话兜底 | 验证未实现 `/models` 的场景 |
-| `?scene=nostream` | 流式能力不通过，返回整段 JSON | 验证非流式服务体验 |
-| `?scene=garbage` | 响应格式校验红叉 | 验证非 OpenAI 响应结构 |
-| `?scene=error` | 最小对话红叉 | 验证上游服务错误 |
+| `?scene=nostream` | 流式能力不通过，返回整段 JSON            | 验证非流式服务体验           |
+| `?scene=garbage`  | 响应格式校验红叉                     | 验证非 OpenAI 响应结构     |
+| `?scene=error`    | 最小对话红叉                       | 验证上游服务错误            |
+
 
 > mock 服务仅用于联调，生产环境不要开启。
 
@@ -359,6 +526,7 @@ async def chat(request: Request, authorization: str | None = Header(None)):
     check_auth(authorization)
     body = await request.json()
     stream = bool(body.get("stream", False))          # 严格布尔
+    session_id = body.get("sessionId")                # 同一通对话每轮相同；可按它续记忆
     user_msg = next((m["content"] for m in reversed(body.get("messages", []))
                      if m.get("role") == "user"), "")
     answer = f"你说了：「{user_msg}」"                  # 换成你的真实推理
@@ -398,30 +566,34 @@ async def chat(request: Request, authorization: str | None = Header(None)):
 
 ## 11. 常见探测失败与排查
 
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| 连通性红叉 | DNS / 连接失败 / 超时（>5s） | 检查 baseUrl 可公网访问、版本段是否填到 `/v1`、5s 内响应 |
-| 凭证红叉（401/403） | 鉴权头取错、authType 不匹配 | 对齐 §6；确认凭证正确 |
-| 最小对话红叉 | `/chat/completions` 非 2xx，或响应取不到 `choices[].delta/message` | 对齐 §3 响应结构；能接受 `max_tokens:1` |
-| 格式校验红叉 | 响应不是 OpenAI 结构（缺 `choices`） | 按 §3.1/§3.2 输出 |
-| 流式能力✗ | 忽略了 `stream:true`，返回整段 JSON | 实现 §3.2 SSE；不做也能接入但无流式体验 |
-| 整体超时 | 单项 >5s 或整体 >15s | 优化响应延迟 |
+
+| 现象            | 原因                                                         | 处理                                    |
+| ------------- | ---------------------------------------------------------- | ------------------------------------- |
+| 连通性红叉         | DNS / 连接失败 / 超时（>5s）                                       | 检查 baseUrl 可公网访问、版本段是否填到 `/v1`、5s 内响应 |
+| 凭证红叉（401/403） | 鉴权头取错、authType 不匹配                                         | 对齐 §6；确认凭证正确                          |
+| 最小对话红叉        | `/chat/completions` 非 2xx，或响应取不到 `choices[].delta/message` | 对齐 §3 响应结构；能接受 `max_tokens:1`         |
+| 格式校验红叉        | 响应不是 OpenAI 结构（缺 `choices`）                                | 按 §3.1/§3.2 输出                        |
+| 流式能力✗         | 忽略了 `stream:true`，返回整段 JSON                                | 实现 §3.2 SSE；不做也能接入但无流式体验              |
+| 整体超时          | 单项 >5s 或整体 >15s                                            | 优化响应延迟                                |
+
 
 ---
 
-## 附：与协议规范的对应
+## 附1：与协议规范的对应
 
-| 本指南 | compat-protocol-spec.md |
-|---|---|
-| §1 最小契约 / §3 端点 | §2 端点总览、§5 请求 Schema、§6 响应 Schema |
-| §3.2 流式帧 | §7 流式 Schema |
-| §4.1 finish_reason | §6.1 |
-| §4.2 usage | §6.2 / §7.4 |
-| §5 进阶 L1/L2 | §8 扩展通道 |
-| §6 鉴权 | §3 鉴权、§4.3.2 compat profile auth |
-| §7 探测标准 | 接入探测接口设计 §5 |
 
-# 清小搭多模态附件 · 对端接口文档
+| 本指南                     | compat-protocol-spec.md                                                                     |
+| ----------------------- | ------------------------------------------------------------------------------------------- |
+| §1 最小契约 / §3 端点         | §2 端点总览、§5 请求 Schema、§6 响应 Schema                                                           |
+| §3.2 流式帧                | §7 流式 Schema                                                                                |
+| §4.1 finish_reason      | §6.1                                                                                        |
+| §4.2 usage              | §6.2 / §7.4                                                                                 |
+| §5 进阶 L1/L2             | §8 扩展通道                                                                                     |
+| §5.3 音频输入 / §5.4 文件产物输出 | attachments 协议设计提案（`docs/openclaw/2026-07-21-attachments-protocol-proposal.md`）§4 / §5 / §7 |
+| §6 鉴权                   | §3 鉴权、§4.3.2 compat profile auth                                                            |
+| §7 探测标准                 | 接入探测接口设计 §5                                                                                 |
+
+## 附2: 清小搭多模态附件 · 对端接口文档
 
 > 版本：v1.0（2026-07-21）
 > 读者：对接清小搭的 **agent 服务开发者 / 平台对接方**。
@@ -612,3 +784,4 @@ data: [DONE]
 **文件输入**：`file.url`（或 `file.file_id`）+ `filename`
 
 **铁律**：入参出参都只用 URL，不用 base64。
+

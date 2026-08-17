@@ -832,7 +832,7 @@ sudo -H -u paper-agent .venv/bin/pip install -r requirements-cpu.txt
 # requirements.txt 会加载 constraints.txt，固定仓库已验证的版本组合，
 # 避免 LangChain/LangSmith 在首次安装时大范围依赖回溯。
 sudo -H -u paper-agent .venv/bin/pip install -r requirements.txt -e backend
-sudo -u paper-agent bash -lc 'cd /opt/paper-agent/frontend && pnpm install --frozen-lockfile'
+sudo -H -u paper-agent env HOME=/var/lib/paper-agent bash -c 'cd /opt/paper-agent/frontend && /usr/local/bin/pnpm install --frozen-lockfile'
 ```
 
 安装后必须确认使用 CPU 轮子且依赖一致：
@@ -848,7 +848,9 @@ PY
 sudo -H -u paper-agent .venv/bin/python -m pip check
 ```
 
-预期 `torch.__version__` 含 `+cpu`、`torch.version.cuda` 为 `None`，且 `pip check` 输出 `No broken requirements found.`。如果 pip 长时间连续枚举数十个 `langsmith` / `langchain-openai` 版本，立即 `Ctrl+C`；这表示没有使用当前仓库的 `constraints.txt`，不要继续等待。
+预期 `torch.__version__` 含 `+cpu`、`torch.version.cuda` 为 `None`，且 `pip check` 输出 `No broken requirements found.`。后端上传路由使用 FastAPI `File` / `UploadFile`，因此 `backend/pyproject.toml` 明确依赖 `python-multipart`，并由 `constraints.txt` 固定版本；服务日志若出现 `Form data requires "python-multipart"`，说明服务器代码或依赖尚未同步完整，不应把该包当作手工维护的服务器特例。
+
+如果 pip 长时间连续枚举数十个 `langsmith` / `langchain-openai` 版本，立即 `Ctrl+C`；这表示没有使用当前仓库的 `constraints.txt`，不要继续等待。
 
 如果安装曾在解析阶段中断，下载的是可安全删除的 pip 缓存，不是已安装的多份包。可在重新安装前执行：
 
@@ -895,7 +897,8 @@ sudo chmod 700 /opt/paper-agent/data /opt/paper-agent/history_record
 
 ```bash
 cd /opt/paper-agent
-sudo -u paper-agent env \
+sudo -H -u paper-agent env \
+  HOME=/var/lib/paper-agent \
   XDG_CACHE_HOME=/var/lib/paper-agent/cache \
   HF_ENDPOINT=https://hf-mirror.com \
   .venv/bin/python - <<'PY'
@@ -933,18 +936,18 @@ APP_ENV=production
 APP_DEBUG=false
 APP_HOST=127.0.0.1
 APP_PORT=8000
-PUBLIC_BASE_URL=https://paper-agent.example.com
+PUBLIC_BASE_URL=https://paper-agent.ycr10.cn
 
-DEEPSEEK_API_KEY=<填写文本模型服务商密钥>
+DEEPSEEK_API_KEY=<填写 DeepSeek 官方 API Key>
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL_LIGHT=<填写实际可用模型名>
-DEEPSEEK_MODEL_REASONING=<填写实际可用模型名>
+DEEPSEEK_MODEL_LIGHT=deepseek-v4-flash
+DEEPSEEK_MODEL_REASONING=deepseek-v4-flash
 
 # 自有前端生产策略：要求账号登录、关闭公开注册、禁止游客。
 AUTH_REQUIRED=true
 REGISTRATION_OPEN=false
 GUEST_ACCESS=false
-FRONTEND_ORIGIN=https://paper-agent.example.com
+FRONTEND_ORIGIN=https://paper-agent.ycr10.cn
 CORS_ORIGINS=
 
 # 模型已按 §4.1 预热后再开启。
@@ -963,7 +966,8 @@ OPENAI_API_POLICY_PRESET=balanced
 
 说明：
 
-- 主路线将 `PUBLIC_BASE_URL` 和 `FRONTEND_ORIGIN` 都改为实际授权子域名 HTTPS Origin，不带 `/v1`。示例中的 `paper-agent.example.com` 必须替换。若回退 API网关，则仅将 `PUBLIC_BASE_URL` 临时改为网关默认 Origin；临时网关不暴露自有前端。
+- 当前主路线将 `PUBLIC_BASE_URL` 和 `FRONTEND_ORIGIN` 都设为 `https://paper-agent.ycr10.cn`，不带 `/v1`、端口或末尾路径。若回退 API网关，则仅将 `PUBLIC_BASE_URL` 临时改为网关默认 Origin；临时网关不暴露自有前端。
+- DeepSeek 官方当前使用 `deepseek-v4-flash` / `deepseek-v4-pro`；本项目 1–3 人部署先统一使用 `deepseek-v4-flash`，工具调用与思考开关由代码按调用类型控制。旧别名 `deepseek-chat` / `deepseek-reasoner` 已于 2026-07-24 退役，不要再写入新部署。
 - `DEEPSEEK_*`/`MULTIMODAL_*` 是模型服务商密钥；**Agent API Key 不是模型密钥**。
 - `AGENT_API_KEY` 仍可作为迁移/应急凭证，但正式部署推荐由管理员生成数据库密钥；生产环境没有任何可用 Agent Key 时 `/v1` 返回 503，错误或已撤销密钥返回 401。
 - `.env`、`*.key`、`*.pem` 不得提交、截图、复制到工单或日志中；仓库只保留无真实值的 `.env.example`。
@@ -1078,23 +1082,56 @@ unset KEY
 
 ### 6.4 从授权子域名公网 HTTPS验证 Key
 
-完成 §9 的 DNS、证书和 Nginx后，在自己的电脑执行：
+完成 §9 的 DNS、证书和 Nginx后，在自己的电脑执行。Windows PowerShell 不支持 Bash 的 `read -rsp`，按下面方式隐藏输入并且只把变量名写入命令历史：
 
-```bash
-read -rsp '粘贴 pa_live_ Agent API Key: ' KEY; echo
-BASE='https://paper-agent.example.com/v1'
+```powershell
+$SecureKey = Read-Host '粘贴 pa_live_ Agent API Key' -AsSecureString
+$BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureKey)
+$KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
+$BASE = 'https://paper-agent.ycr10.cn/v1'
 
-curl -i "$BASE/models" -H "Authorization: Bearer $KEY"
+curl.exe -i "$BASE/models" -H "Authorization: Bearer $KEY"
 
-curl -N -X POST "$BASE/chat/completions" \
-  -H "Authorization: Bearer $KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"stream":true,"max_tokens":32,"messages":[{"role":"user","content":"你好"}]}'
+# Windows PowerShell 5.1 容易在把内联 JSON 传给原生 curl.exe 时破坏引号；
+# 使用无 BOM 的 UTF-8 临时文件最稳妥，也避免长命令在引号中间被终端换行。
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$JsonFile = Join-Path $env:TEMP 'paper-agent-request.json'
 
-unset KEY
+$Body = @{
+  messages = @(@{ role = 'user'; content = '只回复：非流式成功' })
+} | ConvertTo-Json -Depth 5 -Compress
+[System.IO.File]::WriteAllText($JsonFile, $Body, $Utf8NoBom)
+
+curl.exe -sS -X POST "$BASE/chat/completions" `
+  -H "Authorization: Bearer $KEY" `
+  -H "Content-Type: application/json" `
+  --data-binary "@$JsonFile"
+
+$Body = @{
+  stream = $true
+  max_tokens = 64
+  messages = @(@{ role = 'user'; content = '你好' })
+} | ConvertTo-Json -Depth 5 -Compress
+[System.IO.File]::WriteAllText($JsonFile, $Body, $Utf8NoBom)
+
+curl.exe -N -X POST "$BASE/chat/completions" `
+  -H "Authorization: Bearer $KEY" `
+  -H "Content-Type: application/json" `
+  --data-binary "@$JsonFile"
+
+Remove-Item $JsonFile -ErrorAction SilentlyContinue
+[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+Remove-Variable KEY,SecureKey,BSTR,Body,JsonFile,Utf8NoBom
 ```
 
-将示例域名替换成实际二级域名。只有公网 HTTPS、错误 Key 401、SSE逐帧和 `[DONE]` 都通过后，才填写清小搭。若父域名接入备案、DNS或证书仍未完成，按 §9.10 使用 API网关回退。
+再使用无敏感信息的错误 Key 验证鉴权边界：
+
+```powershell
+curl.exe -i "$BASE/models" -H "Authorization: Bearer invalid_test_key"
+Remove-Variable BASE
+```
+
+正确 Key 的 `/models` 必须返回200；错误 Key必须返回401；非流式请求必须返回合法 JSON；SSE必须逐帧输出，包含一个 `finish_reason` 为 `stop` 且带 `usage` 的结束帧，最后输出 `[DONE]`。如果服务返回 `Invalid JSON request body`，但 `/models` 的200/401均正确，通常是 Windows PowerShell 把内联 JSON 或 `Content-Type` 引号拆坏，改用上面的无 BOM UTF-8临时文件，不要修改后端。全部通过后才填写清小搭。若父域名接入备案、DNS或证书仍未完成，按 §9.10 使用 API网关回退。
 
 ### 6.5 可选：从自有前端管理 Key
 
@@ -1183,9 +1220,18 @@ unit 使用 `UMask=0077`、低 CPU/IO 优先级、`ProtectSystem=strict`，唯�
 管理员页面 `/admin/api-storage` 可查看容量、磁盘状态、清理记录和策略；危险修改、立即清理、紧急删除与遗留扫描必须预览并二次确认。命令行仅用于维护窗口：
 
 ```bash
-sudo -u paper-agent /opt/paper-agent/.venv/bin/python   /opt/paper-agent/scripts/cleanup_openai_api_storage.py --preview
-# 将上一步一次性 token 原样传回；token 10 分钟过期且只能使用一次。
-sudo -u paper-agent /opt/paper-agent/.venv/bin/python   /opt/paper-agent/scripts/cleanup_openai_api_storage.py --execute-token '<token>'
+sudo -u paper-agent /opt/paper-agent/.venv/bin/python \
+  /opt/paper-agent/scripts/cleanup_openai_api_storage.py --preview
+```
+
+先审阅 `preview.actions` 和回收统计：如果 `actions` 为空、`reclaimed_bytes` 为 `0`，立即停止，不需要执行确认步骤。只有确实需要执行预览中的清理动作时，才在 10 分钟内通过隐藏输入粘贴上一步输出的**实际** token；不要把字面量 `<token>` 当成参数，也不要把 token 发到聊天、截图或命令历史：
+
+```bash
+read -rsp '粘贴刚生成的 cleanup preview token: ' CLEANUP_TOKEN; echo
+sudo -u paper-agent /opt/paper-agent/.venv/bin/python \
+  /opt/paper-agent/scripts/cleanup_openai_api_storage.py \
+  --execute-token "$CLEANUP_TOKEN"
+unset CLEANUP_TOKEN
 ```
 
 ## 8. 可选 Next.js 前端服务
@@ -1196,10 +1242,11 @@ sudo -u paper-agent /opt/paper-agent/.venv/bin/python   /opt/paper-agent/scripts
 
 ```bash
 cd /opt/paper-agent/frontend
-sudo -u paper-agent env \
+sudo -H -u paper-agent env \
+  HOME=/var/lib/paper-agent \
   BACKEND_URL=http://127.0.0.1:8000 \
-  NEXT_PUBLIC_BACKEND_URL=https://paper-agent.example.com \
-  pnpm build
+  NEXT_PUBLIC_BACKEND_URL=https://paper-agent.ycr10.cn \
+  /usr/local/bin/pnpm build
 ```
 
 ### 8.1 可选自有前端 systemd
@@ -1219,9 +1266,9 @@ Group=paper-agent
 WorkingDirectory=/opt/paper-agent/frontend
 Environment=NODE_ENV=production
 Environment=PORT=3000
-Environment=HOSTNAME=127.0.0.1
+Environment=HOME=/var/lib/paper-agent
 Environment=BACKEND_URL=http://127.0.0.1:8000
-ExecStart=/usr/local/bin/pnpm start
+ExecStart=/usr/local/bin/pnpm exec next start -H 127.0.0.1 -p 3000
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -1234,12 +1281,35 @@ ReadWritePaths=/opt/paper-agent/frontend/.next /var/lib/paper-agent
 WantedBy=multi-user.target
 ```
 
-若 §3 的 `command -v pnpm` 不是 `/usr/local/bin/pnpm`，必须用实际绝对路径替换 `ExecStart`；不要依赖 systemd 的交互式 shell PATH。启动：
+若 §3 的 `command -v pnpm` 不是 `/usr/local/bin/pnpm`，必须用实际绝对路径替换 `ExecStart`；不要依赖 systemd 的交互式 shell PATH。`Environment=HOSTNAME=127.0.0.1` 不能可靠约束 `next start`，必须在命令行显式使用 `-H 127.0.0.1`。不要把 `ExecStart` 写成 `/usr/local/bin/pnpm start`：仓库旧版 `start` 脚本只执行 `next start -p 3000`，会监听 `*:3000`。
+
+保存后先核对文件实际内容：
+
+```bash
+sudo grep -nE 'ExecStart|HOSTNAME' /etc/systemd/system/paper-agent-web.service
+```
+
+预期只出现：
+
+```text
+ExecStart=/usr/local/bin/pnpm exec next start -H 127.0.0.1 -p 3000
+```
+
+启动或修改后重新加载：
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now paper-agent-web
+sleep 3
+sudo systemctl status paper-agent-web --no-pager
+sudo systemctl show paper-agent-web -p ExecStart
+sudo ss -ltnp | grep ':3000'
+curl -I http://127.0.0.1:3000
 ```
+
+通过标准：服务为 `active (running)`；`systemctl show` 的实际 `ExecStart` 含 `-H 127.0.0.1 -p 3000`；`ss` 明确显示 `127.0.0.1:3000`。如果仍显示 `*:3000`、`0.0.0.0:3000` 或 `[::]:3000`，说明 systemd 仍加载旧命令：执行 `systemctl cat paper-agent-web` 检查来源，修正后再次 `daemon-reload` 和 `restart`。3000 端口始终不得加入公网安全组。
+
+`systemd-analyze verify` 若只报告 `/lib/systemd/system/snapd.service` 的 `Unknown key name 'RestartMode'`，这是 Ubuntu/阿里云镜像中 snapd unit 与当前 systemd 版本的兼容提示，不是 `paper-agent-web.service` 错误；仍以本 unit 状态、实际 `ExecStart` 和监听地址为准。
 
 ---
 
@@ -1299,8 +1369,8 @@ server {
     }
 
     location / {
+        default_type text/plain;
         return 200 'Paper Agent HTTPS bootstrap\n';
-        add_header Content-Type text/plain;
     }
 }
 ```
@@ -1350,6 +1420,54 @@ sudo systemctl status certbot.timer --no-pager
 sudo certbot renew --dry-run
 ```
 
+`renew --dry-run` 使用 Let's Encrypt 测试环境模拟续期；失败不会删除、替换或吊销当前正式证书。若报 `Timeout during connect (likely firewall problem)`，不要连续重试，按顺序检查：
+
+```bash
+# 证书仍然存在且查看当前有效期（不输出私钥）
+sudo certbot certificates
+sudo openssl x509 -in /etc/letsencrypt/live/paper-agent.ycr10.cn/fullchain.pem \
+  -noout -subject -issuer -dates
+
+# nginx 是否对公网监听80/443；后端端口仍应只在回环地址
+sudo ss -ltnp | grep -E ':80|:443|:3000|:8000'
+sudo nginx -t
+sudo systemctl status nginx --no-pager
+sudo ufw status verbose
+```
+
+HTTP-01 会从多个、会变化的验证地址访问 TCP 80，不能只允许管理员 IP，也不能试图维护 Let’s Encrypt 出口 IP 白名单。阿里云安全组必须为 `80/TCP` 和 `443/TCP` 设置来源 `0.0.0.0/0`；22仍只允许管理员 `/32`，3000/8000不开放。若 UFW 已启用，也必须允许80/443。
+
+在 ACME Web 根创建无敏感内容的探测文件。下面两条命令必须在 **ECS SSH终端**执行；这里的 `127.0.0.1` 指ECS自身：
+
+```bash
+sudo mkdir -p /var/www/paper-agent-acme/.well-known/acme-challenge
+echo 'acme-probe-ok' | sudo tee \
+  /var/www/paper-agent-acme/.well-known/acme-challenge/probe >/dev/null
+curl -i http://127.0.0.1/.well-known/acme-challenge/probe \
+  -H 'Host: paper-agent.ycr10.cn'
+```
+
+再从自己的 **Windows PowerShell** 执行公网测试。必须写 `curl.exe`，避免 Windows PowerShell 5.1 把 `curl` 解析成 `Invoke-WebRequest`；也不要在自己电脑使用 `127.0.0.1`，那会访问自己的电脑而非ECS：
+
+```powershell
+curl.exe -i http://paper-agent.ycr10.cn/.well-known/acme-challenge/probe
+```
+
+如需绕过本机DNS缓存并强制测试当前ECS公网IP，同时保持正确 Host，可执行：
+
+```powershell
+curl.exe -i --resolve paper-agent.ycr10.cn:80:123.57.6.126 http://paper-agent.ycr10.cn/.well-known/acme-challenge/probe
+```
+
+必须直接返回 `200` 和 `acme-probe-ok`。如果挑战路径返回 `301`，说明当前启用的80端口 `server` 块仍在 server 级执行全局 `return 301`，或没有包含挑战 location；不要依赖重定向掩盖配置错误。将80端口块改为 `location ^~ /.well-known/acme-challenge/` 直接提供文件，并只在 `location /` 内执行 HTTPS 跳转。外部探测通过后删除测试文件，再只重试一次：
+
+```bash
+sudo rm -f /var/www/paper-agent-acme/.well-known/acme-challenge/probe
+sudo certbot renew --dry-run
+```
+
+如果自己的电脑可访问而 dry-run仍连接超时，优先检查阿里云安全组是否把80错误限制为个人IP、是否存在云防火墙/WAF/CDN地域限制；HTTP-01要求验证节点能从不同地区访问。无法满足全球80入口时，改用由域名所有者配合的 DNS-01，不要关闭证书续期告警后放任证书过期。
+
 #### 方法 B：域名所有者提供证书
 
 如果域名所有者提供单域名/通配符证书：
@@ -1377,7 +1495,18 @@ map $http_upgrade $connection_upgrade {
 server {
     listen 80;
     server_name paper-agent.example.com;
-    return 301 https://$host$request_uri;
+
+    # HTTP-01 必须直接从80端口取到挑战文件；不要把 return 写在 server 级，
+    # 否则该 return 会先于 location 选择执行，使挑战路径也被重定向。
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/paper-agent-acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 
 server {
@@ -1492,10 +1621,11 @@ Next.js的 `NEXT_PUBLIC_BACKEND_URL` 在构建时注入，换域名后必须重�
 
 ```bash
 cd /opt/paper-agent/frontend
-sudo -u paper-agent env \
+sudo -H -u paper-agent env \
+  HOME=/var/lib/paper-agent \
   BACKEND_URL=http://127.0.0.1:8000 \
-  NEXT_PUBLIC_BACKEND_URL=https://paper-agent.example.com \
-  pnpm build
+  NEXT_PUBLIC_BACKEND_URL=https://paper-agent.ycr10.cn \
+  /usr/local/bin/pnpm build
 sudo systemctl restart paper-agent-web
 ```
 
@@ -1503,14 +1633,19 @@ sudo systemctl restart paper-agent-web
 
 ### 9.7 验证 DNS、证书和 HTTPS
 
-从自己的电脑执行：
+从自己的电脑执行。Windows PowerShell 必须使用 `curl.exe`，不要使用会被解析为 `Invoke-WebRequest` 的 `curl` 别名：
+
+```powershell
+curl.exe -I http://paper-agent.ycr10.cn/
+curl.exe -i https://paper-agent.ycr10.cn/health
+curl.exe -I https://paper-agent.ycr10.cn/chat
+```
+
+证书详细信息可在 ECS 执行：
 
 ```bash
-DOMAIN='paper-agent.example.com'
-
-curl -I "http://$DOMAIN/"
-curl -I "https://$DOMAIN/health"
-openssl s_client -connect "$DOMAIN:443" -servername "$DOMAIN" </dev/null 2>/dev/null \
+openssl s_client -connect paper-agent.ycr10.cn:443 \
+  -servername paper-agent.ycr10.cn </dev/null 2>/dev/null \
   | openssl x509 -noout -subject -issuer -dates
 ```
 
@@ -1524,9 +1659,11 @@ openssl s_client -connect "$DOMAIN:443" -servername "$DOMAIN" </dev/null 2>/dev/
 
 ### 9.8 验证清小搭 OpenAI兼容接口
 
+Windows客户端按 §6.4 的 PowerShell命令完成正式公网验收；下面是 Linux/macOS客户端的等价命令：
+
 ```bash
 read -rsp 'Agent API Key: ' KEY; echo
-BASE='https://paper-agent.example.com/v1'
+BASE='https://paper-agent.ycr10.cn/v1'
 
 curl -i "$BASE/models" -H "Authorization: Bearer $KEY"
 
@@ -1564,6 +1701,15 @@ for round in 1 2 3; do
   sleep 10
 done
 ```
+
+结果判定：
+
+- `200`：该来源从当前 ECS 公网出口稳定可用；
+- `401/403`：网络可达，但凭证或来源权限不满足；
+- `429`：网络可达，不是“外网被阻断”，而是该来源正在限流；
+- `000`、DNS失败或持续连接超时：才按网络不可达排查。
+
+Semantic Scholar 未认证请求共享公共额度，繁忙时可能连续 `429`。优先申请 API Key 并仅写入生产 `.env` 的 `S2_API_KEY`；Key 不得进入命令历史、文档或 Git。官方当前为新 Key 提供的起始额度为 1 req/s，本项目的每源限流和 429 重试仍须保留。如果演示前仍无 Key 且三轮都为 `429`，不要把 Semantic Scholar 作为关键依赖；OpenAlex、arXiv、Crossref 等稳定来源继续工作，搜索管理器会保留部分结果并降级。
 
 只将多轮稳定来源作为比赛/演示依赖；单个来源失败时保留多源降级和摘要回退。不要通过校园VPN、代理或订阅账号自动拉取付费全文。
 
@@ -1842,7 +1988,7 @@ unset KEY
 
 ```text
 平台：标准协议接入
-API地址：https://paper-agent.example.com/v1
+API地址：https://paper-agent.ycr10.cn/v1
 API密钥：pa_live_...
 鉴权方式：Bearer Token
 流式终止符：[DONE]
@@ -1851,7 +1997,7 @@ usage位置：stop帧内
 模型字段：留空或 paper-agent
 ```
 
-API地址只到 `/v1`，不要填 `/v1/chat/completions`。替换成实际授权子域名。
+API地址只到 `/v1`，不要填 `/v1/chat/completions`；当前正式地址固定为 `https://paper-agent.ycr10.cn/v1`。
 
 ### 10.2 清小搭测试预期
 
@@ -2025,6 +2171,20 @@ sudo chmod 600 /var/backups/paper-agent-*.tar.gz /var/backups/api-storage-policy
 **清小搭返回 401**：检查是否粘贴了完整 Agent API Key、是否已撤销，以及 Bearer 前后是否混入额外字符。不要拿 DeepSeek Key 代替。
 
 **清小搭返回 503**：生产环境没有任何 Agent API Key。先运行 §6 的交互式脚本或从管理员页面创建。
+
+**`paper-agent.service` 反复重启，日志提示 `Form data requires "python-multipart"`**：上传接口依赖没有完整安装。先停止重启循环，更新到包含 `backend/pyproject.toml` 和 `constraints.txt` 修复的代码，再重跑标准安装命令：
+
+```bash
+sudo systemctl stop paper-agent
+cd /opt/paper-agent
+sudo -H -u paper-agent .venv/bin/pip install -r requirements.txt -e backend
+sudo -H -u paper-agent .venv/bin/python -m pip check
+sudo systemctl reset-failed paper-agent
+sudo systemctl start paper-agent
+curl -i http://127.0.0.1:8000/health
+```
+
+不要只在服务器永久保留一次手工 `pip install` 而不修复源代码依赖，否则下次新服务器或重建 `.venv` 会再次失败。
 
 **SSE 一次性整段出现**：确认 nginx `/v1/` 和 `/api/v1/` 已 `proxy_buffering off`、`X-Accel-Buffering: no`，并确认中间 CDN 没有缓存流。
 
