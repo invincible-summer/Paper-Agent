@@ -2249,3 +2249,212 @@ curl -i http://127.0.0.1:8000/health
 - 本仓库：`README.md`、`docs/DESIGN.md`
 - Next.js Self-hosting 官方文档
 - nginx Reverse Proxy 官方文档
+
+---
+
+## 15. 云服务器版本更新（标准增量升级流程）
+
+本章只讲一件事：**项目发了新版本后，如何把云服务器上的 Paper Agent 从旧版升级到新版**。首次部署请按 §1–§14 执行，不要用本章代替。
+
+**总原则（先读三遍再动手）：**
+
+1. **只更新源码，绝不覆盖运行数据。** `data/`、`history_record/`、`.env`、`data/users.db` 是服务器在生产中产生的，更新过程中一个字节都不能被开发机内容覆盖。这与 §4.0 的"空目录首次部署"规则一脉相承。
+2. **数据库结构变更不需要手工迁移。** `users.db` / `data/openai_api/state.db` / `metadata.db` 的表结构由后端启动时的 `initialize()` 自动升级（例如 v5 版本新增 `api_display_policy` 表就是启动时自动建的）。**唯一禁止的是用开发机的任何 `.db` 文件替换服务器上的库。**
+3. 全程文件操作用 `paper-agent` 用户执行，`sudo` 只用于 `systemctl`；命令全部假设路径为 `/opt/paper-agent`、前端包管理器为 `/usr/local/bin/pnpm`（与 §3/§4/§7/§8 一致）。
+4. 选一个低峰维护窗口（前后端合计停机约 2–5 分钟），提前告知正在使用的用户。
+
+### 15.1 更新前：本地（开发机）确认
+
+```bash
+# 在本地项目根目录：确认全绿后才允许发布
+./.env_conda/bin/python -m pytest tests/ -q
+cd frontend && pnpm lint && pnpm build && cd ..
+
+# 确认要发布的提交都在 main 上，并记下版本号（回滚时要用）
+git checkout main
+git log --oneline -3          # 记下最上面的短 hash，例如 a2ceb70
+
+# 把 main 推到服务器能访问的私有仓库（§4 git clone 用的那个地址）
+git push origin main
+```
+
+### 15.2 更新前：服务器备份（必做，约 2 分钟）
+
+```bash
+ssh <你的服务器>
+
+# 1) 记录当前运行版本（回滚目标）
+sudo -u paper-agent git -C /opt/paper-agent rev-parse --short HEAD
+
+# 2) 备份关键配置与账号库（时间戳命名，保留最近几份即可）
+sudo -u paper-agent mkdir -p /var/lib/paper-agent/backup
+sudo -u paper-agent cp /opt/paper-agent/.env \
+  /var/lib/paper-agent/backup/env.$(date +%Y%m%d_%H%M%S).bak
+sudo -u paper-agent cp /opt/paper-agent/data/users.db \
+  /var/lib/paper-agent/backup/users.db.$(date +%Y%m%d_%H%M%S).bak
+
+# 3) 确认磁盘余量足够（构建前端与 pip 都要临时空间）
+df -h /opt
+```
+
+> 条件允许时，同时在 ECS 控制台给系统盘打一个快照，回滚就是秒级。
+
+### 15.3 拉取新版本代码（方法 A：git，推荐）
+
+```bash
+# 1) 停服务（顺序：先前端后后端）
+sudo systemctl stop paper-agent-web paper-agent
+
+# 2) 工作树必须是干净的；有输出说明服务器上有本地改动，先查明原因再继续
+sudo -u paper-agent git -C /opt/paper-agent status --short
+
+# 3) 拉取并查看将要更新的提交
+cd /opt/paper-agent
+sudo -u paper-agent git fetch origin
+sudo -u paper-agent git log --oneline HEAD..origin/main   # 应看到 15.1 记录的新 hash
+
+# 4) 快进更新（不要用 --force；无法快进说明分叉了，回本地把 main 理顺再发）
+sudo -u paper-agent git checkout main
+sudo -u paper-agent git pull --ff-only origin main
+```
+
+> 若私有仓库需要凭证：与首次 `git clone` 相同（HTTPS token 或 SSH deploy key）。凭证失效时 `git fetch` 会报认证错误，先修凭证，不要改用压缩包硬覆盖。
+
+### 15.4 更新依赖（按需，不是每次都要）
+
+先看依赖文件有没有变化：
+
+```bash
+cd /opt/paper-agent
+sudo -u paper-agent git diff --stat HEAD@{1} HEAD -- \
+  requirements.txt requirements-cpu.txt constraints.txt \
+  backend/pyproject.toml frontend/package.json frontend/pnpm-lock.yaml
+```
+
+- **无输出** → 跳过本节，直接去 15.5。
+- **有变化** → 按首装同款命令重装（CPU 轮子顺序不能颠倒，解释见 §4）：
+
+```bash
+sudo -H -u paper-agent .venv/bin/pip install -r requirements-cpu.txt
+sudo -H -u paper-agent .venv/bin/pip install -r requirements.txt -e backend
+sudo -H -u paper-agent .venv/bin/python -m pip check   # 预期 No broken requirements found.
+
+sudo -H -u paper-agent env HOME=/var/lib/paper-agent bash -c \
+  'cd /opt/paper-agent/frontend && /usr/local/bin/pnpm install --frozen-lockfile'
+```
+
+> 若新版 CHANGELOG/提交说明里声明"新增了系统依赖"（如未来的 PNG 光栅化需要 `libcairo`），按手册对应章节先装系统库再装 Python 包。
+
+### 15.5 数据库迁移：无需任何手工操作
+
+直接进入 15.6。启动后端时 `initialize()` 会自动建新表/加索引，并在日志里留下迁移痕迹。**不要**手动执行 SQL，**不要**导入开发机的 `.db`。
+
+### 15.6 重新构建前端
+
+前端是静态构建产物，源码更新后必须重新 build（管理页、聊天气泡等都在里面）：
+
+```bash
+sudo -H -u paper-agent env HOME=/var/lib/paper-agent \
+  BACKEND_URL=http://127.0.0.1:8000 \
+  NEXT_PUBLIC_BACKEND_URL=https://<你的公网域名> \
+  bash -c 'cd /opt/paper-agent/frontend && /usr/local/bin/pnpm build'
+```
+
+`NEXT_PUBLIC_BACKEND_URL` 必须与 §9.6 首次构建时填的完全一致；填错的症状是页面能打开但 SSE 对话连不上。
+
+### 15.7 重启服务（顺序：先后端，验证健康后再前端）
+
+```bash
+sudo systemctl restart paper-agent
+sleep 3
+sudo systemctl status paper-agent --no-pager | head -5
+curl -s http://127.0.0.1:8000/health
+
+sudo systemctl restart paper-agent-web
+sudo systemctl status paper-agent-web --no-pager | head -5
+```
+
+`paper-agent-cleanup.timer` 不需要重启（它只调用清理脚本，脚本内容随 git 更新生效）。
+
+### 15.8 更新后验证清单（全部通过才算升级完成）
+
+```bash
+# 1) 后端日志无 traceback、无 schema 报错
+sudo journalctl -u paper-agent -n 50 --no-pager | grep -Ei "error|traceback" || echo "日志干净"
+
+# 2) 本机验证 Agent Key（read -s 防 Key 进 shell 历史；预期 200 + JSON，见 §6.3）
+read -rsp '粘贴 pa_live_ Agent API Key: ' KEY; echo
+curl -i http://127.0.0.1:8000/v1/models -H "Authorization: Bearer $KEY"; unset KEY
+```
+
+然后浏览器与清小搭各验一遍：
+
+- [ ] 打开 `https://<域名>/chat` 发一条消息，流式回答正常；
+- [ ] 打开 `/admin/agent-keys`、`/admin/display-policy` 等管理页，登录态正常、新页面可见；
+- [ ] 在**清小搭**里发一条会触发工具的请求（如"帮我检索 xxx 的论文"），确认新版本的卡片/附件效果；
+- [ ] `sudo systemctl list-timers paper-agent-cleanup.timer` 正常在列。
+
+### 15.9 回滚（更新失败时）
+
+```bash
+# 1) 停服务
+sudo systemctl stop paper-agent-web paper-agent
+
+# 2) 代码退回 15.2 记录的旧版本
+cd /opt/paper-agent
+sudo -u paper-agent git checkout main
+sudo -u paper-agent git reset --hard <15.2记录的旧hash>
+
+# 3) 若新版曾更新过依赖，按 15.4 的判断方式反向重装一次（依赖文件回退也要重装）
+
+# 4) 若新版后端曾成功启动过（可能已写入更高的数据库 schema 版本），
+#    恢复 15.2 的备份再起旧版，否则旧代码会拒绝更高版本的 state.db：
+sudo systemctl stop paper-agent
+sudo -u paper-agent cp /var/lib/paper-agent/backup/users.db.<时间戳>.bak /opt/paper-agent/data/users.db
+#    （state.db 属于 API 侧可再生态：直接删掉 data/openai_api/state.db 也可以，
+#      代价是清小搭会话续接丢失，重新开聊即自愈。）
+
+# 5) 重建前端 + 重启（同 15.6 / 15.7）
+```
+
+### 15.10 方法 B：没有可用的 git 远端时，用压缩包增量更新
+
+在**本地**打一个纯源码包（就是 §4.0 的排除清单，多打一个 `.git`）：
+
+```bash
+cd <本地项目根>
+tar --exclude=.git --exclude=.env --exclude='.env.*' \
+  --exclude='data' --exclude='backend/data' \
+  --exclude='history_record' --exclude='backend/history_record' \
+  --exclude='frontend/.next' --exclude='frontend/node_modules' \
+  --exclude='.env_conda' --exclude='__pycache__' \
+  -czf /tmp/paper-agent-src.tar.gz .
+scp /tmp/paper-agent-src.tar.gz <服务器>:/tmp/
+```
+
+服务器上停服务后**在源码目录解包覆盖**（排除清单保证了不会碰运行数据与 `.env`），然后从 15.4 继续执行：
+
+```bash
+sudo systemctl stop paper-agent-web paper-agent
+cd /opt/paper-agent
+sudo -u paper-agent tar -xzf /tmp/paper-agent-src.tar.gz -C /opt/paper-agent
+# 之后执行 15.4（按需依赖）→ 15.6 → 15.7 → 15.8
+```
+
+方法 B 的缺点是没有版本记录、无法 `git` 快速回滚，只在 git 远端不可用时使用；用完尽快把服务器工作树恢复成 git 管理。
+
+### 15.11 更新故障速查
+
+| 现象 | 原因与处理 |
+|------|------------|
+| `git pull --ff-only` 报分叉 | 服务器工作树被改过或 main 被改写。回本地理顺提交历史重新发布；不要在服务器上 `pull --force` |
+| pip 长时间枚举 langchain/langsmith 版本 | 没走 `constraints.txt`（§4 警告）。`Ctrl+C`，确认命令是 `pip install -r requirements.txt -e backend` 且在 `/opt/paper-agent` 下执行 |
+| `pnpm build` 报内存不足 | 确认没有其他大进程占内存；4C16G 正常够用，勿加 swap 之外的操作 |
+| 前端页面是旧版/白屏 | build 时漏了 `NEXT_PUBLIC_BACKEND_URL`（重新按 15.6 构建），或浏览器缓存（强制刷新 Ctrl+Shift+R） |
+| 后端起不来，日志有 `schema ... is newer than supported` | 用了比代码新的数据库：按 15.9 恢复备份或删除 `data/openai_api/state.db`（可再生态） |
+| 后端日志报写文件 Permission denied | 新版新增了写入目录但 systemd 未放行：对照 §7 的 `ReadWritePaths=` 补目录后 `daemon-reload` 并重启；这属于版本发布缺陷，建议回滚并反馈 |
+| `/health` 正常但清小搭 401 | 与更新无关，检查 Key 是否被撤销/更换（§6.3 的验证命令） |
+
+---
+
+本章与 §13 的"更新代码后先在维护窗口运行测试和 `pnpm build`，再依次重启后端与前端"是同一件事的展开版；两处如有出入，以本章为准。
