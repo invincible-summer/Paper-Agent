@@ -10,7 +10,7 @@ import pytest
 
 from core.api_artifact_store import ApiArtifactStore
 from core.api_storage_cleanup import ApiStorageCleanup
-from core.api_storage_store import ApiStorageStore
+from core.api_storage_store import SCHEMA_VERSION, ApiStorageStore
 from core.storage_context import StorageContext
 from core.storage_pressure import StoragePressureError, StoragePressureGuard
 
@@ -203,7 +203,7 @@ def test_v4_migration_shortens_existing_public_pdf_ttl_to_3_days(tmp_path: Path)
 
     migrated = ApiStorageStore(context)
     migrated.initialize()
-    assert migrated.schema_version() == 4
+    assert migrated.schema_version() == SCHEMA_VERSION
     assert migrated.get_policy().public_pdf_ttl_seconds == 3 * 24 * 3600
     with migrated.connect() as conn:
         row = conn.execute(

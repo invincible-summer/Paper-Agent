@@ -152,10 +152,10 @@ async def test_stream_frame_sequence(client, monkeypatch):
     frames = _parse_sse(text)
     # 1) role frame first, exactly once
     assert frames[0]["choices"][0]["delta"] == {"role": "assistant"}
-    # 2) reasoning frames (thinking + tool progress)
+    # 2) reasoning frames (thinking + args-aware tool progress)
     reasonings = [f["choices"][0]["delta"].get("reasoning") for f in frames]
     assert "想想" in reasonings
-    assert any(r and "检索论文" in r for r in reasonings)
+    assert any(r and "正在检索：gnn" in r for r in reasonings)
     # 3) content frames
     contents = [f["choices"][0]["delta"].get("content") for f in frames]
     assert "结果" in contents and "如下" in contents
@@ -470,3 +470,217 @@ def test_seed_session_from_messages():
     ])
     # trailing user message dropped (it's the new turn input)
     assert [m["content"] for m in s.messages] == ["第一条", "回复一"]
+
+
+# --- markdown card emulation + skill_loaded + display policy ---------------------
+
+
+def _card_events():
+    return [
+        {"type": "tool_start", "name": "search_papers", "args": {"topic": "gnn"}},
+        {"type": "tool_result", "result": {
+            "tool": "search_papers", "status": "success",
+            "papers": [{"title": "Paper A", "year": 2021, "citation_count": 5,
+                        "fulltext_status": "available"}],
+            "candidates": [], "fulltext_core_available": 1,
+            "fulltext_core_target": 8, "summary": "检索完成"}},
+        {"type": "tool_result", "result": {
+            "tool": "integrity_sweep", "status": "success",
+            "summary": "可靠性质检完成（2 篇）：无异常 2"}},
+        {"type": "answer", "content": "这是最终回答。", "is_delta": True},
+        {"type": "done", "thinking": "", "answer": "这是最终回答。",
+         "tool_calls": [], "trace_id": "t", "usage": {
+             "prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}},
+    ]
+
+
+def _content_of(frames):
+    return "".join(f["choices"][0]["delta"].get("content") or "" for f in frames)
+
+
+@pytest.mark.anyio
+async def test_stream_card_before_answer_with_separator(client, monkeypatch):
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_card_events()))
+    resp = await _post(client, {"stream": True, "max_tokens": 500,
+                                "messages": [{"role": "user", "content": "搜"}]})
+    frames = _parse_sse(resp.text)
+    content = _content_of(frames)
+    # full card (search_papers is core) then one-liner, separated by ---,
+    # both before the answer
+    assert "**🔎 文献检索 · 核心集 1 篇 / 候选 0 篇**" in content
+    assert "**🛡️ 可靠性质检** · 可靠性质检完成（2 篇）：无异常 2" in content
+    assert "\n---\n\n" in content
+    assert content.index("文献检索 · 核心集") < content.index("这是最终回答。")
+
+
+@pytest.mark.anyio
+async def test_nonstream_card_prepended_to_answer(client, monkeypatch):
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_card_events()))
+    resp = await _post(client, {"messages": [{"role": "user", "content": "搜"}]})
+    content = resp.json()["choices"][0]["message"]["content"]
+    assert content.index("🔎 文献检索") < content.index("这是最终回答。")
+    assert content.rstrip().endswith("这是最终回答。")
+
+
+@pytest.mark.anyio
+async def test_skill_loaded_dual_channel(client, monkeypatch):
+    events = [
+        {"type": "tool_start", "name": "use_skill", "args": {"name": "research_gap"}},
+        {"type": "skill_loaded", "name": "research_gap"},
+        {"type": "tool_result", "result": {"tool": "use_skill", "status": "success",
+                                           "instructions": "内部指令"}},
+        {"type": "answer", "content": "按技能流程完成。", "is_delta": True},
+        {"type": "done", "thinking": "", "answer": "按技能流程完成。",
+         "tool_calls": [], "trace_id": "t", "usage": {
+             "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+    ]
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(events))
+    resp = await _post(client, {"stream": True,
+                                "messages": [{"role": "user", "content": "找空白"}]})
+    text = resp.text
+    assert "use_skill" not in text and "内部指令" not in text
+    frames = _parse_sse(text)
+    reasonings = [f["choices"][0]["delta"].get("reasoning") for f in frames]
+    assert any(r and "已加载技能《研究空白识别与选题评估》" in r for r in reasonings)
+    content = _content_of(frames)
+    assert "━━ 📘 技能 · 研究空白识别与选题评估 ━━" in content
+    # the in-content line is part of the echoed content (alias-chain invariant)
+    assert content.index("📘 技能") < content.index("按技能流程完成。")
+
+
+def _set_display_policy(tmp_root, **changes):
+    from core.api_storage_store import ApiStorageStore
+    from core.storage_context import StorageContext
+
+    store = ApiStorageStore(StorageContext.openai_api(root_dir=tmp_root / "openai-api"))
+    store.initialize()
+    version = store.get_display_policy().version
+    return store.update_display_policy(changes, expected_version=version,
+                                       updated_by="test")
+
+
+@pytest.mark.anyio
+async def test_cards_disabled_by_off_policy(client, monkeypatch, tmp_path):
+    _set_display_policy(tmp_path, preset="off")
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_card_events()))
+    resp = await _post(client, {"stream": True, "max_tokens": 500,
+                                "messages": [{"role": "user", "content": "搜"}]})
+    frames = _parse_sse(resp.text)
+    content = _content_of(frames)
+    assert "文献检索" not in content and "可靠性质检" not in content
+    assert "这是最终回答。" in content
+    # progress lines in the thinking fold remain
+    reasonings = [f["choices"][0]["delta"].get("reasoning") for f in frames]
+    assert any(r and "正在检索：gnn" in r for r in reasonings)
+
+
+@pytest.mark.anyio
+async def test_custom_policy_limits_full_cards(client, monkeypatch, tmp_path):
+    _set_display_policy(tmp_path, preset="custom", enabled_tools=["integrity_sweep"])
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_card_events()))
+    resp = await _post(client, {"stream": True, "max_tokens": 500,
+                                "messages": [{"role": "user", "content": "搜"}]})
+    content = _content_of(_parse_sse(resp.text))
+    # search_papers lost its full card (one-liner still shown: not in _FULL_CARDS
+    # renderers, custom preset only upgrades listed tools)
+    assert "核心集 1 篇" not in content
+    assert "**🔎 文献检索**" in content
+
+
+@pytest.mark.anyio
+async def test_small_budget_skips_cards(client, monkeypatch):
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_card_events()))
+    resp = await _post(client, {"stream": True, "max_tokens": 50,
+                                "messages": [{"role": "user", "content": "搜"}]})
+    content = _content_of(_parse_sse(resp.text))
+    assert "文献检索 · 核心集" not in content
+    assert "这是最终回答。" in content
+
+
+@pytest.mark.anyio
+async def test_bibtex_and_census_attachments(client, monkeypatch):
+    events = [
+        {"type": "tool_result", "result": {
+            "tool": "citation_export", "status": "success",
+            "citations": "@article{a,\n  title={T},\n}", "format": "bibtex",
+            "count": 1}},
+        {"type": "tool_result", "result": {
+            "tool": "field_census", "status": "success",
+            "yearly": [{"key": 2023, "name": "2023", "count": 900},
+                       {"key": 2024, "name": "2024", "count": 1200}],
+            "top_authors": [{"name": "A", "count": 3}],
+            "top_institutions": [], "top_venues": []}},
+        {"type": "answer", "content": "完成。", "is_delta": True},
+        {"type": "done", "thinking": "", "answer": "完成。", "tool_calls": [],
+         "trace_id": "t", "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                                     "total_tokens": 2}},
+    ]
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(events))
+    resp = await _post(client, {"stream": True, "user": "extra-attach-test",
+                                "messages": [{"role": "user", "content": "导出"}]})
+    frames = _parse_sse(resp.text)
+    attachments = frames[-1]["x_soda"]["attachments"]
+    by_mime = {a["mimeType"]: a for a in attachments}
+    assert by_mime["text/plain"]["fileName"].endswith(".bib")
+    assert by_mime["image/svg+xml"]["fileName"].endswith(".svg")
+    # image attachments carry previewUrl
+    assert by_mime["image/svg+xml"]["previewUrl"] == by_mime["image/svg+xml"]["fileUrl"]
+    # the census card mentions the attachment
+    content = _content_of(frames)
+    assert "📑 参考文献导出 · BibTeX · 1 篇" in content
+    assert "📊 领域普查" in content
+
+
+@pytest.mark.anyio
+async def test_element_crop_attachment_scope_guard(client, monkeypatch, tmp_path):
+    import base64
+
+    from core.config import get_settings
+    from core.models import Paper
+
+    settings = get_settings()
+    assets = tmp_path / "assets"
+    pid = "10.1/xx-test-paper"
+    crop_dir = assets / "10.1_xx-test-paper"
+    crop_dir.mkdir(parents=True)
+    crop_dir.joinpath("figure_1.png").write_bytes(
+        base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg=="))
+    monkeypatch.setattr(settings.reader, "assets_dir", str(assets))
+
+    def result_event(with_paper: bool):
+        return {"type": "tool_result", "result": {
+            "tool": "explain_element", "status": "success",
+            "element": {"element_id": f"{pid}::figure::1", "paper_id": pid,
+                        "kind": "figure", "page": 2, "caption": "Fig 1",
+                        "asset_url": f"/api/v1/elements/assets/{pid}/figure_1.png"}}}
+
+    async def owned(user_message, session, progress_cb, attachments=None, regenerate=False):
+        session.papers.append(Paper(id=pid, title="Owner Paper"))
+        yield result_event(True)
+        yield {"type": "answer", "content": "解读完成。", "is_delta": True}
+        yield {"type": "done", "thinking": "", "answer": "解读完成。",
+               "tool_calls": [], "trace_id": "t", "usage": {
+                   "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+
+    async def foreign(user_message, session, progress_cb, attachments=None, regenerate=False):
+        # paper NOT in this session's scope: crop must not be attached
+        yield result_event(True)
+        yield {"type": "answer", "content": "解读完成。", "is_delta": True}
+        yield {"type": "done", "thinking": "", "answer": "解读完成。",
+               "tool_calls": [], "trace_id": "t", "usage": {
+                   "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+
+    monkeypatch.setattr(orch, "chat_turn", owned)
+    resp = await _post(client, {"stream": True, "user": "crop-owned",
+                                "messages": [{"role": "user", "content": "解读图"}]})
+    frames = _parse_sse(resp.text)
+    attachments = frames[-1]["x_soda"]["attachments"]
+    assert [a for a in attachments if a["mimeType"] == "image/png"], attachments
+
+    monkeypatch.setattr(orch, "chat_turn", foreign)
+    resp = await _post(client, {"stream": True, "user": "crop-foreign",
+                                "messages": [{"role": "user", "content": "解读图"}]})
+    frames = _parse_sse(resp.text)
+    assert "x_soda" not in frames[-1] or not [
+        a for a in frames[-1].get("x_soda", {}).get("attachments", [])
+        if a["mimeType"] == "image/png"]

@@ -12,6 +12,7 @@ from core.api_storage_store import (
     ApiStoragePolicy,
     ApiStorageStore,
     PolicyVersionConflict,
+    SCHEMA_VERSION,
 )
 from core.storage_context import StorageContext, StoragePathError
 
@@ -69,7 +70,7 @@ def test_api_layout_permissions_and_private_database(tmp_path: Path):
     store = ApiStorageStore(context)
     store.initialize()
     assert context.state_db.stat().st_mode & 0o777 == 0o600
-    assert store.schema_version() == 4
+    assert store.schema_version() == SCHEMA_VERSION
 
 
 def test_schema_is_idempotent_wal_and_foreign_keys(tmp_path: Path):
@@ -78,7 +79,7 @@ def test_schema_is_idempotent_wal_and_foreign_keys(tmp_path: Path):
     store.initialize()
     first = context.state_db.stat().st_size
     store.initialize()
-    assert store.schema_version() == 4
+    assert store.schema_version() == SCHEMA_VERSION
     with store.connect() as conn:
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"

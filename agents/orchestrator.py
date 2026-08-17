@@ -631,6 +631,13 @@ async def chat_turn(
 
             if result.status == "success":
                 checkpoint_changed = True
+                # Skill loading stays an internal instruction event (its
+                # tool_start/tool_result remain suppressed); this dedicated
+                # progress event lets the /v1 channel surface a one-line
+                # "技能已加载" notice in the thinking fold and content.
+                if is_internal_skill and result.data.get("instructions"):
+                    yield {"type": "skill_loaded",
+                           "name": str(result.data.get("skill") or tool_args.get("name") or "")}
             result_dict = result.to_dict()
             if not is_internal_skill:
                 all_tool_calls.append({"name": tool_name, "result": result_dict})

@@ -16,6 +16,14 @@ Beyond L0:
     degradation on the current text-only model);
   - x_soda.attachments: research reports generated this turn are attached
     as downloadable markdown files (stop frame / response top-level);
+  - markdown card emulation: tool results render as compact markdown cards
+    (tools/export/cards.py) inserted into delta.content when a tool
+    completes, before the final answer — mirroring the self-hosted frontend
+    layout. 清小搭's guide defines no structured-content/HTML/WebView
+    channel, so content + reasoning + attachments are the only surfaces.
+    The admin-configurable display policy (api_display_policy) picks which
+    tools get full cards; skill loading surfaces through the dedicated
+    skill_loaded event as a thinking-fold line plus an in-content line;
   - max_tokens: accepted; soft cap on completion chars -> finish_reason
     "length"; finish_reason only ever uses the 5-value whitelist;
   - streaming errors after validation: in-band stop/error frame + [DONE];
@@ -51,18 +59,43 @@ if str(_PROJECT_ROOT) not in sys.path:
 router = APIRouter(prefix="/v1", tags=["openai-compat"])
 
 _TOOL_PROGRESS_TEXT = {
-    "search_papers": "正在检索论文…",
-    "deep_read": "正在深读论文…",
-    "ask_papers": "正在查阅会话知识库…",
-    "research_map": "正在生成研究地图…",
-    "reading_path": "正在规划阅读路径…",
-    "write_review": "正在撰写文献综述…",
-    "citation_export": "正在导出参考文献…",
-    "export_report": "正在导出研究报告…",
-    "check_structure": "正在体检论文结构…",
-    "check_format": "正在检查论文格式…",
-    "export_manuscript": "正在导出文稿文件…",
+    "search_papers": "🔎 正在检索文献…",
+    "deep_read": "📖 正在深读论文…",
+    "ask_papers": "💬 正在查阅会话知识库…",
+    "research_map": "🗺️ 正在构建研究地图…",
+    "reading_path": "🧭 正在规划阅读路径…",
+    "write_review": "📝 正在撰写文献综述…",
+    "citation_export": "📑 正在导出参考文献…",
+    "export_report": "📥 正在导出研究报告…",
+    "check_structure": "📋 正在体检论文结构…",
+    "check_format": "🧾 正在检查论文格式…",
+    "export_manuscript": "📄 正在导出文稿文件…",
+    "integrity_sweep": "🛡️ 正在做可靠性质检…",
+    "bib_import": "📚 正在导入文献库…",
+    "exhibit_index": "🖼️ 正在提取图表导览…",
+    "explain_element": "🔍 正在解读图表/公式…",
+    "field_census": "📊 正在做领域普查…",
 }
+
+
+def _clip(text: str, limit: int) -> str:
+    text = str(text or "").strip()
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def _tool_progress_text(name: str, args: dict) -> str:
+    """Args-aware progress line for the thinking fold."""
+    if name == "search_papers" and args.get("topic"):
+        return f"🔎 正在检索：{_clip(args['topic'], 40)}…"
+    if name == "deep_read" and args.get("paper_ids"):
+        return f"📖 正在深读 {len(args['paper_ids'])} 篇论文…"
+    if name == "ask_papers" and args.get("query"):
+        return f"💬 正在查阅文献：{_clip(args['query'], 40)}…"
+    if name == "explain_element" and args.get("element_id"):
+        return f"🔍 正在解读元素：{_clip(args['element_id'], 44)}…"
+    if name == "write_review":
+        return "📝 正在撰写文献综述…"
+    return _TOOL_PROGRESS_TEXT.get(name, "⏳ 正在继续处理当前任务…")
 
 # Tools whose success produces a downloadable report artifact.
 _ARTIFACT_TOOLS = {"research_map", "write_review"}
@@ -338,13 +371,17 @@ def _shape_attachment(request: Request, record: dict) -> dict | None:
         size = max(0, int(record.get("size") or record.get("fileSize") or 0))
     except (TypeError, ValueError):
         size = 0
-    return {
+    attachment = {
         "fileUrl": _public_file_url(request, public_name, str(record.get("url") or "")),
         "fileName": filename,
         "fileType": file_type,
         "mimeType": mime_type,
         "fileSize": size,
     }
+    if file_type == "image":
+        # Optional per the attachments spec; gives hosts a thumbnail URL.
+        attachment["previewUrl"] = attachment["fileUrl"]
+    return attachment
 
 
 def _dedupe_attachments(items: list[dict]) -> list[dict]:
@@ -386,6 +423,134 @@ def _tool_result_files(request: Request, result: dict) -> list[dict]:
     return [att for rec in ((result.get("data") or {}).get("files") or [])
             if isinstance(rec, dict)
             if (att := _shape_attachment(request, rec)) is not None]
+
+
+def _load_display_policy(session):
+    """Admin display policy for this turn; defaults on any storage failure —
+    a chat turn must never fail because of a display-policy read."""
+    from core.api_storage_store import ApiDisplayPolicy
+    try:
+        if session.storage_context is not None:
+            from core.api_storage_store import ApiStorageStore
+            return ApiStorageStore(session.storage_context).get_display_policy()
+    except Exception:  # noqa: BLE001
+        pass
+    return ApiDisplayPolicy()
+
+
+def _save_api_export(session, text: str | None, *, data: bytes | None,
+                     display_name: str, mime_type: str, file_type: str) -> dict | None:
+    """Persist one API-channel export blob and return its file record."""
+    if session.storage_context is None or session.channel != "openai_api":
+        return None
+    import uuid
+    from core.api_artifact_store import ApiArtifactStore
+    from core.api_storage_store import ApiStorageStore
+
+    context = session.storage_context
+    context.ensure_layout()
+    temp = context.temp_dir / f"card-{uuid.uuid4().hex}.tmp"
+    try:
+        if data is not None:
+            temp.write_bytes(data)
+        elif text:
+            temp.write_text(text, encoding="utf-8")
+        else:
+            return None
+        artifact = ApiArtifactStore(ApiStorageStore(context)).save_export(
+            temp, session_id=session.session_id,
+            display_name=display_name, mime_type=mime_type,
+        )
+        return {
+            "fileName": artifact.public_alias,
+            "displayName": display_name,
+            "fileType": file_type,
+            "mimeType": mime_type,
+            "path": str(artifact.path),
+            "size": artifact.size_bytes,
+            "url": f"/files/{artifact.public_alias}",
+        }
+    except Exception:  # noqa: BLE001 — attachments are best-effort per file
+        return None
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _extra_attachments(request: Request, session, tool_results: list[dict]) -> list[dict]:
+    """Best-effort extra x_soda file cards: element crop PNG, citation
+    export file, field-census trend SVG. Reads only this turn's tool
+    results; the explain_element ownership guard is re-checked here."""
+    out: list[dict] = []
+    seen_names: set[str] = set()
+
+    def add(record: dict | None) -> None:
+        if record is None:
+            return
+        name = record.get("displayName") or record.get("fileName")
+        if not name or name in seen_names:
+            return
+        seen_names.add(name)
+        attachment = _shape_attachment(request, record)
+        if attachment is not None:
+            out.append(attachment)
+
+    import time
+    import uuid as _uuid
+    from pathlib import Path as _Path
+
+    from tools.export.cards import render_field_census_svg
+
+    for result in tool_results:
+        tool = result.get("tool", "")
+        if result.get("status") == "error":
+            continue
+        if tool == "explain_element":
+            element = result.get("element")
+            if not isinstance(element, dict) or element.get("kind") not in {"figure", "table"}:
+                continue
+            paper_id = str(element.get("paper_id") or "")
+            asset_url = str(element.get("asset_url") or "")
+            fname = _Path(asset_url).name if asset_url else ""
+            if not paper_id or not fname:
+                continue
+            try:
+                from tools.ingest.attachments import session_element_scope
+                if paper_id not in set(session_element_scope(session)):
+                    continue
+            except Exception:  # noqa: BLE001 — scope check must not crash exports
+                continue
+            from core.config import get_settings
+            from tools.pdf.fetcher import _sanitize_filename_component as _sanitize
+            crop = (_Path(get_settings().reader.assets_dir)
+                    / _sanitize(paper_id) / fname)
+            if not crop.is_file():
+                continue
+            add(_save_api_export(
+                session, None, data=crop.read_bytes(),
+                display_name=f"element_{_sanitize(paper_id)[:40]}_{fname}",
+                mime_type="image/png", file_type="image"))
+        elif tool == "citation_export":
+            citations = str(result.get("citations") or "").strip()
+            if not citations:
+                continue
+            gbt = result.get("format") == "gbt7714"
+            ext = ".txt" if gbt else ".bib"
+            label = "GB_T7714" if gbt else "bibtex"
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            add(_save_api_export(
+                session, citations, data=None,
+                display_name=f"references_{label}_{stamp}_{_uuid.uuid4().hex[:4]}{ext}",
+                mime_type="text/plain", file_type="text"))
+        elif tool == "field_census":
+            svg = render_field_census_svg(result, title=str(session.topic or "领域普查"))
+            if not svg:
+                continue
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            add(_save_api_export(
+                session, svg, data=None,
+                display_name=f"field_census_{stamp}_{_uuid.uuid4().hex[:4]}.svg",
+                mime_type="image/svg+xml", file_type="image"))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -439,12 +604,28 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         len(str(m.get("content", ""))) for m in (body.get("messages") or [])
     ) // 4
 
+    from tools.export.cards import (
+        resolve_full_card_tools,
+        render_skill_card,
+        render_tool_card,
+        skill_display_title,
+    )
+
+    policy = _load_display_policy(session)
+    full_cards = resolve_full_card_tools(policy.preset, policy.enabled_tools)
+    # Cards are decoration: below a small budget they would crowd out the
+    # answer, and a hard 60% share keeps them from ever starving it.
+    cards_allowed = policy.preset != "off" and (
+        content_budget is None or content_budget >= 2000)
+
     if not stream:
         # ---- non-streaming: run to completion, return one JSON ----
         thinking_parts: list[str] = []
         answer_parts: list[str] = []
+        block_parts: list[str] = []  # skill lines + markdown cards, in order
         artifact_kinds: set[str] = set()
         result_files: list[dict] = []
+        tool_results: list[dict] = []
         done_event: dict | None = None
         error_msg: str | None = None
         truncated = False
@@ -457,14 +638,23 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 thinking_parts.append(ev.get("content", ""))
             elif etype == "answer" and ev.get("is_delta"):
                 answer_parts.append(ev.get("content", ""))
+            elif etype == "skill_loaded" and policy.skill_card_enabled:
+                block_parts.append(
+                    render_skill_card(skill_display_title(str(ev.get("name") or ""))))
             elif etype == "tool_result":
-                tool = (ev.get("result") or {}).get("tool", "")
-                status = (ev.get("result") or {}).get("status", "")
-                if tool in _ARTIFACT_TOOLS and status == "success":
+                result = ev.get("result") or {}
+                tool = result.get("tool", "")
+                if tool == "use_skill":
+                    continue
+                tool_results.append(result)
+                if tool in _ARTIFACT_TOOLS and result.get("status") == "success":
                     artifact_kinds.add(tool)
-                elif status == "success":
-                    result_files.extend(
-                        _tool_result_files(request, ev.get("result") or {}))
+                elif result.get("status") == "success":
+                    result_files.extend(_tool_result_files(request, result))
+                if cards_allowed:
+                    card = render_tool_card(tool, result, full_cards)
+                    if card:
+                        block_parts.append(card)
             elif etype == "done":
                 done_event = ev
             elif etype == "error":
@@ -479,11 +669,20 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             )
         if not answer:
             answer = thinking or "(no response)"
-        if content_budget is not None and len(answer) > content_budget:
-            answer = answer[:content_budget]
+        prefix = ""
+        if block_parts:
+            card_share = content_budget * 0.6 if content_budget is not None else None
+            while block_parts and card_share is not None and \
+                    sum(len(b) for b in block_parts) + 8 > card_share:
+                block_parts.pop()  # drop newest blocks first; the answer wins
+            if block_parts:
+                prefix = "\n\n".join(block_parts) + "\n\n"
+        content = prefix + answer
+        if content_budget is not None and len(content) > content_budget:
+            content = content[:content_budget]
             truncated = True
         if done_event is not None and error_msg is None:
-            await finalize_checkpoint(answer)
+            await finalize_checkpoint(content)
 
         resp = {
             "id": cid,
@@ -491,14 +690,16 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             "created": created,
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": answer},
+                "message": {"role": "assistant", "content": content},
                 "finish_reason": "length" if truncated else "stop",
             }],
             "usage": _usage_of(done_event, est_prompt,
-                               (len(answer) + len(thinking)) // 4),
+                               (len(content) + len(thinking)) // 4),
         }
         attachments_out = _dedupe_attachments(
-            _reports_for(request, session, artifact_kinds) + result_files)
+            _reports_for(request, session, artifact_kinds)
+            + result_files
+            + _extra_attachments(request, session, tool_results))
         if attachments_out:
             resp["x_soda"] = {"attachments": attachments_out}
         return JSONResponse(resp)
@@ -539,46 +740,84 @@ async def chat_completions(request: Request, authorization: str | None = Header(
 
         artifact_kinds: set[str] = set()
         result_files: list[dict] = []
+        tool_results: list[dict] = []
         done_event: dict | None = None
         content_sent = 0
         content_parts: list[str] = []
+        card_spent = 0
+        blocks_emitted = False
         truncated = False
         finished = False
         terminal_emitted = False  # an error frame already IS the stop frame
+        # Same 60% decoration share as the non-streaming path.
+        card_budget = None if content_budget is None else int(content_budget * 0.6)
+
+        def emit_content(piece: str) -> str:
+            """Send one content delta under the shared budget (returns '' when
+            nothing fits). Cards and the answer both pass through here so
+            content_parts stays byte-identical to what the host echoes back —
+            the next-turn alias chain depends on that."""
+            nonlocal content_sent, truncated
+            if truncated or not piece:
+                return ""
+            if content_budget is not None and content_sent + len(piece) > content_budget:
+                piece = piece[:max(0, content_budget - content_sent)]
+                truncated = True
+            if not piece:
+                return ""
+            content_sent += len(piece)
+            content_parts.append(piece)
+            return frame({"content": piece})
+
+        def emit_block(text: str) -> str:
+            """Emit one card/skill block; first block bare, later ones after a
+            markdown separator, mimicking the web layout of stacked cards."""
+            nonlocal card_spent, blocks_emitted
+            if not text:
+                return ""
+            if card_budget is not None and card_spent + len(text) > card_budget:
+                return ""
+            card_spent += len(text)
+            separator = "" if not blocks_emitted else "\n---\n\n"
+            blocks_emitted = True
+            return emit_content(separator + text + "\n\n")
 
         def handle(ev: dict) -> str | None:
-            """Map one agent event to an SSE frame (None = no frame)."""
-            nonlocal content_sent, truncated, done_event, finished, terminal_emitted
+            """Map one agent event to SSE frames (None = no frame; the string
+            may concatenate several frames)."""
+            nonlocal done_event, finished, terminal_emitted
             etype = ev.get("type")
             if etype == "thinking" and ev.get("is_delta"):
                 return frame({"reasoning": ev.get("content", "")})
             if etype == "answer" and ev.get("is_delta"):
-                if truncated:
-                    return None
-                piece = ev.get("content", "")
-                if content_budget is not None and content_sent + len(piece) > content_budget:
-                    piece = piece[:max(0, content_budget - content_sent)]
-                    truncated = True
-                if piece:
-                    content_sent += len(piece)
-                    content_parts.append(piece)
-                    return frame({"content": piece})
-                return None
+                return emit_content(ev.get("content", "")) or None
+            if etype == "skill_loaded":
+                title = skill_display_title(str(ev.get("name") or ""))
+                out = frame({"reasoning": f"📘 已加载技能《{title}》，按其工作流执行…"})
+                if policy.skill_card_enabled:
+                    out += emit_block(render_skill_card(title))
+                return out or None
             if etype == "tool_start":
                 name = ev.get("name", "")
                 if name == "use_skill":
                     return None
-                return frame({"reasoning": _TOOL_PROGRESS_TEXT.get(name, "正在继续处理当前任务…")})
+                return frame({"reasoning": _tool_progress_text(name, ev.get("args") or {})})
             if etype == "tool_warning":
                 return frame({"reasoning": f"注意：{ev.get('warning', '')}"})
             if etype == "tool_result":
                 result = ev.get("result") or {}
-                if result.get("tool") == "use_skill":
+                tool = result.get("tool", "")
+                if tool == "use_skill":
                     return None
-                if result.get("tool") in _ARTIFACT_TOOLS and result.get("status") == "success":
-                    artifact_kinds.add(result["tool"])
+                tool_results.append(result)
+                if tool in _ARTIFACT_TOOLS and result.get("status") == "success":
+                    artifact_kinds.add(tool)
                 elif result.get("status") == "success":
                     result_files.extend(_tool_result_files(request, result))
+                if cards_allowed:
+                    card = render_tool_card(tool, result, full_cards)
+                    if card:
+                        return emit_block(card) or None
                 return None
             if etype == "done":
                 done_event = ev
@@ -615,7 +854,9 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 break
 
         attachments_out = _dedupe_attachments(
-            _reports_for(request, session, artifact_kinds) + result_files)
+            _reports_for(request, session, artifact_kinds)
+            + result_files
+            + _extra_attachments(request, session, tool_results))
         if not terminal_emitted and done_event is not None:
             await finalize_checkpoint("".join(content_parts))
         if not terminal_emitted:

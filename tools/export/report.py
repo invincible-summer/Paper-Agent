@@ -69,14 +69,39 @@ def render_research_report(session: ChatSession) -> str:
 
 
 
+_CLUSTER_COLORS = ["#256d66", "#c2402a", "#4a628a", "#8a6d3b", "#6b4a8a",
+                   "#3b7a4a", "#a05a2c", "#4a8a82"]
+
+# Mirrors frontend genealogy-layout.ts nodeRadius(): three fixed citation
+# tiers — visually calm, no continuous scale.
+_NODE_TIERS = ((500, 13), (50, 10), (0, 7))
+
+_AGGREGATE_THRESHOLD = 3  # >3 papers in one (cluster, year) bucket collapse to "+N"
+
+
+def _node_radius(citation_count: int) -> int:
+    for threshold, radius in _NODE_TIERS:
+        if citation_count >= threshold:
+            return radius
+    return 7
+
+
 def render_research_map_svg(session: ChatSession) -> str:
     """Render the research-map graph as a portable, static SVG attachment.
 
     The self-hosted frontend keeps the fully interactive React graph. OpenAI-
     compatible hosts (including 清小搭) cannot execute that component, so this
-    deterministic SVG provides the same nodes/edges as an ordinary image card.
+    deterministic SVG provides the same nodes/edges as an ordinary image card,
+    visually aligned with the frontend: cluster lanes with colored labels,
+    citation-tier node sizes, foundational halos, "+N" aggregate buckets,
+    year gridlines and a legend.
     """
     import html
+    import time as _time
+
+    def _short(text, limit):
+        s = str(text or "").strip()
+        return s[:limit] + ("…" if len(s) > limit else "")
 
     md = session.map_data or {}
     graph = md.get("graph") or {}
@@ -85,46 +110,139 @@ def render_research_map_svg(session: ChatSession) -> str:
         return ""
     edges = [e for e in (graph.get("edges") or []) if isinstance(e, dict)]
     years = sorted({int(n.get("year") or 0) for n in nodes})
-    clusters = sorted({int(n.get("cluster") or 0) for n in nodes})
-    year_pos = {year: i for i, year in enumerate(years)}
-    cluster_pos = {cluster: i for i, cluster in enumerate(clusters)}
-    width = max(900, 180 + max(1, len(years) - 1) * 120)
-    height = max(420, 150 + max(1, len(clusters)) * 110)
-    left, top = 90, 80
-    x_step = (width - 180) / max(1, len(years) - 1)
-    y_step = (height - 170) / max(1, len(clusters))
-    positions = {
-        str(n["id"]): (
-            left + year_pos[int(n.get("year") or 0)] * x_step,
-            top + (cluster_pos[int(n.get("cluster") or 0)] + 0.5) * y_step,
-        )
-        for n in nodes
+    cluster_ids = sorted({int(n.get("cluster") or 0) for n in nodes})
+    cluster_labels = {
+        int(c.get("id") or 0): str(c.get("label") or "")
+        for c in (md.get("clusters") or []) if isinstance(c, dict)
     }
-    colors = ["#256d66", "#c2402a", "#4a628a", "#8a6d3b", "#6b4a8a", "#3b7a4a"]
+    year_pos = {year: i for i, year in enumerate(years)}
+    cluster_pos = {c: i for i, c in enumerate(cluster_ids)}
+
+    left, right, top = 150, 46, 96
+    legend_h = 46
+    x_step = 118
+    y_step = 112
+    width = max(980, left + right + max(1, len(years) - 1) * x_step)
+    lanes_h = max(1, len(cluster_ids)) * y_step
+    height = top + lanes_h + legend_h
+
+    # Bucket nodes by (cluster, year); dense buckets collapse to one "+N" node.
+    buckets: dict[tuple[int, int], list[dict]] = {}
+    for n in nodes:
+        buckets.setdefault((int(n.get("cluster") or 0), int(n.get("year") or 0)), []).append(n)
+    positions: dict[str, tuple[float, float]] = {}
+    aggregate_nodes: list[tuple[float, float, int, int]] = []  # x, y, cluster, count
+    for (cluster, year), members in buckets.items():
+        cx = left + year_pos[year] * x_step
+        lane_top = top + cluster_pos[cluster] * y_step
+        lane_mid = lane_top + y_step * 0.5
+        if len(members) > _AGGREGATE_THRESHOLD:
+            aggregate_nodes.append((cx, lane_mid, cluster, len(members)))
+            continue
+        k = len(members)
+        for i, n in enumerate(members):
+            dy = (i - (k - 1) / 2) * min(30, y_step / (k + 1))
+            positions[str(n["id"])] = (cx, lane_mid + dy)
+
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="#fbfaf7"/>',
-        '<style>text{font-family:Arial,"Noto Sans CJK SC",sans-serif}.axis{fill:#6b7280;font-size:12px}.label{fill:#24303f;font-size:11px}.title{fill:#17212b;font-size:20px;font-weight:700}.edge{stroke:#94a3b8;stroke-width:1.2;opacity:.55}.semantic{stroke-dasharray:5 4;opacity:.35}</style>',
-        f'<text x="{left}" y="36" class="title">{html.escape(session.topic or "研究谱系图")}</text>',
+        '<style>text{font-family:Arial,"Noto Sans CJK SC","PingFang SC",'
+        '"Microsoft YaHei",sans-serif}.title{fill:#17212b;font-size:21px;font-weight:700}'
+        '.sub{fill:#6b7280;font-size:12.5px}.axis{fill:#6b7280;font-size:12px}'
+        '.lane{fill:#4b5563;font-size:12px}.label{fill:#24303f;font-size:10.5px}'
+        '.agg{fill:#ffffff;font-size:11px;font-weight:700}.legend{fill:#6b7280;font-size:11.5px}'
+        '.edge{stroke:#94a3b8;stroke-width:1.2;opacity:.5}'
+        '.semantic{stroke-dasharray:5 4;opacity:.32}</style>',
+        f'<text x="{left}" y="34" class="title">{html.escape(_short(session.topic or "研究谱系图", 60))}</text>',
+        f'<text x="{left}" y="56" class="sub">研究谱系 · {len(nodes)} 篇论文 · '
+        f'{len(cluster_ids)} 个主题簇 · {len(edges)} 条关联 · '
+        f'{_time.strftime("%Y-%m-%d")} 生成</text>',
     ]
+
+    # Year gridlines + labels (thin out labels when the span is wide).
+    label_every = max(1, (len(years) + 9) // 10)
     for year, idx in year_pos.items():
         x = left + idx * x_step
-        parts.append(f'<line x1="{x:.1f}" y1="55" x2="{x:.1f}" y2="{height-55}" stroke="#e5e7eb"/>')
-        parts.append(f'<text x="{x:.1f}" y="70" text-anchor="middle" class="axis">{year or "n.d."}</text>')
+        parts.append(f'<line x1="{x:.1f}" y1="66" x2="{x:.1f}" y2="{top + lanes_h}" '
+                     f'stroke="#e5e7eb"/>')
+        if idx % label_every == 0 or idx == len(years) - 1:
+            parts.append(f'<text x="{x:.1f}" y="82" text-anchor="middle" class="axis">'
+                         f'{year or "n.d."}</text>')
+
+    # Cluster lanes: alternating band + colored label on the left.
+    for cluster, idx in cluster_pos.items():
+        lane_top = top + idx * y_step
+        if idx % 2 == 0:
+            parts.append(f'<rect x="{left - 10}" y="{lane_top}" width="{width - left - right + 20}" '
+                         f'height="{y_step}" fill="#f2f0ea" opacity="0.55"/>')
+        color = _CLUSTER_COLORS[cluster % len(_CLUSTER_COLORS)]
+        label = cluster_labels.get(cluster) or f"簇 {cluster}"
+        parts.append(f'<circle cx="{left - 96}" cy="{lane_top + y_step * 0.5}" r="5" fill="{color}"/>')
+        parts.append(f'<text x="{left - 84}" y="{lane_top + y_step * 0.5 + 4}" class="lane">'
+                     f'{html.escape(_short(label, 12))}</text>')
+
+    # Edges first so nodes sit on top; edges into collapsed buckets are dropped.
     for edge in edges:
-        source, target = positions.get(str(edge.get("source"))), positions.get(str(edge.get("target")))
+        source = positions.get(str(edge.get("source")))
+        target = positions.get(str(edge.get("target")))
         if not source or not target:
             continue
         klass = "edge semantic" if edge.get("type") == "semantic" else "edge"
-        parts.append(f'<line x1="{source[0]:.1f}" y1="{source[1]:.1f}" x2="{target[0]:.1f}" y2="{target[1]:.1f}" class="{klass}"/>')
+        parts.append(f'<line x1="{source[0]:.1f}" y1="{source[1]:.1f}" '
+                     f'x2="{target[0]:.1f}" y2="{target[1]:.1f}" class="{klass}"/>')
+
     for node in nodes:
-        x, y = positions[str(node["id"])]
-        color = colors[int(node.get("cluster") or 0) % len(colors)]
+        pos = positions.get(str(node["id"]))
+        if pos is None:
+            continue
+        x, y = pos
+        cluster = int(node.get("cluster") or 0)
+        color = _CLUSTER_COLORS[cluster % len(_CLUSTER_COLORS)]
         title = str(node.get("title") or node["id"])
-        label = title[:24] + ("…" if len(title) > 24 else "")
-        radius = 8 if node.get("role") == "foundational" else 6
-        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{radius}" fill="{color}"><title>{html.escape(title)}</title></circle>')
-        parts.append(f'<text x="{x+10:.1f}" y="{y+4:.1f}" class="label">{html.escape(label)}</text>')
+        cites = int(node.get("citation_count") or 0)
+        radius = _node_radius(cites)
+        hover = html.escape(f"{title}（{node.get('year') or 'n.d.'} · 被引 {cites}）")
+        if node.get("role") == "foundational":
+            parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{radius + 4}" fill="{color}" '
+                         f'opacity="0.22"/>')
+        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{radius}" fill="{color}" '
+                     f'stroke="#ffffff" stroke-width="1.4"><title>{hover}</title></circle>')
+        if node.get("layer") != "core":
+            parts.append(f'<text x="{x:.1f}" y="{y - radius - 5:.1f}" text-anchor="middle" '
+                         f'class="label" opacity="0.75">{html.escape(_short(title, 18))}</text>')
+        else:
+            parts.append(f'<text x="{x:.1f}" y="{y + radius + 13:.1f}" text-anchor="middle" '
+                         f'class="label">{html.escape(_short(title, 18))}</text>')
+
+    for x, y, cluster, count in aggregate_nodes:
+        color = _CLUSTER_COLORS[cluster % len(_CLUSTER_COLORS)]
+        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="13" fill="{color}" '
+                     f'stroke="#ffffff" stroke-width="1.6"/>')
+        parts.append(f'<text x="{x:.1f}" y="{y + 4:.1f}" text-anchor="middle" class="agg">'
+                     f'+{count}</text>')
+
+    # Legend.
+    ly = top + lanes_h + 30
+    grey = "#9ca3af"
+    legend: list[tuple[str, int, str]] = [
+        (f'<circle cx="{{x}}" cy="{ly - 4}" r="13" fill="{grey}"/>', 10, "被引 ≥ 500"),
+        (f'<circle cx="{{x}}" cy="{ly - 4}" r="10" fill="{grey}"/>', 104, "50–499"),
+        (f'<circle cx="{{x}}" cy="{ly - 4}" r="7" fill="{grey}"/>', 196, "< 50"),
+        ('', 266, "光环 = 奠基性论文"),
+        (f'<line x1="{{x}}" y1="{ly - 4}" x2="{{x2}}" y2="{ly - 4}" '
+         f'stroke="#94a3b8" stroke-width="1.6"/>', 412, "引用关系"),
+        (f'<line x1="{{x}}" y1="{ly - 4}" x2="{{x2}}" y2="{ly - 4}" '
+         f'stroke="#94a3b8" stroke-width="1.6" stroke-dasharray="5 4"/>', 522, "语义相似"),
+    ]
+    for glyph, offset, text in legend:
+        x = left + offset
+        parts.append(glyph.replace("{x}", f"{x:.1f}").replace("{x2}", f"{x + 32:.1f}"))
+        parts.append(f'<text x="{x + 22:.1f}" y="{ly}" class="legend">'
+                     f'{html.escape(text)}</text>')
+    parts.append(f'<text x="{width - right}" y="{ly}" text-anchor="end" class="legend">'
+                 f'标签在上方 = 候选层 · 下方 = 核心层</text>')
     parts.append('</svg>')
     return "".join(parts)
 

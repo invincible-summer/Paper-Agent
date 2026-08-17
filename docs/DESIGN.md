@@ -370,7 +370,9 @@ topic (+conception)
 
 ### 7.1 真流式帧序
 
-role 帧 → `delta.reasoning`（provider 原生 reasoning、显式 `<thinking>`、工具调用前说明、公共进度文案与 15s 心跳）→ `delta.content`（answer 增量）→ stop 帧（finish_reason=stop/length + usage + x_soda）→ `data: [DONE]`。帧随 agent 事件即时转发（非跑完重放），流式层不改写 provider 原始 reasoning；`use_skill` 的公开工具开始/结果事件仍被忽略。未产出内容即失败 → HTTP 5xx；流式中途出错 → stop 帧 + error 字段 + [DONE]。
+role 帧 → `delta.reasoning`（provider 原生 reasoning、显式 `<thinking>`、工具调用前说明、带参 emoji 进度文案与 15s 心跳）→ `delta.content`（**Markdown 卡片块** 与 answer 增量，见 §7.6）→ stop 帧（finish_reason=stop/length + usage + x_soda）→ `data: [DONE]`。帧随 agent 事件即时转发（非跑完重放），流式层不改写 provider 原始 reasoning；`use_skill` 的公开工具开始/结果事件仍被忽略，但技能**新加载**成功会触发专用 `skill_loaded` 内部事件（只携带技能名），`/v1` 通道将其同时映射为思考折叠提示（`📘 已加载技能《标题》，按其工作流执行…`）与正文技能行（`━━ 📘 技能 · 标题 ━━`，可经展示策略关闭），web 通道原样转发该命名事件而前端忽略——自制前端行为不变。未产出内容即失败 → HTTP 5xx；流式中途出错 → stop 帧 + error 字段 + [DONE]。
+
+**alias 一致性不变量**：卡片块与技能行作为 `delta.content` 的一部分进入 `content_parts` 与 `finalize_turn` 的 `final_answer`，保证下一轮 `canonical_message_chain` 与清小搭回传的 assistant 内容逐字一致——否则跨轮会话续接会断裂。卡片与回答共享 `max_tokens*4` 内容预算，且卡片占比被硬性限制在 60% 以内；预算过小（<2000 字符）时直接跳过卡片。
 
 ### 7.2 API 独立存储、会话身份与 7 天 Checkpoint
 
@@ -386,9 +388,11 @@ content 数组解析：`text` 直取；`file` 与 `image_url` 统一经过 `save
 
 ### 7.4 文件产物输出（`x_soda.attachments`）
 
-本轮成功调用 research_map/write_review 时，`tools/export/report.py` 写入 API 独立 export artifact；research_map 同时产出 Markdown 结构化报告和静态 SVG 谱系图，write_review 产出 Markdown。非流式挂响应顶层、流式挂 stop 帧：`{fileUrl, fileName, fileType, mimeType, fileSize}`（4 必填+size）。展示名与物理 hash 路径分离，每次导出产生唯一 public alias；fileUrl 由请求 base URL 拼 `/files/{alias}`，清小搭负责转存。`/files` 先解析未过期 API alias，再回退 web exports；过期 API alias 固定 404。此外，`data.files` 型工具结果（export_report / export_manuscript）在当轮同样转换为附件下发——写作产物导出在清小搭侧也是可下载文件卡片。
+本轮成功调用 research_map/write_review 时，`tools/export/report.py` 写入 API 独立 export artifact；research_map 同时产出 Markdown 结构化报告和静态 SVG 谱系图（标题块/彩色簇泳道标签/被引三档节点/奠基光环/`+N` 聚合桶/年份网格/图例，与前端 `GenealogyGraph` 同布局规则），write_review 产出 Markdown。非流式挂响应顶层、流式挂 stop 帧：`{fileUrl, fileName, fileType, mimeType, fileSize}`（4 必填+size，image 类自动补可选 `previewUrl`）。展示名与物理 hash 路径分离，每次导出产生唯一 public alias；fileUrl 由请求 base URL 拼 `/files/{alias}`，清小搭负责转存。`/files` 先解析未过期 API alias，再回退 web exports；过期 API alias 固定 404。此外，`data.files` 型工具结果（export_report / export_manuscript）在当轮同样转换为附件下发——写作产物导出在清小搭侧也是可下载文件卡片。
 
-协议边界必须明确：`openai-compatible-agent-integration-guide.md` 只定义正文/推理增量和 `x_soda.attachments`，没有任意 React 工具卡或交互图谱组件协议。因此自有前端的 `SearchResultCard`、`ResearchMapCard`、`GenealogyGraph` 等不能原样出现在清小搭；清小搭接收 Agent 的自然语言总结、附件文件卡和静态 SVG 图。筛选、缩放、节点详情及“深问这篇”等交互继续由本项目 `/chat` 提供，不发送私有未声明字段冒充兼容能力。
+三类工具结果还会追加**当轮即时附件**（`openai_compat._extra_attachments`，均走同一 export artifact 管道与 24h TTL）：`explain_element` 的图/表裁剪图 PNG（落盘位置按 `settings.reader.assets_dir` 解析，且重新校验该文档属于当前会话的元素 scope，会话隔离红线在附件层二次生效）；`citation_export` 的 `.bib`/`.txt` 引用文件；`field_census` 的纯 SVG 趋势图（年度折线 + 高产作者/机构横条，`tools/export/cards.py::render_field_census_svg`）。
+
+协议边界必须明确：`openai-compatible-agent-integration-guide.md` 只定义正文/推理增量和 `x_soda.attachments`，没有任意 React 工具卡或交互图谱组件协议。因此自有前端的 `SearchResultCard`、`ResearchMapCard`、`GenealogyGraph` 等不能原样出现在清小搭；清小搭接收 Agent 的自然语言总结、Markdown 卡片仿真（§7.6）、附件文件卡和静态 SVG 图。筛选、缩放、节点详情及“深问这篇”等交互继续由本项目 `/chat` 提供，不发送私有未声明字段冒充兼容能力。
 
 ### 7.5 生命周期、磁盘压力与 API Trace
 
@@ -397,6 +401,14 @@ content 数组解析：`text` 直取；`file` 与 `image_url` 统一经过 `save
 - **账号数据清理**（`/admin/accounts-data` + `core/admin_accounts.py`）：管理员统一查看 web 账号与 Agent API Key 的数据占用（history_record / data/uploads / trace / API session+private blob），按账号彻底删除。文件删除前全量覆写 + fsync，API state.db 使用 `PRAGMA secure_delete` 并 `VACUUM` 回收空间；共享 PDF/assets 缓存单独一键清理，deep_read 需要时自动重下。
 
 API Trace 与 web Trace 独立：off 只写匿名请求/错误/Token/耗时聚合；metadata 仅 trace id、模型、工具名、状态、错误码、Token、耗时；full 仅供临时排障并脱敏 Key、bytes、完整正文和 URL query，最长 7 天。web Trace 仍按原路径和原始行为工作。管理员浏览器页面 `/admin/api-storage` 提供策略、容量、状态、清理记录、完整帮助 catalog 和危险操作确认；Agent Key 无管理权限。
+
+### 7.6 Markdown 卡片仿真与展示策略（`/admin/display-policy`）
+
+`tools/export/cards.py` 是 `/v1` 通道专属的卡片渲染层：每个工具结果（`ToolResult.to_dict()` 载荷）可渲染为一段紧凑 Markdown 卡片（emoji 卡头对齐前端 `TOOL_META`、列表优先保证纯文本降级可读、top-N 截断、单卡 1200 字符上限、缺字段优雅降级为一行摘要或空），在工具完成时以 `delta.content` 插入、位于最终回答之前——复刻自制前端"卡片在回答上方"的布局。8 个核心工具（检索/研究地图/阅读路径/深读/元素解读/领域普查/综述/引文导出）有完整卡片渲染器，其余工具渲染一行摘要；`explain_element` 按图/表/公式分三态（VLM 描述 / GFM 表格 / LaTeX 代码块）。
+
+策略存于 `data/openai_api/state.db` 的 `api_display_policy` 单行表（schema v5，乐观锁版本并发）：`preset ∈ {core, all, custom, off}`（默认 core）、`enabled_tools`（custom 时的显式工具集）、`skill_card_enabled`（正文技能行开关；思考折叠提示始终保留）。管理员经 `/api/v1/admin/display-policy`（GET/PUT，复用 `_administrator` 鉴权与 `expected_version` 乐观锁）与前端 `/admin/display-policy` 页面配置；每请求读取一次（存储读取失败时降级为 core 默认，绝不让对话回合失败）。`off` 关闭全部 Markdown 卡片，思考折叠中的进度提示与文件附件不受影响。
+
+`scripts/preview_qxd_cards.py` 在本地把全部卡片与两张 SVG 渲染到 `data/preview/`（gitignored）供部署前目检，不参与部署。
 
 ### 7.6 其他契约
 

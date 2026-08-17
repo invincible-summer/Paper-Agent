@@ -17,7 +17,7 @@
 - **check_structure** — 上传草稿结构体检（`tools/writing/structure_check.py`，纯代码零模型消耗）：章节树（markdown/数字/中文/LaTeX 标题）/ IMRaD 缺失章节 / 章节比例失衡 / 摘要长度 / 引用卫生 / 图表统计，前端专用卡片渲染体检报告
 - **check_format** — 格式检查（纯代码）：图表编号连续性与正文引用、引用风格混用、GB/T 7714 规范度、关键词数量、标题断号；LaTeX 源查 \cite/\ref/参考文献块配对；支持传入用户格式要求逐条对照，排版项诚实列入人工核对清单
 - **export_manuscript** — 写作产物导出：初稿/润色稿/修改清单 → docx / tex（ctexart 中文可编译）/ md 下载文件，清小搭侧经 x_soda 附件下发
-- **清小搭展示边界** — 自有前端的 React 工具卡和可交互谱系图不会随 OpenAI 协议跨端执行；清小搭稳定获得正文/推理与 `x_soda.attachments` 文件卡。研究地图额外导出 Markdown 报告和静态 SVG 谱系图，使主题簇与图关系可在清小搭查看；交互筛选、缩放、节点“深问”仍需打开本项目自有前端
+- **清小搭展示边界与卡片仿真** — 自有前端的 React 工具卡和可交互谱系图不会随 OpenAI 协议跨端执行；`/v1` 通道以文档允许的三个表面复刻视觉效果：正文 **Markdown 卡片仿真**（`tools/export/cards.py`，检索/研究地图/阅读路径/深读/元素解读/领域普查/综述/引文导出等完整卡片，插在回答之前，列表优先保证纯文本降级可读）、思考折叠中的 **emoji 进度与技能加载提示**（`📘 已加载技能《…》` + 正文 `━━ 📘 技能 · … ━━` 行）、以及 `x_soda.attachments` **文件卡片**（研究地图 Markdown 报告 + 静态 SVG 谱系图、元素裁剪图 PNG、BibTeX 文件、领域普查趋势图 SVG）。卡片覆盖范围由管理员在 `/admin/display-policy` 配置（core/all/custom/off 预设，默认 core 重点工具）；交互筛选、缩放、节点“深问”仍需打开本项目自有前端
 - **integrity_sweep** — 可靠性质检（纯官方 API，零模型）：逐篇查撤稿（OpenAlex `is_retracted`）/ 勘误或关切声明（Crossref `relation`）/ arXiv 预印本是否已有正式版；写综述、投稿导出前必跑
 - **bib_import** — 导入 .bib 文献库（Zotero/EndNote/Mendeley 导出）到候选集，DOI 经 Crossref 自动补全，与会话论文去重后并入；与 citation_export 双向互通
 - **exhibit_index** — 图表导览：列出网络论文或上传 PDF / DOCX / 图片里的图、表、公式（编号/类型/页码/缩略图）；上传附件按需解析并复用缓存，点击元素可继续追问
@@ -58,6 +58,7 @@
 - 多轮对话：credential/user/message-chain HMAC alias + 7 天结构化 Checkpoint；重启恢复论文、摘要与 RAG，完整 messages/reasoning 不落盘
 - 多模态输入：支持 OpenAI content 数组——`file` 与 `image_url`（URL 或 data URI）统一注册为会话附件，上传阶段只做快速提取，后续问答/深读按需调用视觉理解并缓存；URL 下载保留 SSRF 防护与 50MB 上限。`input_audio` 当前明确降级为不支持音频解析
 - 文件产物输出：研究地图 / 综述可生成为 markdown；`export_manuscript` 可导出 md / docx / tex，下载路由同时支持 `.txt` 文本产物。所有文件均由 `GET /files/{name}` 下载，长中文文件名受 basename 与后缀白名单保护并可正常获取
+- 富展示（按接口文档能力实现）：工具完成时正文插入 Markdown 卡片仿真（默认 8 个核心工具完整卡片，其余一行摘要）；技能加载触发思考折叠提示 + 正文技能行；`explain_element` 图表裁剪图、`citation_export` 的 .bib、`field_census` 趋势图 SVG 作为当轮附件卡片下发（image 类附件自动带 `previewUrl`）。卡片策略由管理员在 `/admin/display-policy` 页面配置（`api_display_policy` 单行表，schema v5，乐观锁），存于 `data/openai_api/state.db`
 - 接入向导：`baseUrl = https://你的域名/v1`，`credential = 管理员创建的长期 Agent API Key`；附件 URL 由 `PUBLIC_BASE_URL` 生成
 
 ## 多用户账号（自有前端公开部署时开启）

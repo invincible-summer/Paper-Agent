@@ -196,3 +196,33 @@ export async function cleanupWebPaperCache(): Promise<{ deleted: boolean; files:
   });
   return parseResponse(res);
 }
+
+export interface ApiDisplayPolicy {
+  preset: "core" | "all" | "custom" | "off";
+  enabled_tools: string[];
+  skill_card_enabled: boolean;
+  version: number;
+  updated_by: string;
+  updated_at: number;
+}
+
+export async function getDisplayPolicy(): Promise<{
+  policy: ApiDisplayPolicy;
+  tools: string[];
+  core_tools: string[];
+}> {
+  const res = await fetch(`${BASE}/display-policy`, { headers: authHeaders(), cache: "no-store" });
+  return parseResponse(res);
+}
+
+export async function updateDisplayPolicy(
+  expectedVersion: number,
+  changes: Partial<Pick<ApiDisplayPolicy, "preset" | "enabled_tools" | "skill_card_enabled">>,
+): Promise<{ policy: ApiDisplayPolicy }> {
+  const res = await fetch(`${BASE}/display-policy`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ expected_version: expectedVersion, ...changes }),
+  });
+  return parseResponse(res);
+}

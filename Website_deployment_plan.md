@@ -2124,6 +2124,15 @@ df -h
 - 对 ECS CPU、内存、Swap、磁盘 >80%、服务重启次数、LLM 429/5xx 设置告警；
 - 更新代码后先在维护窗口运行测试和 `pnpm build`，再依次重启后端与前端。
 
+### 13.1 清小搭富展示（Markdown 卡片仿真 + 文件卡片）说明
+
+`feat/qxd-rich-cards` 及之后的版本为 `/v1` 清小搭通道增加了富展示能力：工具完成时在正文插入 Markdown 卡片、技能加载提示（思考折叠 + 正文技能行）、以及更多 `x_soda.attachments` 文件卡片（元素裁剪图 PNG、BibTeX 文件、领域普查趋势图 SVG）。部署相关要点：
+
+- **零新增 Python / 系统依赖**：卡片与 SVG 全部由纯 Python 生成，`§4` 的依赖安装步骤不变；研究图谱仍只发 SVG（如真机验证发现清小搭 OSS 转存后无法渲染 SVG，再评估 cairosvg + libcairo 的 PNG 光栅化兜底并同步更新本手册）。
+- **数据库 schema v5 自动迁移**：`data/openai_api/state.db` 新增 `api_display_policy` 单行表，后端启动时自动建表，无需任何手工数据操作。
+- **卡片策略管理页**：管理员可在 `/admin/display-policy` 配置卡片预设（core 重点工具完整卡片 / all 全部 / custom 自定义勾选 / off 关闭）与正文技能行开关；已部署前端的服务器更新代码后需重新 `pnpm build`（见 §8）才能看到新页面。默认预设即 core，不配置也能获得完整效果。
+- **本地预览**：开发机可运行 `./.env_conda/bin/python scripts/preview_qxd_cards.py` 在 `data/preview/` 目检卡片与 SVG 效果（该目录不部署、不入库）。
+
 示例备份：
 
 ```bash

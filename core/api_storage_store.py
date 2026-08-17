@@ -5,6 +5,7 @@ construct an ``ApiStorageStore`` and invoke ``initialize`` explicitly.
 """
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import sqlite3
@@ -16,7 +17,7 @@ from typing import Any, Iterator, Mapping
 
 from core.storage_context import StorageContext, StoragePathError
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class ApiStorageError(RuntimeError):
@@ -25,6 +26,22 @@ class ApiStorageError(RuntimeError):
 
 class PolicyVersionConflict(ApiStorageError):
     """Optimistic policy update lost a race."""
+
+
+@dataclass(frozen=True)
+class ApiDisplayPolicy:
+    """清小搭 (/v1) markdown-card display policy, admin-editable.
+
+    preset: "core" = the 8 key tools get full cards; "all" = every tool;
+    "custom" = exactly ``enabled_tools``; "off" = no markdown cards (tool
+    progress in the thinking fold and file attachments remain).
+    """
+    preset: str = "core"
+    enabled_tools: tuple[str, ...] = ()
+    skill_card_enabled: bool = True
+    version: int = 1
+    updated_by: str = "bootstrap"
+    updated_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -240,6 +257,16 @@ CREATE TABLE IF NOT EXISTS api_runtime_state (
     updated_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS api_display_policy (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    preset TEXT NOT NULL,
+    enabled_tools_json TEXT NOT NULL DEFAULT '[]',
+    skill_card_enabled INTEGER NOT NULL DEFAULT 1 CHECK (skill_card_enabled IN (0, 1)),
+    version INTEGER NOT NULL CHECK (version > 0),
+    updated_by TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS api_secrets (
     name TEXT PRIMARY KEY,
     secret_blob BLOB NOT NULL,
@@ -318,6 +345,12 @@ class ApiStorageStore:
             conn.execute(
                 "INSERT OR IGNORE INTO api_runtime_state"
                 "(id, heavy_writes_paused, updated_at) VALUES(1, 0, ?)",
+                (now,),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO api_display_policy"
+                "(id, preset, enabled_tools_json, skill_card_enabled, version, "
+                "updated_by, updated_at) VALUES(1, 'core', '[]', 1, 1, 'bootstrap', ?)",
                 (now,),
             )
             conn.commit()
@@ -419,6 +452,88 @@ class ApiStorageStore:
                 )
             conn.commit()
         return self.get_policy()
+
+    # ------------------------------------------------------------------
+    # /v1 markdown-card display policy
+    # ------------------------------------------------------------------
+
+    _DISPLAY_ENUMS = {"preset": {"core", "all", "custom", "off"}}
+    _DISPLAY_COLUMNS = {"preset": "preset", "enabled_tools": "enabled_tools_json",
+                        "skill_card_enabled": "skill_card_enabled"}
+
+    def get_display_policy(self) -> ApiDisplayPolicy:
+        """Current display policy; the default when the row is missing
+        (a turn must never fail because of a display-policy read)."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM api_display_policy WHERE id = 1").fetchone()
+        if row is None:
+            return ApiDisplayPolicy()
+        try:
+            tools = tuple(str(t) for t in json.loads(row["enabled_tools_json"] or "[]"))
+        except (ValueError, TypeError):
+            tools = ()
+        return ApiDisplayPolicy(
+            preset=str(row["preset"]),
+            enabled_tools=tools,
+            skill_card_enabled=bool(row["skill_card_enabled"]),
+            version=int(row["version"]),
+            updated_by=str(row["updated_by"]),
+            updated_at=float(row["updated_at"]),
+        )
+
+    def update_display_policy(
+        self, changes: Mapping[str, Any], *, expected_version: int, updated_by: str
+    ) -> ApiDisplayPolicy:
+        """Optimistic-lock update; ``enabled_tools`` is a JSON-serializable
+        list of tool names used only by the "custom" preset."""
+        allowed = {"preset", "enabled_tools", "skill_card_enabled"}
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"unsupported display policy fields: {', '.join(sorted(unknown))}")
+        if not changes:
+            return self.get_display_policy()
+        actor = (updated_by or "").strip()
+        if not actor or len(actor) > 128:
+            raise ValueError("updated_by must be 1-128 characters")
+        current = self.get_display_policy()
+        merged = {
+            "preset": changes.get("preset", current.preset),
+            "enabled_tools": tuple(changes.get("enabled_tools", current.enabled_tools)),
+            "skill_card_enabled": changes.get(
+                "skill_card_enabled", current.skill_card_enabled),
+        }
+        if merged["preset"] not in self._DISPLAY_ENUMS["preset"]:
+            raise ValueError("invalid display preset")
+        if not all(isinstance(t, str) and t.strip() for t in merged["enabled_tools"]):
+            raise ValueError("enabled_tools must be a list of non-empty tool names")
+        if not isinstance(merged["skill_card_enabled"], bool):
+            raise ValueError("skill_card_enabled must be a boolean")
+        assignments = [f"{self._DISPLAY_COLUMNS[column]} = ?" for column in sorted(changes)]
+        now = time.time()
+        params: list[Any] = []
+        for column in sorted(changes):
+            value = changes[column]
+            if column == "enabled_tools":
+                params.append(json.dumps(sorted(tuple(value)), ensure_ascii=False))
+            elif column == "skill_card_enabled":
+                params.append(1 if value else 0)
+            else:
+                params.append(value)
+        params.extend([actor, now, expected_version])
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE api_display_policy SET " + ", ".join(assignments) +
+                ", updated_by = ?, updated_at = ?, version = version + 1 "
+                "WHERE id = 1 AND version = ?",
+                params,
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise PolicyVersionConflict(
+                    f"display policy version conflict (expected {expected_version})"
+                )
+            conn.commit()
+        return self.get_display_policy()
 
     @staticmethod
     def _validate_policy(policy: Mapping[str, Any]) -> None:
