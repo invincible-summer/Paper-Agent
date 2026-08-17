@@ -1,0 +1,39 @@
+# Tested production dependency set for Python 3.11.
+# Keep direct dependencies and resolver-sensitive transitive packages pinned so
+# fresh deployments do not drift or spend hours backtracking through releases.
+langchain-openai==1.3.4
+langchain-core==1.4.9
+langsmith==0.10.1
+openai==2.45.0
+
+httpx==0.28.1
+PyMuPDF==1.28.0
+docling==2.119.0
+docling-slim==2.119.0
+docling-core==2.91.0
+docling-ibm-models==3.13.3
+docling-parse==7.11.0
+chromadb==1.5.9
+sentence-transformers==5.6.1
+transformers==5.14.1
+huggingface-hub==1.23.0
+tokenizers==0.22.2
+networkx==3.6.1
+python-dotenv==1.2.2
+python-docx==1.2.0
+feedparser==6.0.12
+tenacity==9.1.4
+scikit-learn==1.9.0
+numpy==2.4.6
+
+fastapi==0.139.0
+uvicorn==0.51.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+sse-starlette==3.4.5
+
+# The public version pins also accept the +cpu local-version wheels installed
+# from requirements-cpu.txt. Installing these from the default PyPI index on
+# Linux may pull multi-gigabyte CUDA dependencies, so install CPU wheels first.
+torch==2.13.0
+torchvision==0.28.0

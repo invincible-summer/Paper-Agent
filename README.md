@@ -84,7 +84,10 @@ cd Paper_Agent
 conda create -p .env_conda python=3.11 -y --solver=classic
 conda activate ./.env_conda
 
-# 安装依赖（后端依赖在 backend/pyproject.toml，一并装上）
+# CPU 环境先安装官方 CPU-only PyTorch，避免 Linux 默认轮子拉取 CUDA 运行库
+pip install -r requirements-cpu.txt
+
+# 安装受 constraints.txt 约束的已验证依赖组合；后端依赖一并装上
 pip install -r requirements.txt -e backend
 
 # 安装前端依赖（只在第一次做）

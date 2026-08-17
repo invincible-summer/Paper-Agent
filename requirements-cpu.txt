@@ -1,0 +1,6 @@
+# CPU-only PyTorch wheels for the supported single-ECS deployment.
+# Install this file before requirements.txt. GPU hosts should deliberately use
+# the matching official PyTorch CUDA index instead of this file.
+--index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu

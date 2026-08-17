@@ -1,91 +1,762 @@
-# Paper Agent 生产部署手册（3–6 人并发 · 阿里云 ECS）
+# Paper Agent 生产部署手册（北京 ECS · 授权子域名直连 · API 网关回退）
 
-> **适用目标**：一台服务器同时承载清小搭 OpenAI 兼容接口、FastAPI 后端，以及可选的 Next.js 自有前端；按 **3–6 个混合并发用户**设计。软件仍保留账号隔离、会话隔离、限流、熔断和后续横向扩展边界。
+> **当前实际状态**：使用阿里云华北 2（北京）经济型 e 4C16G；已实测北京公网出口能访问部分论文来源；已获得一个二级域名的使用授权。主路线改为“二级域名 A 记录 → 北京 ECS 公网 IPv4 → Nginx HTTPS → FastAPI/Next.js”；传统 API 网关默认二级域名仅在借用子域名不满足备案/接入条件或 DNS尚未生效时回退。
 >
-> **强制协议基线**：清小搭接入必须严格遵循仓库根目录 `openai-compatible-agent-integration-guide.md`。生产环境只通过 HTTPS 暴露服务。
+> **子域名使用前置条件**：父域名必须已经完成 ICP备案，且使用范围得到备案主体/域名所有者明确授权。如果父域名不是通过阿里云备案或尚未完成阿里云接入备案，不能仅靠添加 A 记录直接指向北京 ECS；应由备案主体先完成接入备案。主域名备案通常覆盖其子域名，但不会把不相干的实际服务主体自动变成合法备案主体。
+>
+> **你需要发给域名所有者的最小信息**：①完整二级域名名称，例如 `paper-agent.example.com`；②北京 ECS控制台显示的**公网 IPv4**；③记录类型 `A`；④TTL建议 600 秒；⑤先关闭 CDN/代理，仅做 DNS解析。不要发送 ECS私网 IP、SSH私钥、管理员密码、DeepSeek Key或 `pa_live_` Agent Key。
+>
+> **强制协议基线**：清小搭接入必须严格遵循 `openai-compatible-agent-integration-guide.md`，公网入口必须支持 HTTPS、Bearer鉴权、`GET /v1/models`、`POST /v1/chat/completions`、长连接 SSE、stop+usage、`[DONE]` 和可下载附件 URL。
 
 ## 0. 结论先行
 
-### 0.1 正式规格
+### 0.1 当前固定配置
 
-| 项目 | 正式建议 | 说明 |
+| 项目 | 当前选择 | 说明 |
 |---|---:|---|
-| ECS | **4 vCPU / 16 GiB** | 可承受 3–6 个混合用户；Docling、嵌入和精排首次并发会产生明显 CPU/内存峰值 |
-| 系统 | Ubuntu Server 22.04 LTS x86_64 | 本手册按此编写 |
-| 系统盘 | **100 GiB ESSD PL1** | 模型缓存、PDF、元素裁图、Chroma、SQLite、导出和日志会持续增长 |
-| 公网带宽 | **10 Mbps 固定带宽** | PDF/DOCX 上传下载更稳定；若几乎不传文件，5 Mbps 可作为最低档 |
-| Swap | **4 GiB** | 只用于吸收瞬时峰值，不能替代内存 |
-| Uvicorn | **1 worker，不能增加** | 会话内存、熔断器、限流信号量都是进程内状态 |
+| 地域 | **华北 2（北京）** | ECS/VPC固定北京 |
+| ECS | **经济型 e `ecs.e-c1m4.xlarge`，4C16G** | 1–3 人；重型 OCR/深读并发 1 |
+| 系统 | **Ubuntu Server 22.04 最新点版本，x86_64** | 公共镜像 |
+| 系统盘 | **100 GiB：ESSD Entry优先；控制台默认/免费额度为AutoPL时可选AutoPL** | AutoPL关闭性能突发和预配置性能；PL0也可 |
+| 公网 IPv4 | **分配** | 提供给域名所有者创建 A 记录 |
+| 公网计费 | **按使用流量，峰值 10 Mbps** | 论文下载和附件出站按流量计费 |
+| 主公网入口 | **授权子域名 + Nginx 443** | 父域名备案/阿里云接入核验通过后启用 |
+| 回退入口 | **传统 API 网关默认二级域名** | 只供测试，1000次/天且有兼容/超时限制 |
+| 安全组 | **22/80/443** | 22仅管理员 `/32`；80/443全网；8000/3000不开放 |
+| 登录 | **SSH密钥对** | 私钥不入库 |
+| Swap | **4 GiB** | 只吸收峰值 |
+| Uvicorn | **1 worker** | 不增加 worker |
 
-**不建议把 2C8G 或 4C8G 作为正式 3–6 人生产规格。** 它们可用于个人调试或纯清小搭轻对话，但在 Docling OCR、深读、嵌入/精排和导出重叠时容易排队或触发内存压力。若经常出现 6 路重任务（多份扫描 PDF 同时 OCR/深读），直接升级到 **8C32G**，不要增加 Uvicorn worker。
+### 0.2 子域名是否可直接使用的判定
 
-### 0.1.1 仅向清小搭提供 API 时，2 vCPU / 4 GiB 是否可用
-
-**可以作为低成本起步规格，但不是 3–6 路重型深读并发规格。** 适用边界必须同时满足：不运行 Next.js、自有前端用户为 0；3–6 人以文字问答/检索为主；同一时刻最多 1 路 PDF 深读、OCR、VLM 或 DOCX 导出；配置 4 GiB swap；启用本文的 API 独立 7 天 Checkpoint、磁盘阈值和 hourly cleanup timer。首次 Docling/embedding/reranker 加载仍可能接近内存上限，建议在 2C4G 上关闭本地 reranker，扫描 PDF 排队处理。
-
-| 规格 | 推荐场景 | 明确限制 |
+| 检查 | 结果 | 下一步 |
 |---|---|---|
-| **2 vCPU / 4 GiB / 60–100 GiB** | 仅 `/v1`，3–6 个账号轻量交替使用 | 重任务并发 1；可能使用 swap；首次深读慢；不承诺 6 路混合负载 |
-| **4 vCPU / 16 GiB / 100 GiB** | 3–6 人混合使用，含前端或并发深读 | 本手册正式验收规格 |
+| 父域名已有 ICP，且阿里云是接入商 | **可直接进入 DNS/HTTPS配置** | 主路线 |
+| 父域名已有 ICP，但备案在其他云厂商 | **通常需要阿里云接入备案** | 完成接入备案前使用 API网关回退 |
+| 父域名未备案 | **不能指向北京 ECS正式公网服务** | 先备案或回退 API网关测试域名 |
+| 域名所有者未明确授权 | **不能使用** | 获得书面/可追溯授权 |
+| 域名 CAA限制目标 CA | 证书可能签发失败 | 让域名所有者调整 CAA或提供证书 |
 
-2C4G 出现 OOM、swap 持续增长、单次深读长期阻塞文字 SSE 或磁盘频繁达到 85% 时，直接升配到 4C16G；**不要通过增加 Uvicorn worker 规避资源不足**。
+### 0.3 论文来源据实启用
 
-### 0.2 验收负载
-
-上线前至少同时制造以下 6 路请求并观察 15 分钟：
-
-1. 3 路普通流式对话；
-2. 1 路文献检索；
-3. 1 路 PDF 深读/OCR；
-4. 1 路 DOCX 导出与下载。
-
-验收目标：没有 OOM、服务不重启、SSE 持续有帧、错误率为 0；CPU 短时 100% 可以接受，但不应长时间无响应。内存持续超过 13 GiB、Swap 持续增长或深读长期排队时升级 8C32G。
+北京 ECS能出公网不代表所有境外论文站点稳定。本手册不再假定全源可达：部署后对 OpenAlex、Crossref、arXiv、Semantic Scholar、Europe PMC、DOAJ、HAL、OpenAIRE 和真实 OA PDF分别测试；只启用实测稳定来源。`401/403/429` 表示网络可达但需凭证/限流处理，`000`、DNS失败和持续超时才判定不可用。全文仍严格 OA-only，不通过校园账号、代理或订阅库自动抓取。
 
 ---
 
-## 1. 架构与端口
+## 1. 主路线与回退路线
+
+### 主路线：授权子域名直连北京 ECS
 
 ```text
-清小搭网关 ── HTTPS ──┐
-浏览器（可选前端）───┼── nginx :443
-                       ├── /v1/*, /api/v1/*, /files/*, /elements/* → FastAPI :8000
-                       └── /                                         → Next.js :3000
-
-FastAPI（单 worker）
-  ├── DeepSeek 文本 LLM
-  ├── 可选 OpenAI-compatible VLM
-  ├── OpenAlex/arXiv/S2 等公开论文源
-  └── SQLite + Chroma + 本地文件（单机持久化）
+清小搭/浏览器
+  → https://paper-agent.example.com:443
+  → DNS A记录
+  → 北京 ECS公网 IPv4
+  → Nginx
+  ├── /v1/*       → FastAPI 127.0.0.1:8000
+  ├── /api/v1/*   → FastAPI 127.0.0.1:8000
+  ├── /files/*    → FastAPI 127.0.0.1:8000
+  ├── /elements/* → FastAPI 127.0.0.1:8000
+  └── /            → Next.js 127.0.0.1:3000
 ```
 
-- `/v1/models`、`/v1/chat/completions`：清小搭渠道，仅接受 Bearer Agent API Key。
-- `/api/v1/*`：自有前端渠道，使用浏览器登录令牌；生产建议禁止游客。
-- `/files/*`：清小搭生成的 API 公共别名可公开短期读取；自有前端生成的 Web 导出必须携带浏览器登录/游客身份，按所有者校验。不要用 Basic Auth 覆盖整站。
-- `/elements/assets/*`：论文元素图片；如自有前端需要展示，必须转发。
-- 8000、3000 只监听 `127.0.0.1`，安全组不得放行。
+主路线优势：
+
+- 没有 API网关默认域名1000次/天限制；
+- 没有默认 `Content-Disposition` 兼容风险；
+- 没有 Serverless 60秒后端超时；
+- Nginx可将 SSE和深读超时设为3600秒；
+- 自有前端、附件和清小搭共用同一个 HTTPS Origin。
+
+### 回退路线：传统 API 网关默认域名
+
+```text
+清小搭
+  → https://xxxxxxxx-cn-beijing.alicloudapi.com/v1
+  → API网关 VPC授权
+  → ECS私网IP:8080
+  → Nginx
+  → FastAPI 127.0.0.1:8000
+```
+
+仅在以下情况启用：
+
+- 域名所有者尚未添加 A记录；
+- DNS尚未生效；
+- 阿里云接入备案尚未完成；
+- HTTPS证书暂未签发；
+- 只需三天短对话/探测。
+
+云助手端口转发不属于公网服务入口，不能用于清小搭。
 
 ---
 
-## 2. 创建 ECS 与安全组
+## 2. 在阿里云控制台购买 ECS（第一次部署逐按钮版）
+
+> 本节按阿里云 ECS 官方“自定义购买”流程整理，控制台按钮名称核对日期为 **2026-08-16**。阿里云会灰度更新界面，若文字略有变化，优先按本节给出的“配置目标”核对，不要只凭按钮位置操作。正式下单前，务必在右侧费用明细中重新确认地域、计费方式、CPU/内存、系统盘、公网带宽和购买时长。
+
+### 2.0 下单前先决定四件事
+
+#### 2.0.1 地域：固定选择华北 2（北京）
+
+本次所有地域级资源都选择：
+
+```text
+地域：华北 2（北京）
+```
+
+包括 ECS、VPC、vSwitch、普通安全组、API 网关实例/API 分组和 VPC 授权。可用区只需选择仍有 `ecs.e-c1m4.xlarge` 库存的北京可用区；vSwitch 必须属于同一可用区。
+
+#### 2.0.2 计费：前三天按量，备案后再转长期
+
+本次三天部署选择：
+
+```text
+ECS：按量付费
+API 网关：短对话用 Serverless；完整深读用按量专享实例
+自动释放：不设置
+释放保护：开启
+费用预警：当天创建
+```
+
+不要选择抢占式实例。三天结束后如果继续运行，先完成容量和清小搭验证，再决定转包年包月；办理 ICP 时再确保实例满足备案控制台要求。
+
+#### 2.0.3 实例规格族：本次固定选择经济型 e 4C16G
+
+本次不再在 U/c/g 之间选择，购买页目标固定为：
+
+```text
+规格族：经济型实例规格族 e
+实例规格：ecs.e-c1m4.xlarge
+vCPU：4
+内存：16 GiB
+架构：x86_64
+```
+
+阿里云官方规格表中，`ecs.e-c1m4.xlarge` 是 4 vCPU / 16 GiB。经济型 e 使用非绑定 CPU 调度，适合轻载智能体网关、中小网站和开发测试；本项目可以运行，但必须接受 Docling/OCR 期间的 CPU 性能波动。
+
+购买页如果看不到该型号：
+
+1. 先确认筛选条件是“4 vCPU / 16 GiB”，规格族是“经济型 e”；
+2. 换同一地域的其他可用区；
+3. 仍无库存时，不要降到 2C4G，也不要改成 ARM；
+4. 可以选择同为 4C16G 的通用型 `g8i/g9i`，或暂停购买等待库存；
+5. 不选择突发性能 t、抢占式、GPU、本地盘或共享型老规格。
+
+容量边界补充：**2 vCPU / 4 GiB** 只适合 API-only 的受限轻量档（不运行 Next.js，且同一时刻最多一个重任务），不是本手册的生产目标；当前 1–3 人混合使用仍按 **4 vCPU / 16 GiB**、单 Uvicorn worker 部署。容量不足时升级实例，不要长期依赖 Swap，也不要通过增加 Uvicorn worker 绕过进程内状态边界。
+
+经济型 e 与其他规格的关系只作为后续升级参考：
+
+| 规格 | 什么时候换 |
+|---|---|
+| 通用算力型 U 4C8G | 内存实际很低，但希望 CPU 比 e 更稳定、价格仍较低 |
+| 计算型 c 4C8G | OCR/Docling CPU 时延比内存余量更重要 |
+| 通用型 g 4C16G | 保持 16 GiB，同时要求更稳定的企业级 CPU 性能；本项目首选升级目标 |
+| 8C32G | 经常多份扫描 PDF 或多路重任务重叠 |
+
+#### 2.0.4 域名：先决定最终访问地址
+
+生产环境推荐准备：
+
+```text
+paper-agent.example.com
+```
+
+或 API-only：
+
+```text
+api.example.com
+```
+
+必须使用 HTTPS，不能长期使用 `http://公网IP:8000`。如果还没有域名，可以先通过 SSH 和本机 `curl http://127.0.0.1:8000/health` 完成后端安装，但不要把 Bearer Key 放在公网 HTTP 中测试。
+
+### 2.0.5 北京 ECS 订单参数总表
+
+| 控制台参数 | 本次选择 | 备注 |
+|---|---|---|
+| 产品 | 云服务器 ECS | 不是轻量应用服务器 |
+| 购买方式 | 自定义购买 | — |
+| 地域 | 华北 2（北京） | 后续 API 网关也必须北京 |
+| 付费类型 | 按量付费 | 三天临时使用 |
+| 实例规格族 | 经济型实例规格族 e | — |
+| 实例规格 | `ecs.e-c1m4.xlarge` | 4 vCPU / 16 GiB |
+| 数量 | 1 台 | — |
+| 镜像 | Ubuntu 22.04 64 位最新公共镜像 | x86_64 |
+| 系统盘 | 100 GiB，优先ESSD Entry；当前订单提供AutoPL免费额度时可用AutoPL | AutoPL不启用性能突发/预配置性能 |
+| 数据盘 | 不添加 | — |
+| 文件备份 | 不开通/取消勾选“开通服务，激活备份” | 每日全文件备份保留30天，会绕过上传/Checkpoint等应用TTL |
+| 自动快照 | 不选择系统盘自动快照策略 | 整盘快照同样会延长临时数据保留期 |
+| VPC | `paper-agent-vpc` 或北京默认 VPC | 记录 VPC ID |
+| vSwitch | 有目标库存的北京可用区 | 记录 vSwitch ID |
+| 私网 IPv4 | 自动分配 | API 网关 VPC 授权使用 |
+| 公网 IPv4 | 分配 | 发给域名所有者作为 A 记录值 |
+| 公网计费 | 按使用流量，峰值 10 Mbps | 不买 NAT 网关 |
+| IPv6 | 不启用 | — |
+| 安全组 | 普通安全组 `paper-agent-sg` | 主路线开放22/80/443；回退网关才增加8080来源 |
+| 22/TCP | 管理员公网 IP `/32` | 不允许全网 |
+| 80/443 | 父域名备案/接入核验通过后开放全网 | HTTPS主入口 |
+| 8080/TCP | 主路线不开放 | 只有启用回退 API网关时才放行网关出口 IP |
+| 8000/3000 | 永不公网开放 | 127.0.0.1监听 |
+| 登录 | SSH 密钥 `paper-agent-admin` | — |
+| 实例名称 | `paper-agent-prod-01` | — |
+| 标签 | `app=paper-agent`、`env=prod` | — |
+| 云助手 | 保持默认启用 | 只用于运维，不作为清小搭入口 |
+| User Data | 留空 | — |
+| 自动释放 | 不设置 | — |
+| 释放保护 | 开启 | — |
+
+---
+
+### 2.1 进入购买页
+
+1. 登录阿里云控制台，先完成实名认证，并为阿里云账号启用 MFA；
+2. 在控制台顶部搜索框输入 **“云服务器 ECS”**，点击进入“云服务器 ECS”控制台；
+3. 左侧导航进入 **“实例与镜像” → “实例”**；
+4. 先看页面左上角的地域下拉框，切换到你准备部署的地域；
+5. 点击右上角或列表上方的 **“创建实例”**；
+6. 如果出现“快速购买”和“自定义购买”，选择 **“自定义购买”**。快速购买隐藏了部分网络、安全组和磁盘选项，不适合第一次正式部署。
+
+不要在尚未确认地域时直接下单。ECS 实例、VPC、安全组和云盘都是地域级资源，页面切错地域会让后续找不到刚创建的资源。
+
+---
+
+### 2.2 “基础配置”逐项选择
+
+#### 步骤 1：付费类型
+
+```text
+付费类型：按量付费
+抢占式：不选
+自动释放：不设置
+释放保护：创建后立即开启
+```
+
+阿里云按量 ECS 创建时会实时校验账户余额。三天临时阶段不要为了备案直接购买长期实例；先把清小搭协议和 API 网关兼容性验证完。
+
+#### 步骤 2：地域和可用区
+
+```text
+地域：华北 2（北京）
+可用区：选择有 ecs.e-c1m4.xlarge 库存的任一北京可用区
+```
+
+vSwitch 必须属于同一可用区。API 网关只要求同地域/VPC，不要求和 ECS 同一可用区。
+
+#### 步骤 3：实例规格
+
+在“实例规格”区域按下面顺序操作：
+
+1. 架构选 `x86`；
+2. 规格族选择 **“经济型实例规格族 e”**；
+3. vCPU 筛选 `4`；
+4. 内存筛选 `16 GiB`；
+5. 在结果中选中：
+
+```text
+ecs.e-c1m4.xlarge
+4 vCPU / 16 GiB
+```
+
+选中后再次查看右侧配置摘要，确认不是 `ecs.e-c1m2.xlarge`（4C8G），也不是突发性能 t。购买页若没有精确型号，返回 §2.0.3 按库存处理。
+
+#### 步骤 4：镜像
+
+依次选择：
+
+1. **公共镜像**；
+2. **Ubuntu**；
+3. **Ubuntu 22.04 64 位的最新点版本**；
+4. 架构确认是 **x86_64/AMD64**。
+
+不要选择：
+
+- Windows Server；
+- 带预装面板的云市场镜像；
+- ARM64 镜像；
+- 来历不明的第三方镜像；
+- 已经带 Nginx/MySQL/宝塔等环境的一键镜像。
+
+本手册全部命令按干净的 Ubuntu Server 22.04 公共镜像编写。为减少安全更新和内核兼容问题，选择购买页提供的最新 Ubuntu 22.04 点版本；如果目标规格与镜像无法组合，先换同地域其他可用区或兼容的 x86 实例，不要临场改 ARM 或第三方镜像。
+
+#### 步骤 5：存储
+
+本次经济型 e 的系统盘容量固定为 **100 GiB**，云盘类型按购买页实际可选项和费用选择：
+
+```text
+首选低成本：ESSD Entry 100 GiB
+当前页面默认且100 GiB在免费额度内：ESSD AutoPL 100 GiB
+其他可用回退：ESSD PL0 100 GiB
+数据盘：不添加
+```
+
+经济型 e 当前支持 ESSD AutoPL。AutoPL 的基础性能相当于 ESSD PL1，但“性能突发”和“预配置性能”属于可选计费能力；Paper Agent 的SQLite、Chroma、模型缓存和单路PDF/OCR不需要额外购买这两项，所以保持关闭。实例本身也有云盘IOPS/吞吐上限，开启额外性能不一定能实际发挥。
+
+其他说明：
+
+- 60 GiB 只是轻量最低值；本项目 Python 环境、Hugging Face/Docling 模型、PDF、元素裁图、Chroma、SQLite、导出和日志会持续增长；
+- 第一次部署不需要额外数据盘，单系统盘最容易维护；
+- 不选择本地盘实例；
+- 云盘后续可以扩容，但扩容后仍需在操作系统内扩分区/文件系统；云盘不能缩容；
+- 理解释放实例时系统盘数据会丢失，按量实例必须开启释放保护。
+
+**文件备份/自动快照与本项目 TTL 的冲突：** 购买页的“文件备份基础版”会每天自动备份文件并保留约30天；整盘自动快照也会把运行数据保留到快照删除为止。两者都会让 API私有上传、Checkpoint、导出、对话或PDF超过应用内24小时/7天等TTL。因此本次取消勾选“开通服务，激活备份”，系统盘自动快照策略保持空白。需要灾备时按 §13 只备份必要的 `users.db`、配置和管理员策略，并对含密钥备份加密。
+
+---
+
+### 2.3 “网络和安全组”逐项选择
+
+#### 步骤 1：专有网络 VPC
+
+单机首次部署不需要购买 NAT 网关、负载均衡或弹性网卡。选择：
+
+```text
+专有网络：默认 VPC，或新建 paper-agent-vpc
+交换机：  当前可用区的默认 vSwitch，或新建 paper-agent-vswitch
+IPv6：    暂不启用
+```
+
+如果需要新建：
+
+1. 在 VPC 下拉框旁点击 **“创建专有网络”**；
+2. 名称填写 `paper-agent-vpc`；
+3. IPv4 网段可使用默认推荐值，例如 `192.168.0.0/16`；
+4. 在当前可用区创建 vSwitch，例如 `192.168.1.0/24`；
+5. 返回 ECS 购买页刷新并选中它。
+
+只有准备通过 VPN/专线接入现有公司网络时，才需要提前设计避免冲突的私网网段。
+
+#### 步骤 2：公网 IP、带宽、域名和服务器出网
+
+```text
+分配公网 IPv4：是
+公网线路：默认 BGP
+带宽计费：按使用流量
+峰值：10 Mbps
+IPv6：不启用
+```
+
+创建后从 ECS控制台实例详情复制“公网 IPv4”，不要用私网地址、`hostname -I` 的VPC地址或 API网关出口 IP。将公网 IPv4和准备使用的完整二级域名发给域名所有者创建 A记录。
+
+公网 IPv4同时用于：
+
+1. 域名 HTTPS入站；
+2. 管理员 SSH；
+3. ECS访问论文 API、OA PDF、DeepSeek/VLM和系统软件源。
+
+完成 §3 后按 §0.3/§9 的脚本实测论文来源，不根据“有公网 IP”推断所有境外来源必然可达。
+
+#### 步骤 3：安全组
+
+创建普通安全组：
+
+```text
+名称：paper-agent-sg
+```
+
+确认父域名备案/阿里云接入条件满足后，主路线使用：
+
+| 协议 | 端口 | 来源 | 用途 |
+|---|---:|---|---|
+| TCP | 22 | 管理员公网 IP `/32` | SSH |
+| TCP | 80 | `0.0.0.0/0` | ACME证书验证和 HTTP跳HTTPS |
+| TCP | 443 | `0.0.0.0/0` | 清小搭与浏览器 HTTPS |
+
+永远不开放：
+
+```text
+8000
+3000
+数据库端口
+全部端口
+```
+
+主路线不需要8080。只有回退到 §9.10 的 API网关方案时，才添加 TCP 8080，来源必须是 API网关控制台显示的全部出口 IP `/32`，不能全网开放。
+
+---
+
+### 2.4 “管理设置”逐项选择
+
+#### 步骤 1：登录凭证优先选 SSH 密钥对
+
+推荐选择 **密钥对**，不要把 root 密码作为长期登录方式。
+
+如果还没有密钥对：
+
+1. 在“登录凭证/密钥对”位置点击 **“创建密钥对”**，或打开 ECS 控制台 → **“网络与安全” → “密钥对”**；
+2. 点击 **“创建密钥对”**；
+3. 名称填写 `paper-agent-admin`；
+4. 选择由阿里云自动创建密钥对；
+5. 点击确认后，浏览器会下载 `.pem` 私钥文件；
+6. 立即将它移动到本机受保护目录，并在密码管理器记录用途；私钥通常只提供这一次下载机会；
+7. 返回购买页刷新，选择 `paper-agent-admin`。
+
+Linux/macOS/WSL 上先执行：
+
+```bash
+chmod 600 ~/.ssh/paper-agent-admin.pem
+```
+
+禁止：
+
+- 把 `.pem` 放进本仓库；
+- 通过聊天软件、邮件或公开网盘传私钥；
+- 把私钥内容粘贴进 `.env`；
+- 在截图、日志、Issue 中展示私钥。
+
+如果页面选择了“安全加固”模式，Ubuntu 登录用户名通常可能显示为 `ecs-user`；非加固镜像也可能使用 `root`。**以实例“连接”页面显示的默认用户名为准，不要反复猜密码。** 应用进程后面始终使用独立的 `paper-agent` 低权限账号。
+
+#### 步骤 2：名称和标签
+
+建议填写：
+
+```text
+实例名称：paper-agent-prod-01
+主机名：  paper-agent-prod-01
+资源组：  默认资源组（个人账号足够）
+标签：    app=paper-agent, env=prod
+```
+
+标签不是安全控制，但以后查账单、监控和避免误删时很有用。
+
+#### 步骤 3：高级选项
+
+- 实例元数据访问模式保持较安全的默认值；
+- 不填写自定义 User Data。第一次部署应逐步执行本手册，避免一段脚本失败后难以定位；
+- 云助手可以保留默认启用；
+- 按量实例勾选“释放保护”；
+- 不设置自动释放时间；
+- 不启用自动续费前，先确认阿里云账号的到期提醒方式；长期包年包月实例建议开启自动续费。
+
+---
+
+### 2.5 下单前最后一页逐项核对
+
+点击 **“下一步/确认订单”** 后，不要立即付款。对照右侧配置清单逐行确认：
+
+```text
+地域：      华北 2（北京）
+计费：      按量或已选正式计费，非抢占式
+实例：      ecs.e-c1m4.xlarge，4C16G，x86_64
+镜像：      Ubuntu 22.04 最新公共镜像
+系统盘：    100 GiB；ESSD Entry优先，当前免费额度可选AutoPL（两项增强关闭）
+公网 IPv4：已分配，稍后发给域名所有者
+公网计费：  按使用流量，峰值 10 Mbps
+主域名状态：父域名 ICP和阿里云接入已核验
+二级域名：  已获得明确使用授权
+安全组：    22仅管理员/32；80/443全网；8000/3000关闭
+登录：      paper-agent-admin SSH密钥
+数量：      1台
+释放保护：  开启
+```
+
+同时检查费用明细中是否误加入：
+
+- 数据盘；
+- GPU；
+- 负载均衡；
+- NAT 网关；
+- 云数据库；
+- 云市场付费镜像；
+- 多台实例；
+- 不需要的长期快照套餐。
+
+确认服务协议和金额后，点击 **“创建实例/立即购买/确认下单”**。按钮名称可能因包年包月或按量模式不同。等待实例状态变为 **“运行中”**。
+
+---
+
+### 2.6 创建后第一次检查
+
+1. 返回 ECS 控制台 → **“实例与镜像” → “实例”**；
+2. 左上角切到购买时的地域；
+3. 找到 `paper-agent-prod-01`，确认状态是“运行中”；
+4. 记录公网 IPv4、私网 IPv4、VPC ID 和 vSwitch ID；
+5. 点击实例 ID进入详情页；
+6. 在“安全组”页签确认当前只有管理员 `/32` 的 22 规则，没有全网 80/443/8080/8000/3000；
+7. 在“云盘”页签确认系统盘约 100 GiB；
+8. 在“监控”页签确认已有 CPU、网络和磁盘基础图表；
+9. 确认实例详情显示公网 IPv4，且公网带宽为“按使用流量、峰值 10 Mbps”；该 IP只用于运维和出网；
+10. 用 §2.3 的命令验证 OpenAlex/arXiv/Crossref 等外部站点可达；
+11. 按量实例确认释放保护已开启；包年包月实例确认到期时间和续费提醒。
+
+如果实例列表为空，第一件事是检查控制台左上角地域是否选错，不要立刻重复购买。
+
+---
+
+### 2.7 第一次登录服务器
+
+#### 方法 A：用本机 SSH（长期推荐）
+
+在实例详情点击 **“连接”**，查看阿里云提示的默认用户名。然后在自己的电脑执行：
+
+```bash
+ssh -i ~/.ssh/paper-agent-admin.pem ecs-user@你的公网IP
+```
+
+如果实例页面明确显示用户名是 `root`，则使用：
+
+```bash
+ssh -i ~/.ssh/paper-agent-admin.pem root@你的公网IP
+```
+
+第一次连接会显示主机指纹。先在实例详情确认公网 IP 没抄错，再输入 `yes`。Windows 10/11 可以直接在 PowerShell 使用系统自带的 `ssh`；也可以使用 WSL。
+
+#### 方法 B：阿里云 Workbench（SSH 故障排查）
+
+1. ECS 实例列表找到服务器；
+2. 点击右侧 **“连接”**；
+3. 在 Workbench 方式中点击 **“立即登录”**；
+4. 选择密钥、免密或页面提供的连接方式；
+5. 优先选择“免密连接/会话管理”；如果改用 Workbench 的 SSH 终端连接，安全组可能还需按阿里云官方 Workbench 文档临时放行其服务网段，不能为此改成 `0.0.0.0/0:22`；
+6. 登录后只用于检查和修复 SSH，不要长期依赖共享浏览器会话。
+
+如果 SSH 失败，按顺序检查：
+
+| 现象 | 先检查 |
+|---|---|
+| `Connection timed out` | 实例是否运行、公网 IP 是否正确、安全组 22 是否允许你当前公网 IP |
+| `Permission denied (publickey)` | 用户名是否与实例页面一致、`.pem` 是否对应当前地域实例、权限是否为 600 |
+| 昨天能连今天不能 | 家庭/公司公网 IP 是否变化，更新安全组 `/32` |
+| 控制台也找不到实例 | 是否切错地域，是否误释放，账号是否正确 |
+
+---
+
+### 2.8 登录后的系统初始化
+
+先只做检查，不要马上执行来源不明的一键安装脚本：
+
+```bash
+whoami
+cat /etc/os-release
+uname -m
+nproc
+free -h
+df -hT
+ip -br address
+```
+
+期望看到：
+
+```text
+Ubuntu 22.04
+x86_64
+4 个 CPU
+约 8 GiB 或 16 GiB 内存
+根文件系统约 100 GiB
+```
+
+更新基础系统：
+
+```bash
+sudo apt update
+sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y
+sudo timedatectl set-timezone Asia/Shanghai
+sudo apt install -y unattended-upgrades
+sudo systemctl enable --now unattended-upgrades
+sudo reboot
+```
+
+重启约 1–3 分钟后重新 SSH 登录，再检查：
+
+```bash
+uptime
+free -h
+df -h
+```
+
+然后继续执行 §3 安装依赖、创建 Swap 和应用账号。
+
+#### 可选：确认密钥登录成功后关闭密码登录
+
+只有在**新开第二个终端也能使用密钥登录成功**后，才执行：
+
+```bash
+sudo tee /etc/ssh/sshd_config.d/99-paper-agent.conf >/dev/null <<'EOF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+EOF
+sudo sshd -t
+sudo systemctl reload ssh
+```
+
+不要在唯一一个 SSH 会话里未经测试就关闭登录方式，否则可能把自己锁在服务器外。
+
+#### 可选：启用 UFW 作为第二层防火墙
+
+确认 SSH密钥登录正常、域名备案/接入核验通过后，主路线配置：
+
+```bash
+ADMIN_IP='把这里替换成你的公网IPv4'
+sudo apt install -y ufw
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow from "${ADMIN_IP}" to any port 22 proto tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw --force enable
+sudo ufw status verbose
+```
+
+启用前先确认阿里云控制台会话管理/VNC恢复方式可用。主路线不开放8080；只有启用API网关回退时，才为每个网关出口 IP增加8080规则。
+
+---
+
+### 2.9 将公网 IP和二级域名信息发给域名所有者
+
+#### 2.9.1 先让域名所有者确认三件事
+
+在添加 A记录前，要求域名所有者确认：
+
+1. 父域名已经完成 ICP备案；
+2. 当前备案接入商是否包含阿里云；如果不是，应由备案主体办理阿里云接入备案；
+3. 备案主体明确允许该子域名用于 Paper Agent/清小搭服务，并愿意配合 DNS和证书验证。
+
+主域名备案通常覆盖子域名，但借用子域名不等于借到备案主体身份。实际服务内容、主体和备案范围不匹配时仍有风险；无法确认就使用 API网关回退，不要直接解析。
+
+#### 2.9.2 从 ECS控制台复制正确 IP
+
+路径：
+
+```text
+ECS控制台 → 实例与镜像 → 实例
+→ 华北2（北京）
+→ paper-agent-prod-01
+→ 公网IPv4
+```
+
+复制形如：
+
+```text
+123.123.123.123
+```
+
+不要发送：
+
+```text
+192.168.x.x / 172.16.x.x / 10.x.x.x 私网IP
+API网关出口IP
+SSH私钥
+管理员密码
+DeepSeek/VLM Key
+pa_live_ Agent API Key
+```
+
+#### 2.9.3 发给域名所有者的消息模板
+
+将以下模板中的值替换后，通过私密渠道发送：
+
+```text
+请为 Paper Agent 添加一条 DNS解析：
+
+完整二级域名：paper-agent.example.com
+记录类型：A
+主机记录：paper-agent
+记录值：123.123.123.123
+解析线路：默认
+TTL：600秒（或控制台默认）
+代理/CDN：先关闭，仅DNS解析
+
+用途：北京 ECS 的 HTTPS API 和 Web 前端。
+请同时确认父域名已完成ICP备案且已接入阿里云；如存在CAA限制，请告知允许的证书CA。
+```
+
+如果实际分配的是：
+
+```text
+research.agent.example.com
+```
+
+主机记录通常填写：
+
+```text
+research.agent
+```
+
+最终以域名 DNS服务商控制台为准。
+
+#### 2.9.4 域名所有者在 DNS控制台操作
+
+如果域名使用阿里云云解析 DNS：
+
+```text
+云解析 DNS
+→ 权威域名解析
+→ 找到父域名
+→ 解析设置
+→ 添加记录
+```
 
 选择：
 
-- 4 vCPU / 16 GiB；
-- Ubuntu 22.04 64 位；
-- 100 GiB ESSD PL1；
-- 公网 IPv4；
-- 10 Mbps 固定带宽；
-- 地域尽量靠近主要用户和所用 LLM 服务。
+```text
+记录类型：A
+主机记录：约定的子域名前缀
+记录值：北京 ECS 公网IPv4
+解析线路：默认
+TTL：600秒或默认值
+```
 
-安全组只开放：
+如果域名托管在 Cloudflare 等服务商，初次必须选择“仅 DNS/DNS only”，不要开启代理/CDN；代理可能缓存或中断 SSE，等直连验收完成后再单独评估。
 
-| 端口 | 来源 | 用途 |
-|---|---|---|
-| 22 | 管理员固定公网 IP `/32` | SSH；不要对全网开放 |
-| 80 | `0.0.0.0/0` | ACME/HTTP 跳转 HTTPS |
-| 443 | `0.0.0.0/0` | 清小搭与浏览器 HTTPS |
+#### 2.9.5 在本地和 ECS验证 DNS
 
-优先使用 SSH 密钥而不是 root 密码。首次登录可用 root，应用服务必须改用专用低权限用户。
+```bash
+DOMAIN='paper-agent.example.com'
+EXPECTED_IP='123.123.123.123'
+
+getent ahostsv4 "$DOMAIN"
+dig +short A "$DOMAIN"
+```
+
+结果必须包含 `EXPECTED_IP`。没有 `dig` 时安装：
+
+```bash
+sudo apt install -y dnsutils
+```
+
+还要检查父域名 CAA：
+
+```bash
+dig +short CAA example.com
+dig +short CAA paper-agent.example.com
+```
+
+无 CAA记录通常表示不额外限制 CA；如果存在 CAA且不允许计划使用的 CA，证书签发会失败，需要域名所有者调整或直接提供有效证书。
+
+#### 2.9.6 证书验证需要域名所有者继续配合的情况
+
+可选方式：
+
+1. **HTTP验证**：A记录已生效、80端口开放后，由 Certbot自动验证；最省事；
+2. **DNS验证**：证书平台给出 TXT记录，由域名所有者添加；适合80暂时不可达；
+3. **域名所有者提供证书**：可提供覆盖该子域名的单域名或通配符证书，私钥必须通过安全渠道传输并限制权限。
+
+不要要求域名所有者把整个 DNS账号密码交给你；让对方添加指定 A/TXT记录即可。
+
+#### 2.9.7 上线后备案信息和公安联网备案
+
+北京 ECS正式对外服务后：
+
+- 网站页面应按备案要求展示 ICP备案号并链接工信部备案系统；
+- 服务实际内容必须与备案主体/网站信息一致；
+- 由备案主体在开通后30日内办理公安联网备案；
+- 借用子域名的情况下，域名所有者/备案主体必须参与这些后续事项，不能只添加一条 A记录后不再配合。
+
+如果对方无法承担备案主体和后续管理责任，应停止使用该子域名并回退 API网关测试入口或更换为你自己可备案的域名。
+
+---
+
+### 2.10 创建当天必须完成的费用与安全设置
+
+- 费用与成本控制台：设置余额、按量费用和月度预算提醒；
+- ECS：按量实例开启释放保护，包年包月实例设置到期提醒或自动续费；
+- 云监控：至少为 CPU 持续 >80%、磁盘 >80%、实例不可用设置告警；内存/磁盘使用率指标需要时安装或启用云监控插件；
+- 安全组：主路线确认22仅管理员 `/32`，80/443全网，8000/3000/数据库端口未开放；8080只在启用API网关回退时按出口IP `/32` 添加；
+- RAM：日常运维尽量使用 RAM 子账号，不长期共享主账号；主账号启用 MFA；
+- 私钥：确认只有管理员本人可读，并制作一份加密离线备份；
+- 账单：下单后的第一天和第一周各检查一次账单，确认没有误购 NAT 网关、EIP、负载均衡、快照或多余磁盘。
+
+完成本节后，才进入 §3 的 Linux 环境安装。
 
 ---
 
@@ -95,6 +766,7 @@ FastAPI（单 worker）
 sudo apt update
 sudo apt install -y git curl ca-certificates build-essential nginx \
   software-properties-common poppler-utils tesseract-ocr \
+  certbot python3-certbot-nginx dnsutils \
   libgl1 libglib2.0-0
 
 # Ubuntu 22.04 默认只有 Python 3.10；项目要求 Python >= 3.11。
@@ -106,10 +778,16 @@ python3.11 --version              # 必须是 Python 3.11.x
 
 > `ppa:deadsnakes/ppa` 是 Ubuntu 22.04 上安装并行 Python 3.11 的明确步骤；不要替换或删除系统自带 Python 3.10。若组织策略禁止 PPA，改用经过校验的 Miniforge Python 3.11，并把下文所有 `python3.11` 保持指向该解释器。
 
-安装 **Node.js 22 LTS** 后启用 Corepack/pnpm。本手册固定 Node 22 LTS，仓库已在该版本验证；Next.js 14 的最低要求为 Node 18.17：
+安装 **Node.js 22 LTS** 后启用 Corepack/pnpm。本手册固定 Node 22 LTS，仓库已在该版本验证；Next.js 14 的最低要求为 Node 18.17。Ubuntu 22.04 自带仓库的 Node 版本可能过旧，因此先使用 NodeSource 的 22.x 安装脚本配置 APT 源，再安装 `nodejs`：
 
 ```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
+# 首次部署建议先审阅脚本；不要直接执行来源不明的 curl | bash。
+less /tmp/nodesource_setup.sh
+sudo -E bash /tmp/nodesource_setup.sh
+sudo apt install -y nodejs
 node --version                    # 应为 v22.x
+npm --version
 sudo corepack enable --install-directory /usr/local/bin
 corepack prepare pnpm@11.9.0 --activate
 command -v pnpm                   # 记录绝对路径，systemd 要使用它
@@ -145,9 +823,38 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 sudo -u paper-agent git clone <你的私有仓库地址> /opt/paper-agent
 cd /opt/paper-agent
 sudo -u paper-agent python3.11 -m venv .venv
-sudo -u paper-agent .venv/bin/pip install --upgrade pip
-sudo -u paper-agent .venv/bin/pip install -r requirements.txt -e backend
+sudo -H -u paper-agent .venv/bin/pip install --upgrade pip
+
+# 经济型 e 是 CPU-only 主机。必须先从 PyTorch 官方 CPU 索引安装，
+# 否则 Linux 默认 PyPI 轮子可能拉取数 GiB 的 CUDA/NVIDIA 依赖。
+sudo -H -u paper-agent .venv/bin/pip install -r requirements-cpu.txt
+
+# requirements.txt 会加载 constraints.txt，固定仓库已验证的版本组合，
+# 避免 LangChain/LangSmith 在首次安装时大范围依赖回溯。
+sudo -H -u paper-agent .venv/bin/pip install -r requirements.txt -e backend
 sudo -u paper-agent bash -lc 'cd /opt/paper-agent/frontend && pnpm install --frozen-lockfile'
+```
+
+安装后必须确认使用 CPU 轮子且依赖一致：
+
+```bash
+sudo -H -u paper-agent .venv/bin/python - <<'PY'
+import torch
+print(torch.__version__)
+print(torch.version.cuda)
+assert "+cpu" in torch.__version__, torch.__version__
+assert torch.version.cuda is None, torch.version.cuda
+PY
+sudo -H -u paper-agent .venv/bin/python -m pip check
+```
+
+预期 `torch.__version__` 含 `+cpu`、`torch.version.cuda` 为 `None`，且 `pip check` 输出 `No broken requirements found.`。如果 pip 长时间连续枚举数十个 `langsmith` / `langchain-openai` 版本，立即 `Ctrl+C`；这表示没有使用当前仓库的 `constraints.txt`，不要继续等待。
+
+如果安装曾在解析阶段中断，下载的是可安全删除的 pip 缓存，不是已安装的多份包。可在重新安装前执行：
+
+```bash
+sudo -H -u paper-agent .venv/bin/pip cache info
+sudo -H -u paper-agent .venv/bin/pip cache purge
 ```
 
 如果使用压缩包上传，必须排除 `.env`、`*.key`、`*.pem`、`.git`、`.next`、`node_modules`、运行时 `data/`、`history_record/` 和本机缓存。
@@ -256,43 +963,154 @@ OPENAI_API_POLICY_PRESET=balanced
 
 说明：
 
-- `PUBLIC_BASE_URL` 必须是外部 HTTPS Origin，不带 `/v1`。清小搭附件中的 `fileUrl` 由它确定，避免反向代理下生成错误的内网 URL。
+- 主路线将 `PUBLIC_BASE_URL` 和 `FRONTEND_ORIGIN` 都改为实际授权子域名 HTTPS Origin，不带 `/v1`。示例中的 `paper-agent.example.com` 必须替换。若回退 API网关，则仅将 `PUBLIC_BASE_URL` 临时改为网关默认 Origin；临时网关不暴露自有前端。
 - `DEEPSEEK_*`/`MULTIMODAL_*` 是模型服务商密钥；**Agent API Key 不是模型密钥**。
 - `AGENT_API_KEY` 仍可作为迁移/应急凭证，但正式部署推荐由管理员生成数据库密钥；生产环境没有任何可用 Agent Key 时 `/v1` 返回 503，错误或已撤销密钥返回 401。
 - `.env`、`*.key`、`*.pem` 不得提交、截图、复制到工单或日志中；仓库只保留无真实值的 `.env.example`。
 
 ---
 
-## 6. 初始化管理员与 Agent API Key
+## 6. 初始化管理员并创建给清小搭的 Agent API Key
+
+清小搭截图中的“API 密钥”不是 DeepSeek Key、不是服务器 SSH 私钥、不是管理员密码，而是本项目签发的长期 **Agent API Key**。它以 `pa_live_` 开头，只用于：
+
+```http
+Authorization: Bearer pa_live_...
+```
+
+调用本项目的：
+
+```text
+GET  /v1/models
+POST /v1/chat/completions
+```
+
+### 6.1 第一次创建管理员
 
 管理员固定标识：
 
-- 用户名：`administrator`
-- 邮箱：`administrator@administrator`
+```text
+用户名：administrator
+邮箱：administrator@administrator
+角色：administrator
+```
 
-密码只通过终端隐藏输入，不允许作为命令行参数、环境变量或文档文本：
+在服务器执行：
 
 ```bash
 cd /opt/paper-agent
 sudo -u paper-agent .venv/bin/python scripts/bootstrap_administrator.py
 ```
 
-脚本幂等：管理员已存在时不会改密码，也不会把同名普通用户自动提权。
+终端会提示两次输入密码，输入时不会显示字符。密码至少 8 位，建议使用密码管理器生成 16 位以上随机密码。不要把密码写进命令行、`.env`、部署手册、截图或 shell 脚本。
 
-### 6.1 生成给清小搭的长期密钥
+预期输出：
 
-**方法 A（无需部署前端，推荐用于首次接入）**：
+```text
+管理员 administrator 已创建。
+```
+
+脚本幂等：如果管理员已经存在，只会提示已存在，不会重置密码，也不会把同名普通用户自动提升为管理员。
+
+确认数据库已经在全新的生产运行目录创建：
 
 ```bash
+sudo -u paper-agent test -f /opt/paper-agent/data/users.db && echo 'users.db ready'
+sudo chmod 600 /opt/paper-agent/data/users.db
+sudo chown paper-agent:paper-agent /opt/paper-agent/data/users.db
+sudo stat -c '%U:%G %a %n' /opt/paper-agent/data/users.db
+```
+
+不得从开发机复制旧 `users.db`，也不得提交到 Git。
+
+### 6.2 创建清小搭生产 Agent API Key
+
+运行交互式脚本：
+
+```bash
+cd /opt/paper-agent
 sudo -u paper-agent .venv/bin/python scripts/create_agent_api_key.py \
+  --username administrator \
   --name '清小搭生产接入'
 ```
 
-输入管理员密码后，脚本只显示一次完整 `pa_live_...` 密钥。立即存入密码管理器；数据库只保存 SHA-256，不可恢复明文。
+输入刚才的管理员密码后，脚本会输出：
 
-**方法 B（部署前端后）**：管理员登录 `/login`，进入“管理 → Agent 接入管理”，创建并复制密钥。页面同样只显示一次完整值，可随时查看使用时间或撤销。
+```text
+Agent API Key 已创建。完整密钥只显示这一次，请立即安全保存：
+pa_live_这里是一长串随机字符
+```
 
-密钥长期有效，直到管理员主动撤销。不要把管理员登录令牌、Agent API Key 与 DeepSeek/VLM Key 混用。
+立即完成以下操作：
+
+1. 将完整 `pa_live_...` 保存到密码管理器，名称写“Paper Agent / 清小搭生产接入”；
+2. 不要关闭终端后再寻找明文——数据库只保存 SHA-256 哈希，完整值无法恢复；
+3. 不要把它写入 `.env`；正式数据库 Key 不需要配置 `AGENT_API_KEY=`；
+4. 不要把它发进聊天、Issue、日志、截图或测试文件；
+5. 如果泄露，从管理员页面撤销旧 Key，再创建一个新的，不要继续使用。
+
+`AGENT_API_KEY` 环境变量只保留给迁移/应急场景，正式清小搭接入使用上述数据库签发 Key。
+
+### 6.3 启动后在服务器本机验证 Key
+
+完成 §7 后端 systemd 启动后，在服务器执行。`read -s` 可以避免 Key 进入 shell 历史：
+
+```bash
+read -rsp '粘贴 pa_live_ Agent API Key: ' KEY; echo
+
+curl -i http://127.0.0.1:8000/v1/models \
+  -H "Authorization: Bearer $KEY"
+
+curl -sS -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"只回复：连接成功"}]}'
+
+unset KEY
+```
+
+预期：
+
+- `/v1/models` 返回 HTTP 200；
+- 非流式对话返回 JSON，包含 `choices[0].message.content`；
+- 错误 Key 返回 401；
+- 如果返回 503，表示生产环境没有可用数据库 Key，重新检查 Key 是否创建在 `/opt/paper-agent/data/users.db`。
+
+### 6.4 从授权子域名公网 HTTPS验证 Key
+
+完成 §9 的 DNS、证书和 Nginx后，在自己的电脑执行：
+
+```bash
+read -rsp '粘贴 pa_live_ Agent API Key: ' KEY; echo
+BASE='https://paper-agent.example.com/v1'
+
+curl -i "$BASE/models" -H "Authorization: Bearer $KEY"
+
+curl -N -X POST "$BASE/chat/completions" \
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"stream":true,"max_tokens":32,"messages":[{"role":"user","content":"你好"}]}'
+
+unset KEY
+```
+
+将示例域名替换成实际二级域名。只有公网 HTTPS、错误 Key 401、SSE逐帧和 `[DONE]` 都通过后，才填写清小搭。若父域名接入备案、DNS或证书仍未完成，按 §9.10 使用 API网关回退。
+
+### 6.5 可选：从自有前端管理 Key
+
+部署前端后，管理员登录 `/login`，进入：
+
+```text
+管理 → Agent 接入管理
+```
+
+可以：
+
+- 创建并一次性复制新的 Agent API Key；
+- 查看 Key 名称和最近使用时间；
+- 撤销泄露、停用或不再使用的 Key。
+
+管理员登录令牌、Agent API Key、DeepSeek Key、VLM Key 和 ECS SSH 私钥是五种不同凭证，不能混用。
 
 ---
 
@@ -344,20 +1162,6 @@ curl -s http://127.0.0.1:8000/health
 
 ---
 
-## 8. 可选 Next.js 前端服务
-
-清小搭接入不依赖前端；但推荐部署前端供管理员管理密钥和少量用户直接使用。
-
-构建时把 SSE 直连地址设为同一个公网 Origin：
-
-```bash
-cd /opt/paper-agent/frontend
-sudo -u paper-agent env \
-  BACKEND_URL=http://127.0.0.1:8000 \
-  NEXT_PUBLIC_BACKEND_URL=https://paper-agent.example.com \
-  pnpm build
-```
-
 ### 7.1 OpenAI API 存储清理 timer（必须启用）
 
 仓库提供 `deploy/systemd/paper-agent-cleanup.service` 和 `.timer`。安装前先确保目录和权限：
@@ -384,7 +1188,21 @@ sudo -u paper-agent /opt/paper-agent/.venv/bin/python   /opt/paper-agent/scripts
 sudo -u paper-agent /opt/paper-agent/.venv/bin/python   /opt/paper-agent/scripts/cleanup_openai_api_storage.py --execute-token '<token>'
 ```
 
-### 7.2 可选自有前端 systemd
+## 8. 可选 Next.js 前端服务
+
+清小搭接入不依赖前端；但推荐部署前端供管理员管理密钥和少量用户直接使用。
+
+构建时把 SSE 直连地址设为同一个公网 Origin：
+
+```bash
+cd /opt/paper-agent/frontend
+sudo -u paper-agent env \
+  BACKEND_URL=http://127.0.0.1:8000 \
+  NEXT_PUBLIC_BACKEND_URL=https://paper-agent.example.com \
+  pnpm build
+```
+
+### 8.1 可选自有前端 systemd
 
 创建 `/etc/systemd/system/paper-agent-web.service`：
 
@@ -425,11 +1243,130 @@ sudo systemctl enable --now paper-agent-web
 
 ---
 
-## 9. nginx、域名与 HTTPS
+## 9. 主方案：授权子域名 → 北京 ECS → Nginx HTTPS
 
-正式环境必须准备域名、DNS、ICP备案（中国大陆服务器）和有效 TLS 证书。不要用明文 HTTP 传递 Bearer 密钥。
+### 9.0 启用主方案前的硬门槛
 
-单域名推荐配置（证书路径替换为实际值）：
+继续之前必须确认：
+
+- 域名所有者已经添加 A记录，值为当前北京 ECS公网 IPv4；
+- 父域名已经 ICP备案；
+- 父域名已接入阿里云，或备案主体已完成阿里云接入备案；
+- 域名所有者明确授权该子域名用于当前服务；
+- 安全组80/443已开放，22仍只允许管理员 `/32`；
+- 8000/3000没有公网规则。
+
+任何一项无法确认，停止主方案并跳到 §9.10 API网关回退，不要把“DNS能解析”误当作备案/授权完成。
+
+### 9.1 设置实际域名并验证 A记录
+
+```bash
+DOMAIN='paper-agent.example.com'
+PUBLIC_IP='123.123.123.123'
+ADMIN_EMAIL='your-email@example.com'
+
+getent ahostsv4 "$DOMAIN"
+dig +short A "$DOMAIN"
+```
+
+结果必须包含 `PUBLIC_IP`。继续检查：
+
+```bash
+dig +short CAA "$DOMAIN"
+dig +short CAA "${DOMAIN#*.}"
+```
+
+如果 CAA不允许计划使用的 CA，联系域名所有者调整。不要在 DNS尚未生效时连续重复申请证书，避免触发 CA频率限制。
+
+### 9.2 创建 HTTP引导站点
+
+先创建 Web根目录：
+
+```bash
+sudo mkdir -p /var/www/paper-agent-acme
+sudo chown -R www-data:www-data /var/www/paper-agent-acme
+```
+
+创建 `/etc/nginx/sites-available/paper-agent`，把示例域名替换成实际值：
+
+```nginx
+server {
+    listen 80;
+    server_name paper-agent.example.com;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/paper-agent-acme;
+    }
+
+    location / {
+        return 200 'Paper Agent HTTPS bootstrap\n';
+        add_header Content-Type text/plain;
+    }
+}
+```
+
+启用：
+
+```bash
+sudo ln -s /etc/nginx/sites-available/paper-agent \
+  /etc/nginx/sites-enabled/paper-agent
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+从自己电脑测试：
+
+```bash
+curl -i "http://$DOMAIN/"
+```
+
+必须到达北京 ECS，而不是旧服务器、CDN或域名停车页。
+
+### 9.3 签发 HTTPS证书
+
+#### 方法 A：Certbot HTTP验证（推荐）
+
+```bash
+sudo certbot --nginx \
+  -d "$DOMAIN" \
+  --redirect \
+  --agree-tos \
+  --no-eff-email \
+  -m "$ADMIN_EMAIL"
+```
+
+成功后证书通常位于：
+
+```text
+/etc/letsencrypt/live/<实际域名>/fullchain.pem
+/etc/letsencrypt/live/<实际域名>/privkey.pem
+```
+
+检查自动续期：
+
+```bash
+sudo systemctl status certbot.timer --no-pager
+sudo certbot renew --dry-run
+```
+
+#### 方法 B：域名所有者提供证书
+
+如果域名所有者提供单域名/通配符证书：
+
+```bash
+sudo mkdir -p /etc/nginx/ssl/paper-agent
+sudo install -o root -g root -m 600 fullchain.pem \
+  /etc/nginx/ssl/paper-agent/fullchain.pem
+sudo install -o root -g root -m 600 privkey.pem \
+  /etc/nginx/ssl/paper-agent/privkey.pem
+```
+
+证书必须覆盖实际二级域名且未过期。不要通过公开聊天、Git或工单传私钥。
+
+### 9.4 配置正式 Nginx HTTPS和 SSE
+
+Certbot签发成功后，将 `/etc/nginx/sites-available/paper-agent` 改为下面配置。证书路径换成实际域名路径；如果使用所有者提供的证书，换成 `/etc/nginx/ssl/paper-agent/...`。
 
 ```nginx
 map $http_upgrade $connection_upgrade {
@@ -447,19 +1384,24 @@ server {
     listen 443 ssl http2;
     server_name paper-agent.example.com;
 
-    ssl_certificate     /etc/nginx/ssl/fullchain.pem;
-    ssl_certificate_key /etc/nginx/ssl/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/paper-agent.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/paper-agent.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    server_tokens off;
     client_max_body_size 50m;
 
     location /v1/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_buffering off;
         proxy_cache off;
-        proxy_read_timeout 600s;
+        gzip off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
         add_header X-Accel-Buffering no always;
     }
 
@@ -467,30 +1409,41 @@ server {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Guest-Id $http_x_guest_id;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_buffering off;
-        proxy_read_timeout 600s;
+        proxy_cache off;
+        gzip off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
         add_header X-Accel-Buffering no always;
     }
 
     location /files/ {
         proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
         proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Guest-Id $http_x_guest_id;
         proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
     }
 
     location /elements/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Guest-Id $http_x_guest_id;
         proxy_set_header X-Forwarded-Proto https;
     }
 
-    location /health {
-        proxy_pass http://127.0.0.1:8000;
+    location = /health {
+        proxy_pass http://127.0.0.1:8000/health;
     }
 
-    # 可选前端；若不部署前端，可将此 location 改为 return 404。
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -502,59 +1455,437 @@ server {
 }
 ```
 
-**不要**在 `/v1` 或 `/files` 上配置 nginx Basic Auth：前者会破坏清小搭 Bearer 探测，后者会让清小搭无法转存附件。`/api/v1` 自身已有账号令牌校验；生产通过 `AUTH_REQUIRED=true + GUEST_ACCESS=false` 关闭匿名使用。
-
-启用配置：
+检查并重载：
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/paper-agent /etc/nginx/sites-enabled/paper-agent
 sudo nginx -t
 sudo systemctl reload nginx
 ```
 
----
+不要在 `/v1` 或 `/files` 上配置 Basic Auth，它会破坏清小搭 Bearer鉴权和附件转存。
 
-## 10. 严格接入清小搭
+### 9.5 更新后端环境变量
 
-在清小搭“标准协议接入”中填写：
+```bash
+cd /opt/paper-agent
+sudo -u paper-agent nano .env
+```
 
-| 字段 | 值 |
-|---|---|
-| API 地址 / baseUrl | `https://paper-agent.example.com/v1` |
-| API 密钥 / credential | §6 创建并安全保存的 `pa_live_...` |
-| 鉴权方式 | Bearer Token |
-| 流式终止符 | `[DONE]` |
-| usage 位置 | stop 帧内 |
-| 模型 | 可缺失、空或 `paper-agent`；服务端不依赖该字段路由 |
+设置为实际子域名：
 
-实现保证：
+```ini
+PUBLIC_BASE_URL=https://paper-agent.example.com
+FRONTEND_ORIGIN=https://paper-agent.example.com
+CORS_ORIGINS=
+```
 
-- `GET /v1/models`；
-- `POST /v1/chat/completions` 非流式 JSON 与流式 SSE；
-- 严格 JSON 布尔 `stream`，接受 `max_tokens: 1` 和缺失/空/null `model`；
-- SSE 首帧 `delta.role=assistant`，正文/思考增量随后到达，stop 帧含白名单 `finish_reason` 与 `usage`，最后 `data: [DONE]`；
-- 推理内容映射到 `delta.reasoning`，正常回答映射到 `delta.content`；内部 `use_skill` 不形成公开工具事件；
-- 文件附件使用 `x_soda.attachments`，包含 `fileUrl/fileName/fileType/mimeType`，并提供 `fileSize`；
-- 清小搭不会执行本项目 React 工具卡；research_map 通过自然语言正文 + Markdown 报告 + 静态 SVG 谱系图附件兼容展示，完整交互图谱仍在自有 `/chat` 前端；
-- 无效或已撤销凭证返回 401；生产未配置任何 Agent Key 返回 503。
+不带 `/v1`、不带尾部 `/`。然后：
 
-部署后自测（不要把真实 key 写进脚本或 shell 历史；推荐临时从密码管理器读入）：
+```bash
+sudo systemctl restart paper-agent
+sudo systemctl status paper-agent --no-pager
+```
+
+### 9.6 按实际域名重新构建前端
+
+Next.js的 `NEXT_PUBLIC_BACKEND_URL` 在构建时注入，换域名后必须重新构建：
+
+```bash
+cd /opt/paper-agent/frontend
+sudo -u paper-agent env \
+  BACKEND_URL=http://127.0.0.1:8000 \
+  NEXT_PUBLIC_BACKEND_URL=https://paper-agent.example.com \
+  pnpm build
+sudo systemctl restart paper-agent-web
+```
+
+如果只接清小搭、不部署自有前端，可以跳过本节并让 Nginx `/` 返回404。
+
+### 9.7 验证 DNS、证书和 HTTPS
+
+从自己的电脑执行：
+
+```bash
+DOMAIN='paper-agent.example.com'
+
+curl -I "http://$DOMAIN/"
+curl -I "https://$DOMAIN/health"
+openssl s_client -connect "$DOMAIN:443" -servername "$DOMAIN" </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates
+```
+
+期望：
+
+- HTTP返回301跳HTTPS；
+- `/health` 返回200；
+- 证书SAN覆盖实际域名；
+- 证书未过期且链完整；
+- 浏览器不出现证书警告。
+
+### 9.8 验证清小搭 OpenAI兼容接口
 
 ```bash
 read -rsp 'Agent API Key: ' KEY; echo
 BASE='https://paper-agent.example.com/v1'
 
 curl -i "$BASE/models" -H "Authorization: Bearer $KEY"
+
 curl -sS -X POST "$BASE/chat/completions" \
-  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"你好"}]}'
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"只回复：非流式成功"}]}'
+
 curl -N -X POST "$BASE/chat/completions" \
-  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d '{"stream":true,"max_tokens":1,"messages":[{"role":"user","content":"你好"}]}'
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"stream":true,"max_tokens":64,"messages":[{"role":"user","content":"你好"}]}'
+
 unset KEY
 ```
 
-预期清小搭探测的 connectivity、credential、minimalChat 全部通过，responseFormat 也应通过；随后用“试聊”验证真实逐帧输出。
+要求：正确Key 200、错误Key 401、SSE逐帧、stop含usage、最后 `[DONE]`。
+
+### 9.9 验证论文来源并记录启用清单
+
+从北京 ECS执行至少三轮：
+
+```bash
+for round in 1 2 3; do
+  echo "===== round $round ====="
+  for url in \
+    'https://api.openalex.org/works?search=graph%20neural%20network&per-page=1' \
+    'https://export.arxiv.org/api/query?search_query=all:graph%20neural%20network&max_results=1' \
+    'https://api.semanticscholar.org/graph/v1/paper/search?query=graph%20neural%20network&limit=1&fields=title' \
+    'https://api.crossref.org/works?query=graph%20neural%20network&rows=1'
+  do
+    curl -4 -L --connect-timeout 10 --max-time 30 -sS -o /dev/null \
+      -w '%{http_code} connect=%{time_connect}s total=%{time_total}s %{url_effective}\n' "$url"
+  done
+  sleep 10
+done
+```
+
+只将多轮稳定来源作为比赛/演示依赖；单个来源失败时保留多源降级和摘要回退。不要通过校园VPN、代理或订阅账号自动拉取付费全文。
+
+---
+
+### 9.10 先确认：哪一种阿里云“内网穿透”可用
+
+阿里云官方能力中：
+
+- **云助手会话管理/端口转发**：不能用于清小搭。它要求管理员本机运行 `ali-instance-cli` 并保持会话，只生成本机 `localhost` 端口映射，没有稳定公网 HTTPS 根地址；
+- **NAT SNAT**：只能让 ECS 主动出网，清小搭不能入站；
+- **NAT DNAT/EIP/固定公网 IP/ALB**：能提供公网入口，但大陆自有域名仍需 ICP；
+- **传统 API 网关默认公网二级域名 + VPC 授权**：可以把北京 VPC 内 ECS 私网服务发布成阿里云默认 HTTPS API 地址，是本文前三天的条件可行方案。
+
+该方案不是正式备案替代品。默认域名只供测试，必须在三天内实际验证清小搭是否接受额外 `Content-Disposition` 响应头。
+
+### 9.11 在 ECS 配置只供 API 网关访问的 Nginx 8080
+
+FastAPI 仍只监听 `127.0.0.1:8000`。创建 `/etc/nginx/sites-available/paper-agent-internal`：
+
+```nginx
+server {
+    listen 8080;
+    server_name _;
+    client_max_body_size 25m;
+
+    location /v1/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Content-Type $http_content_type;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        add_header X-Accel-Buffering no always;
+    }
+
+    location /files/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+    }
+
+    location = /health {
+        proxy_pass http://127.0.0.1:8000/health;
+    }
+
+    location / {
+        return 404;
+    }
+}
+```
+
+启用并测试：
+
+```bash
+sudo ln -s /etc/nginx/sites-available/paper-agent-internal \
+  /etc/nginx/sites-enabled/paper-agent-internal
+sudo nginx -t
+sudo systemctl reload nginx
+
+curl -i http://127.0.0.1:8080/health
+curl -i http://127.0.0.1:8080/v1/models
+```
+
+`/health` 应返回 200；`/v1/models` 没有 Bearer Key 时返回 401，说明路由存在且鉴权没有被绕过。
+
+### 9.12 选择 API 网关实例类型
+
+进入阿里云控制台，搜索 **“API 网关”**，选择 **“传统 API 网关”**，地域切换到 **华北 2（北京）**。
+
+| 需求 | 选择 | 官方后端超时上限 |
+|---|---|---:|
+| 只通过清小搭探测、短对话 | Serverless 实例 | 60 秒 |
+| 展示论文检索、深读、OCR、长 SSE | 专享实例（最小规格起步） | 3600 秒 |
+
+本项目工具任务经常超过 60 秒，因此若三天演示包含全文深读/OCR，直接购买北京按量专享实例 `api.s1.small` 起步；不要把 Serverless超时误判为后端故障。专享实例也要保持 API请求量在默认二级域名的 1000 次/天测试限制内。
+
+### 9.13 创建 API 分组并复制默认域名
+
+路径：
+
+```text
+传统 API 网关
+→ API 管理
+→ 分组管理
+→ 创建分组
+```
+
+填写：
+
+```text
+分组名称：paper-agent-temp
+实例：选择刚创建的北京 Serverless/专享实例
+BasePath：空或 /
+```
+
+创建后复制控制台显示的默认公网二级域名，形如：
+
+```text
+https://<group-id>-cn-beijing.alicloudapi.com
+```
+
+这是三天临时阶段的公网 Origin。API 网关默认二级域名不带 `X-Ca-Stage` 时调用 **RELEASE/线上环境**；清小搭不会为本项目额外发送 `X-Ca-Stage`，因此后续 API必须发布到 RELEASE。TEST/PRE 只用于手工调试。
+
+### 9.14 创建 VPC 授权
+
+路径：
+
+```text
+传统 API 网关
+→ API 管理
+→ VPC 授权
+→ 创建授权
+```
+
+填写：
+
+```text
+授权名称：paper-agent-beijing-vpc
+地域：华北 2（北京）
+VPC：ECS 所在 VPC
+后端资源：ECS实例 ID，或 ECS 私网 IPv4
+端口：8080
+```
+
+API 网关、ECS和 VPC必须同地域。创建后记录页面显示的 **API 网关出口 IP**；ECS 安全组需要允许这些 IP访问 8080。
+
+### 9.15 收紧安全组 8080
+
+进入：
+
+```text
+ECS → 网络与安全 → 安全组 → paper-agent-sg → 入方向 → 手动添加
+```
+
+为控制台列出的每个 API 网关出口 IP添加：
+
+```text
+协议：TCP
+端口：8080
+来源：网关出口IP/32
+优先级：1
+```
+
+禁止：
+
+```text
+0.0.0.0/0:8080
+0.0.0.0/0:8000
+0.0.0.0/0:3000
+```
+
+临时阶段不需要全网 80/443。ECS 公网 IP只保留 SSH `/32` 和默认出网能力。
+
+### 9.16 开启 API 网关 SSE
+
+进入：
+
+```text
+分组管理 → paper-agent-temp → 分组详情
+→ 数据传输设置 → 修改配置
+→ 开启“支持流式数据传输”
+```
+
+开启后网关才会按 SSE实时转发，不缓存完整响应。不要给这些 API配置响应缓存或错误码映射插件。
+
+### 9.17 创建清小搭必需 API
+
+每个 API都选择：
+
+```text
+安全认证：无认证
+请求参数模式：入参透传
+后端服务类型：VPC
+VPC授权：paper-agent-beijing-vpc
+后端协议：HTTP
+后端端口：8080
+```
+
+“无认证”只是关闭 API 网关自己的 AppKey；Paper Agent 仍通过 `Authorization: Bearer pa_live_...` 鉴权。`入参透传`必须保留 `Authorization`、`Content-Type` 和 JSON body。
+
+至少创建：
+
+| API名称 | 前端方法/路径 | 后端路径 | 用途 |
+|---|---|---|---|
+| `paper-agent-models` | `GET /v1/models` | `/v1/models` | 清小搭连通和凭证探测 |
+| `paper-agent-chat` | `POST /v1/chat/completions` | `/v1/chat/completions` | 非流式和 SSE 对话 |
+| `paper-agent-file` | `GET /files/[filename]` | `/files/[filename]` | 清小搭附件下载 |
+| `paper-agent-health` | `GET /health` | `/health` | 运维检查 |
+
+创建 `paper-agent-chat` 时：
+
+- Serverless 后端超时设为允许的最大值 60 秒；
+- 专享实例设为覆盖真实任务的值，最长不超过 3600 秒；
+- 请求 body透传，不要定义会丢弃未知字段的固定映射；
+- 响应不要启用 JSON包装、缓存或错误码转换。
+
+`/files/[filename]` 的前后端路径参数必须同名透传；否则 `x_soda.attachments.fileUrl` 会返回 404。当前 Qingxiaoda不依赖 `/api/v1` 或前端 React 路由，临时网关不用暴露管理员页面。
+
+### 9.18 发布到 RELEASE 并设置 PUBLIC_BASE_URL
+
+将四个 API发布到 **RELEASE/线上环境**。然后修改 `/opt/paper-agent/.env`：
+
+```ini
+PUBLIC_BASE_URL=https://<group-id>-cn-beijing.alicloudapi.com
+```
+
+不带 `/v1`。重启后端：
+
+```bash
+sudo systemctl restart paper-agent
+sudo systemctl status paper-agent --no-pager
+```
+
+### 9.19 从公网验证默认域名
+
+```bash
+read -rsp 'Agent API Key: ' KEY; echo
+BASE='https://xxxxxxxx-cn-beijing.alicloudapi.com/v1'
+
+curl -i "$BASE/models" -H "Authorization: Bearer $KEY"
+
+curl -sS -X POST "$BASE/chat/completions" \
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"只回复：非流式成功"}]}'
+
+curl -N -X POST "$BASE/chat/completions" \
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"stream":true,"max_tokens":64,"messages":[{"role":"user","content":"你好"}]}'
+
+unset KEY
+```
+
+检查：
+
+- `/models` HTTP 200；
+- 错误 Key 401；
+- 非流式包含 `choices[0].message.content`；
+- 流式逐帧出现，最后 `[DONE]`；
+- `Authorization` 没有被网关吞掉；
+- 网关额外 `Content-Disposition` 没有改变 JSON/SSE body；
+- 请求超过所选实例超时上限时能够明确复现。
+
+### 9.20 默认域名限制与失败判定
+
+默认公网二级域名只允许测试：
+
+- 中国大陆地域每日最多 1000 次调用；
+- 响应统一增加 `Content-Disposition: attachment`；
+- 不带 `X-Ca-Stage` 时默认访问 RELEASE；清小搭接入不能依赖自定义 `X-Ca-Stage`；
+- Serverless 后端超时最多 60 秒；
+- Serverless 请求 body上限 8 MB，专享实例 32 MB；
+- 专享实例虽可将超时提高到 3600 秒，但默认域名仍不是正式生产域名。
+
+如果清小搭因为 `Content-Disposition` 拒绝解析，或者平台网络无法访问默认域名，则“API 网关临时入口”不满足清小搭，不能继续用更换 EIP/NAT/云助手端口转发冒充解决；应改用已备案域名或非大陆公网入口。
+
+---
+
+## 10. 按清小搭“标准协议接入”页面填写
+
+### 10.1 主路线填写
+
+在清小搭“智能体接入”：
+
+```text
+平台：标准协议接入
+API地址：https://paper-agent.example.com/v1
+API密钥：pa_live_...
+鉴权方式：Bearer Token
+流式终止符：[DONE]
+usage位置：stop帧内
+流式能力：开启
+模型字段：留空或 paper-agent
+```
+
+API地址只到 `/v1`，不要填 `/v1/chat/completions`。替换成实际授权子域名。
+
+### 10.2 清小搭测试预期
+
+- `GET /v1/models`：正确Key 200，错误Key 401；
+- `POST /v1/chat/completions`：非流式有 `choices[0].message.content`；
+- SSE首帧 `delta.role=assistant`；
+- 后续 `delta.reasoning`/`delta.content`；
+- stop帧含 `finish_reason` 和 `usage`；
+- 最后 `data: [DONE]`；
+- `x_soda.attachments.fileUrl` 使用同一 HTTPS域名且可下载。
+
+### 10.3 主路线常见失败
+
+| 现象 | 检查 |
+|---|---|
+| 域名无法连接 | A记录是否指向当前公网IP、是否仍被CDN代理、80/443安全组 |
+| 证书错误 | SAN是否覆盖子域名、CAA、证书链和过期时间 |
+| 401 | `pa_live_` Key是否完整，Nginx是否透传Authorization |
+| 404 | API地址是否误填完整 `/chat/completions`，Nginx `/v1/` 是否存在 |
+| 502 | FastAPI systemd状态和127.0.0.1:8000健康检查 |
+| SSE一次性出现 | `proxy_buffering off`、`gzip off`、无CDN缓存 |
+| 附件地址错误 | `PUBLIC_BASE_URL` 是否为实际HTTPS Origin且不带 `/v1` |
+| 前端连接旧域名 | 修改 `NEXT_PUBLIC_BACKEND_URL` 后重新 `pnpm build` |
+
+### 10.4 回退 API网关填写
+
+仅在子域名备案/接入/DNS/证书未完成时使用：
+
+```text
+API地址：https://xxxxxxxx-cn-beijing.alicloudapi.com/v1
+API密钥：同一个 pa_live_...
+```
+
+回退步骤见 §9.10及以后。默认二级域名只供测试，存在1000次/天、`Content-Disposition`和网关超时限制；子域名主路线恢复后及时将清小搭地址切回正式域名。
 
 ---
 
@@ -577,7 +1908,7 @@ REGISTRATION_OPEN=false
 GUEST_ACCESS=false
 ```
 
-如果需要为 3–6 位自有前端用户开户，可在受控时间窗口临时设置 `REGISTRATION_OPEN=true`，创建完账号后立即恢复 `false` 并重启后端。不要开放游客来替代账号管理。
+本次经济型实例建议只为 1–3 位固定用户开户。可在受控时间窗口临时设置 `REGISTRATION_OPEN=true`，创建完账号后立即恢复 `false` 并重启后端。不要开放游客来替代账号管理。
 
 ---
 
@@ -589,10 +1920,16 @@ GUEST_ACCESS=false
 - [ ] `stream:"false"`、`stream:1`、`stream:null` 返回 422；JSON `false/true` 正常。
 - [ ] 流式首帧 role、后续 reasoning/content、stop+usage、`[DONE]` 顺序正确。
 - [ ] 清小搭四项探测全绿，真实试聊成功。
+- [ ] 主路线 DNS A记录指向当前 ECS公网IP，父域名备案/阿里云接入和使用授权已核验。
+- [ ] HTTPS证书覆盖实际子域名、证书链完整、自动续期或到期提醒可用。
+- [ ] `PUBLIC_BASE_URL`、`FRONTEND_ORIGIN`、前端构建时 `NEXT_PUBLIC_BACKEND_URL` 都使用实际 HTTPS子域名。
+- [ ] 如果启用API网关回退：默认域名调用量低于1000次/天、API发布到RELEASE、SSE和请求透传已验证，`Content-Disposition` 不影响清小搭。
 - [ ] 管理员页面能创建/一次性显示/撤销密钥；普通用户访问返回 403。
 - [ ] 云服务器工作树不含开发机 `history_record/`、`data/`、`backend/data/`、旧 PDF、旧上传或旧数据库；首次启动后这些目录才由生产实例新建。
 
 ### 前端与文件
+
+> 主路线通过同一授权子域名暴露清小搭 API、受认证 Web API、附件和 Next.js前端；如果只使用API网关回退，则自有前端项目暂缓验收。
 
 - [ ] `GUEST_ACCESS=false` 时未登录访问 `/chat` 被送到 `/login`。
 - [ ] 从真实前端调用真实 LLM，思考折叠区持续流式显示；只隐藏内部工具调用机制，不删除正常思考内容。
@@ -604,8 +1941,8 @@ GUEST_ACCESS=false
 
 ### 容量与安全
 
-- [ ] 完成 §0.2 六路混合并发验收，无 OOM/重启/断流。
-- [ ] 只开放 22/80/443；8000/3000 仅监听 127.0.0.1。
+- [ ] 完成 §0.2 两轮三路混合验收，无 OOM/重启/断流；重型 OCR/深读并发保持 1。
+- [ ] 主路线：22仅管理员 `/32`，80/443全网，8000/3000未开放；8080只有启用API网关回退时才按出口IP `/32` 放行。
 - [ ] `.env` 权限 600，Git 仅跟踪 `.env.example`，日志中没有 key/密码/论文原文。
 - [ ] systemd 单 worker、自愈和开机启动正常；`paper-agent-cleanup.timer` 已启用且手动 oneshot 成功。
 - [ ] `/admin/api-storage` 管理员可访问、普通用户 403；策略解释、危险预览/二次确认、两种 95% 策略和 Trace 模式可用。
@@ -664,13 +2001,26 @@ sudo chmod 600 /var/backups/paper-agent-*.tar.gz /var/backups/api-storage-policy
 
 ### 何时升级
 
-- **升级 8C32G**：频繁 6 路 OCR/深读、内存长期 >13 GiB、Swap 持续使用或 CPU 长时间满载。
-- **不要直接多 worker**：先外置 Redis/任务队列/共享限流与会话状态，再设计多进程。
+经济型 e 的首要升级信号通常是 CPU 稳定性，而不是内存：
+
+- **先升级到通用型 g 4C16G**：内存仍低于 13 GiB，但同一份 PDF 深读耗时波动明显、OCR 时普通 SSE 经常被拖慢、CPU 长时间满载，或重任务并发 1 仍不能满足体验；
+- **再升级到 8C32G**：需要多份扫描 PDF/OCR/深读重叠，或内存长期 >13 GiB、Swap 持续增长；
+- **不要直接多 worker**：先外置 Redis/任务队列/共享限流与会话状态，再设计多进程；
 - 数据持续增长时优先扩系统盘并制定文件生命周期，不要只依赖清理缓存。
 
 ---
 
 ## 14. 常见问题
+
+**域名所有者问“需要给什么信息”**：只提供完整二级域名名称、ECS公网IPv4、A记录、默认线路和TTL 600；不要提供私网IP、SSH私钥、管理员密码或任何API Key。
+
+**子域名解析生效但北京 ECS仍打不开**：先确认父域名ICP状态和阿里云接入备案，不要只排查DNS；然后检查80/443安全组、UFW、Nginx和证书。
+
+**Certbot证书签发失败**：检查A记录、80端口、CAA和域名所有权；借用子域名需要域名所有者配合TXT/CNAME验证。不要反复申请触发CA限额。
+
+**API 网关默认域名能打开但清小搭解析失败**：检查响应是否被默认 `Content-Disposition: attachment` 影响。该头无法用“云助手端口转发”或 EIP解决；若清小搭拒绝，临时默认域名方案不可用。
+
+**API 网关请求约 60 秒中断**：Serverless 后端超时上限是 60 秒。短对话继续用 Serverless；全文深读/OCR改用北京专享实例 `api.s1.small` 并把后端超时调高，最大 3600 秒。
 
 **清小搭返回 401**：检查是否粘贴了完整 Agent API Key、是否已撤销，以及 Bearer 前后是否混入额外字符。不要拿 DeepSeek Key 代替。
 
@@ -678,9 +2028,9 @@ sudo chmod 600 /var/backups/paper-agent-*.tar.gz /var/backups/api-storage-policy
 
 **SSE 一次性整段出现**：确认 nginx `/v1/` 和 `/api/v1/` 已 `proxy_buffering off`、`X-Accel-Buffering: no`，并确认中间 CDN 没有缓存流。
 
-**附件 URL 指向内网或 HTTP**：修正 `.env` 的 `PUBLIC_BASE_URL=https://你的域名` 后重启后端。
+**附件 URL 指向内网或 HTTP**：临时阶段把 `PUBLIC_BASE_URL` 设为 API 网关默认 HTTPS Origin（不带 `/v1`），并确认已创建 `/files/[filename]` API；备案阶段再换成自有域名。
 
-**PDF 首次深读很慢**：Docling 首次模型加载和 CPU OCR 本来就重；确认 §4.1 已由服务账号预热。不要通过增加 Uvicorn worker 解决。
+**PDF 首次深读很慢**：Docling 首次模型加载和 CPU OCR 本来就重；先确认 §4.1 已由服务账号预热。经济型 e 使用共享、非绑定 CPU，同一任务耗时可能波动；重任务并发保持 1。如果普通 SSE 仍经常被拖慢，升级通用型 g 4C16G，不要增加 Uvicorn worker。
 
 **管理员密码忘记**：当前初始化脚本不会重置已有密码，这是防止部署脚本意外接管账号。应走受控的离线恢复流程或备份恢复，不要删除整个用户库。
 
@@ -688,8 +2038,45 @@ sudo chmod 600 /var/backups/paper-agent-*.tar.gz /var/backups/api-storage-policy
 
 ## 参考
 
+### 阿里云官方文档（本手册外部依据）
+
+以下页面均为阿里云官方帮助中心；控制台和在售规格会变化，购买当天仍应以购买页库存、兼容性提示和费用明细为准：
+
+- [使用向导创建 ECS 实例](https://help.aliyun.com/zh/ecs/user-guide/create-an-instance-by-using-the-wizard/)
+- [实例规格族概述](https://help.aliyun.com/zh/ecs/user-guide/overview-of-instance-families)
+- [通用算力型实例规格（U 实例）](https://help.aliyun.com/zh/ecs/user-guide/general-work-force)
+- [计算型实例规格（c 系列）](https://help.aliyun.com/zh/ecs/user-guide/compute-optimized-instance-families)
+- [通用型实例规格（g 系列）](https://help.aliyun.com/zh/ecs/user-guide/general-purpose-instance-families)
+- [共享型/经济型/突发性能实例规格](https://help.aliyun.com/zh/ecs/user-guide/shared-instance-families)
+- [安全组规则](https://help.aliyun.com/zh/ecs/user-guide/security-group-rules)
+- [避免使用弱口令登录 ECS 实例](https://help.aliyun.com/zh/ecs/user-guide/avoid-using-a-weak-password-to-log-in-to-an-instance)
+- [ESSD 云盘](https://help.aliyun.com/zh/ecs/user-guide/essds)
+- [公网带宽计费方式](https://help.aliyun.com/zh/ecs/user-guide/public-bandwidth)
+- [为 ECS 配置公网访问能力](https://help.aliyun.com/zh/ecs/user-guide/configure-public-network-access)
+- [地域和可用区](https://help.aliyun.com/zh/ecs/user-guide/regions-and-zones)
+- [使用 VPC 和交换机创建 ECS](https://help.aliyun.com/zh/vpc/user-guide/vpc-and-vswitch)
+- [添加网站解析（A 记录）](https://help.aliyun.com/zh/dns/pubz-add-website-parsing)
+- [ICP备案流程与备案后处理](https://help.aliyun.com/zh/icp-filing/basic-icp-service/user-guide/icp-filing-application-overview)
+- [源站在阿里云中国内地时的备案接入要求](https://help.aliyun.com/zh/icp-filing/basic-icp-service/support/faq-about-icp-filing-preparations)
+- [公安联网备案信息填写](https://help.aliyun.com/zh/icp-filing/basic-icp-service/the-public-security-network-for-the-record-information-fill-in-the-guide)
+- [SSL证书域名所有权验证方式](https://help.aliyun.com/zh/ssl-certificate/select-a-method-for-domain-name-verification)
+- [二级域名DNS/TXT所有权验证](https://help.aliyun.com/zh/ssl-certificate/frequently-asked-questions-on-domain-ownership-verification)
+- [在Nginx部署SSL证书](https://help.aliyun.com/zh/ssl-certificate/install-ssl-certificates-on-nginx-servers-or-tengine-servers)
+- [备案服务器校验与购买要求](https://help.aliyun.com/zh/icp-filing/basic-icp-service/support/faq-cloud-services-and-ip-address)
+- [ECS 实例释放保护](https://help.aliyun.com/zh/ecs/user-guide/enable-or-disable-release-protection-for-ecs-instances)
+- [设置 ECS 实例报警规则](https://help.aliyun.com/zh/ecs/user-guide/configure-alerts-for-an-ecs-instance)
+- [使用 Workbench 登录 Linux 实例](https://help.aliyun.com/zh/ecs/user-guide/connect-to-a-linux-instance-by-using-a-password-or-key)
+- [云助手会话管理 CLI 端口转发](https://help.aliyun.com/zh/ecs/user-guide/perform-port-forwarding-by-using-ali-instance-cli)
+- [API 网关访问 VPC 内 ECS 后端](https://help.aliyun.com/zh/api-gateway/traditional-api-gateway/getting-started/create-an-api-operation-with-a-resource-in-a-vpc-as-the-backend-service)
+- [API 网关默认二级域名与自有域名限制](https://help.aliyun.com/zh/api-gateway/traditional-api-gateway/user-guide/bind-a-domain-name-to-an-api-group)
+- [API 网关使用限制](https://help.aliyun.com/zh/api-gateway/traditional-api-gateway/product-overview/limits)
+- [API 网关 SSE 流式数据传输](https://help.aliyun.com/zh/api-gateway/traditional-api-gateway/user-guide/support-streaming-data-transfer-sse/)
+- [API 网关 Serverless/专享实例与北京地域支持](https://help.aliyun.com/zh/api-gateway/traditional-api-gateway/product-overview/instance-types)
+- [API 网关环境与 X-Ca-Stage](https://help.aliyun.com/zh/api-gateway/traditional-api-gateway/user-guide/configure-different-environments-for-an-api-operation)
+
+### 本仓库与其他组件
+
 - 本仓库：`openai-compatible-agent-integration-guide.md`
 - 本仓库：`README.md`、`docs/DESIGN.md`
-- 阿里云 ECS/ESSD/安全组官方文档
 - Next.js Self-hosting 官方文档
 - nginx Reverse Proxy 官方文档
