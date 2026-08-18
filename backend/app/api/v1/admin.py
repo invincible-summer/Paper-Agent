@@ -5,6 +5,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.v1.auth import current_user
+from core.blocking import run_cpu_bound
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -306,44 +307,55 @@ class DisplayPolicyUpdate(BaseModel):
 
 
 @router.get("/display-policy")
-def get_display_policy(authorization: str | None = Header(None)) -> dict:
+async def get_display_policy(authorization: str | None = Header(None)) -> dict:
     _administrator(authorization)
     from dataclasses import asdict
 
     from tools.export.cards import ALL_CARD_TOOLS, CORE_CARD_TOOLS
-    store = _api_storage_store(); store.initialize()
-    policy = store.get_display_policy()
-    return {
-        "policy": asdict(policy),
-        "tools": sorted(ALL_CARD_TOOLS),
-        "core_tools": sorted(CORE_CARD_TOOLS),
-    }
+
+    def _load() -> dict:
+        store = _api_storage_store(); store.initialize()
+        return {
+            "policy": asdict(store.get_display_policy()),
+            "tools": sorted(ALL_CARD_TOOLS),
+            "core_tools": sorted(CORE_CARD_TOOLS),
+        }
+
+    return await run_cpu_bound(_load)
 
 
 @router.put("/display-policy")
-def put_display_policy(body: DisplayPolicyUpdate,
-                       authorization: str | None = Header(None)) -> dict:
+async def put_display_policy(body: DisplayPolicyUpdate,
+                             authorization: str | None = Header(None)) -> dict:
     admin = _administrator(authorization)
     from dataclasses import asdict
 
     from core.api_storage_store import PolicyVersionConflict
     from tools.export.cards import ALL_CARD_TOOLS
-    store = _api_storage_store(); store.initialize()
     changes = body.changes()
     if "enabled_tools" in changes:
         unknown = sorted(set(changes["enabled_tools"]) - ALL_CARD_TOOLS)
         if unknown:
             raise HTTPException(422, f"未知工具：{', '.join(unknown)}")
-    if changes.get("preset") == "custom":
-        current = store.get_display_policy()
-        effective = changes.get("enabled_tools", current.enabled_tools)
-        if not effective:
-            raise HTTPException(422, "custom 预设需要至少选择一个工具（或改用 off）")
-    try:
-        updated = store.update_display_policy(
-            changes, expected_version=body.expected_version, updated_by=admin["id"])
-    except PolicyVersionConflict as exc:
-        raise HTTPException(409, str(exc)) from None
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from None
-    return {"policy": asdict(updated)}
+
+    def _update() -> dict:
+        store = _api_storage_store(); store.initialize()
+        if changes.get("preset") == "custom":
+            current = store.get_display_policy()
+            effective = changes.get("enabled_tools", current.enabled_tools)
+            if not effective:
+                raise HTTPException(
+                    422, "custom 预设需要至少选择一个工具（或改用 off）"
+                )
+        try:
+            updated = store.update_display_policy(
+                changes, expected_version=body.expected_version,
+                updated_by=admin["id"],
+            )
+        except PolicyVersionConflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return {"policy": asdict(updated)}
+
+    return await run_cpu_bound(_update)

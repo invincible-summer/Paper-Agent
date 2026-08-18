@@ -10,6 +10,7 @@
 - Status: `docs/OPENAI_API_STORAGE_IMPLEMENTATION_STATUS.md`
 - Repository rules: `AGENTS.md`
 - Deployment runbook: `Website_deployment_plan.md`
+- Public deployment invariants: `README.md`, `AGENTS.md`, `.env.example`, and `deploy/systemd/`
 
 ## Module Checklist
 
@@ -140,7 +141,7 @@ The `/files/<Unicode filename>.docx` response was `200 OK`, contained 38,791 byt
 
 ## Deployment Acceptance
 
-- `Website_deployment_plan.md`, `README.md`, `docs/DESIGN.md`, `AGENTS.md` and `.env.example` document the final API-only lifecycle and operations model.
+- `Website_deployment_plan.md`, `README.md`, `docs/DESIGN.md`, `AGENTS.md`, `.env.example` and `deploy/systemd/` document the API-only lifecycle and operations model.
 - API-only 2 vCPU / 4 GiB is documented as a constrained lightweight deployment: one Uvicorn worker, one heavy research/read task at a time, swap enabled, and no self-hosted Next.js requirement.
 - The supported 3–6 mixed-concurrent-user deployment remains 4 vCPU / 16 GiB, 100 GiB storage, 10 Mbps and 4 GiB swap.
 - API blobs, temporary files, traces and expired checkpoints are excluded from long-lived backups by default; any checkpoint backup must not extend data beyond its business TTL.

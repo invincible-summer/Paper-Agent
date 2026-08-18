@@ -76,7 +76,7 @@ def current_user(authorization: str | None, x_guest_id: str | None = None) -> di
 
 
 @router.get("/config")
-def auth_config() -> dict:
+async def auth_config() -> dict:
     """Public: tells the frontend whether to show the login page."""
     return {
         "auth_required": settings.auth_required,

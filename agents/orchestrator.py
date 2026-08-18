@@ -25,6 +25,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from agents.chat_tools import get_chat_tools
 from agents.session import ChatSession
 from agents.tools_impl import execute_tool, reflect_tool_result, suggest_skills
+from core.blocking import run_cpu_bound
 from core.llm import ainvoke_utility, get_llm
 from core.prompts.system import get_redline_tail, get_system_prompt
 from core.tool_protocol import ErrorCode, ToolResult, err
@@ -412,7 +413,7 @@ async def chat_turn(
                 new_attachments.append(rec)
                 existing.add(a["id"])
         if new_attachments:
-            _index_attachments(session, new_attachments)
+            await run_cpu_bound(_index_attachments, session, new_attachments)
             await _run_checkpoint_callback(checkpoint_cb, session)
     turn_attachments = [
         {key: a.get(key, "" if key not in {"char_count", "element_count"} else 0)
@@ -427,7 +428,7 @@ async def chat_turn(
 
     # --- Build LLM context ---
     context = f"\n\n[Session Context]\n{session.context_summary()}\n"
-    context += _attachment_context(session)
+    context += await run_cpu_bound(_attachment_context, session)
     messages: list = [SystemMessage(content=get_system_prompt())]
     for msg in session.messages:
         if msg["role"] == "user":

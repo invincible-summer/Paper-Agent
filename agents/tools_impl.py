@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from agents.chat_tools import ARGS_SCHEMAS
 from agents.session import ChatSession
+from core.blocking import run_cpu_bound
 from core.circuit_breaker import get_breaker
 from core.llm import ainvoke_utility, get_llm
 from core.models import Paper
@@ -486,7 +487,7 @@ async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> Too
     # Self-heal: search-time vector indexing is best-effort and may have been
     # skipped (embedder cold-miss, restored history, ...). Re-index before
     # retrieval so a session with papers never degrades to BM25-only.
-    _ensure_session_index(session)
+    await run_cpu_bound(_ensure_session_index, session)
 
     # Pipeline: query rewrite (best-effort) -> hybrid retrieve (2N) -> rerank (N).
     # Retrieval uses the rewritten query; generation sees the user's original.
@@ -496,7 +497,9 @@ async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> Too
     retrieval_query = await _rewrite_query(query)
     structure_query = _is_structure_query(query)
     protected_outline = _section_outline_passage(session, paper_id) if structure_query else None
-    passages = _retrieve_passages(session, retrieval_query, paper_id, top_k, modality)
+    passages = await run_cpu_bound(
+        _retrieve_passages, session, retrieval_query, paper_id, top_k, modality
+    )
     passages = _protect_passage(passages, protected_outline, top_k)
     if not passages:
         return partial_result(
@@ -523,7 +526,9 @@ async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> Too
     if evidence_gap(answer, passages, query):
         n = await _escalate_fulltext(session, _escalation_targets(passages), progress_cb)
         if n:
-            passages2 = _retrieve_passages(session, retrieval_query, paper_id, top_k, modality)
+            passages2 = await run_cpu_bound(
+                _retrieve_passages, session, retrieval_query, paper_id, top_k, modality
+            )
             passages2 = _protect_passage(
                 passages2, _section_outline_passage(session, paper_id) if structure_query else None,
                 top_k,
@@ -821,9 +826,11 @@ async def _ensure_fulltext(session: ChatSession, paper_id: str, progress_cb=None
             paper.fulltext_status = "unavailable"
             _persist_fulltext_status(paper, "unavailable", "parse_degraded", session)
             return False
-        VectorStore(storage_context=session.storage_context).upsert_fulltext_chunks(
+        await run_cpu_bound(
+            VectorStore(storage_context=session.storage_context).upsert_fulltext_chunks,
             paper, session_id=session.session_id,
-            parsed_sections=doc.sections, full_text=doc.raw_text)
+            parsed_sections=doc.sections, full_text=doc.raw_text,
+        )
         if summary is None:
             summary = PaperSummary(paper_id=paper.id)
             session.paper_summaries[paper.id] = summary
@@ -1563,6 +1570,7 @@ async def _tool_bib_import(args: dict, session: ChatSession, progress_cb) -> Too
     existing_titles = [normalize_title(p.title) for p in session.all_papers() if p.title]
 
     imported: list[dict] = []
+    imported_papers: list[Paper] = []
     failures: list[dict] = []
     enriched = 0
     for e in entries:
@@ -1595,14 +1603,23 @@ async def _tool_bib_import(args: dict, session: ChatSession, progress_cb) -> Too
         existing_titles.append(ntitle)
         imported.append({"id": pid, "title": title, "doi": doi or "",
                          "verified": bool(doi)})
-        # Session-scoped vector index (best-effort; ask_papers self-heals anyway).
-        try:
-            from tools.storage.vectorstore import VectorStore
-            vs = VectorStore(storage_context=session.storage_context)
-            if vs.available():
-                vs.upsert_paper_summary(paper, None, session_id=session.session_id)
-        except Exception:  # noqa: BLE001
-            pass
+        imported_papers.append(paper)
+
+    if imported_papers:
+        def _index_imported() -> None:
+            try:
+                from tools.storage.vectorstore import VectorStore
+
+                vs = VectorStore(storage_context=session.storage_context)
+                if vs.available():
+                    for imported_paper in imported_papers:
+                        vs.upsert_paper_summary(
+                            imported_paper, None, session_id=session.session_id
+                        )
+            except Exception:  # noqa: BLE001
+                pass
+
+        await run_cpu_bound(_index_imported)
 
     msg = f"已导入 {len(imported)} 篇"
     if enriched:

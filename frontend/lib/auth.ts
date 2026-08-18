@@ -68,12 +68,21 @@ export interface AuthConfig {
   guest_access: boolean;
 }
 
+const AUTH_CONFIG_TIMEOUT_MS = 8_000;
+
 export async function fetchAuthConfig(): Promise<AuthConfig> {
-  const res = await fetch(`${BASE}/auth/config`, { cache: "no-store" });
-  if (!res.ok) {
-    return { auth_required: false, registration_open: false, guest_access: true };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AUTH_CONFIG_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}/auth/config`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`auth config failed (${res.status})`);
+    return res.json();
+  } finally {
+    clearTimeout(timeout);
   }
-  return res.json();
 }
 
 async function authCall(path: string, body: Record<string, string>): Promise<AuthState> {

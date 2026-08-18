@@ -24,6 +24,7 @@ from datetime import datetime
 
 from langchain_core.messages import HumanMessage
 
+from core.blocking import run_cpu_bound
 from core.config import get_settings
 from core.embeddings import embed_texts
 from core.llm import ainvoke_utility, get_llm
@@ -335,7 +336,7 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
     # ③ Semantic rerank
     report("语义相关性重排（本地嵌入）...")
     query_text = f"{plan['research_goal']}\n{topic}"
-    scored = rerank_papers(all_papers, query_text)
+    scored = await run_cpu_bound(rerank_papers, all_papers, query_text)
 
     # ④ Adaptive tiering
     has_embeddings = bool(scored) and scored[0].relevance_score >= 0 and _embed_ok(query_text)
@@ -390,26 +391,44 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
             f"（本次可达目标 {target_available} 篇）"
         )
 
-    # ⑤ Persist + index (best-effort)
+    # ⑤ Persist + index (best-effort). SQLite/Chroma and local embeddings are
+    # synchronous, so keep them off the shared FastAPI event loop.
+    session_id = state.get("session_id", "")
+    await run_cpu_bound(
+        _persist_and_index_results, core + candidates, storage_context,
+        s.storage.sqlite_path, session_id,
+    )
+
+    state["current_phase"] = "search_done"
+    return state
+
+
+def _persist_and_index_results(
+    papers: list[Paper], storage_context, sqlite_path: str, session_id: str,
+) -> None:
+    """Synchronous search persistence, intended for ``run_cpu_bound``."""
     try:
-        db = Database(storage_context=storage_context) if storage_context is not None else Database(s.storage.sqlite_path)
-        db.save_papers(core + candidates)
+        db = (
+            Database(storage_context=storage_context)
+            if storage_context is not None else Database(sqlite_path)
+        )
+        db.save_papers(papers)
         db.close()
     except Exception as e:  # noqa: BLE001
         logger.debug("sqlite persist skipped: %s", e)
 
-    session_id = state.get("session_id", "")
-    if session_id:
-        try:
-            from tools.storage.vectorstore import VectorStore
-            vs = VectorStore(storage_context=storage_context)
-            for p in core + candidates:
-                vs.upsert_paper_summary(p, None, session_id=session_id)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("vector index skipped (ask_papers will self-heal on demand): %s", e)
+    if not session_id:
+        return
+    try:
+        from tools.storage.vectorstore import VectorStore
 
-    state["current_phase"] = "search_done"
-    return state
+        vs = VectorStore(storage_context=storage_context)
+        for paper in papers:
+            vs.upsert_paper_summary(paper, None, session_id=session_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "vector index skipped (ask_papers will self-heal on demand): %s", e
+        )
 
 
 def _embed_ok(query_text: str) -> bool:

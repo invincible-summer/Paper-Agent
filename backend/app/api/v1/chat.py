@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.api.v1.auth import current_user
+from core.blocking import run_cpu_bound
 from app.schemas.chat import (ChatRequest, ChatHistoryListResponse, ChatHistoryItem,
                               ChatRenameRequest)
 
@@ -314,9 +315,9 @@ async def upload_chat_files(files: list[UploadFile] = File(...),
             })
             continue
         try:
-            results.append(save_attachment(
-                raw, upload.filename or "upload", content_type=upload.content_type or "",
-                owner_id=user["id"],
+            results.append(await run_cpu_bound(
+                save_attachment, raw, upload.filename or "upload",
+                content_type=upload.content_type or "", owner_id=user["id"],
             ))
         except AttachmentError as e:
             results.append({

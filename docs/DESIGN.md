@@ -516,9 +516,11 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 - **上传/产物**：`data/uploads/` 同时保存用户原件 `<uuid>.<ext>` 与文本 sidecar `<uuid>.txt`；`data/assets/upload_*` 保存上传图片/DOCX media 等元素资产；`data/exports/` 保存 `.md/.txt/.docx/.tex` 产物。原始 bytes 从不写入历史 JSON。Web 上传与导出额外写入被 `.gitignore` 排除的 `data/web_artifacts.db` 所有者索引；原始文件、文本、图像资产和导出文件读取前按当前账号/游客身份校验。OpenAI API 私有文件不进入这些目录，而是按会话隔离在 `data/openai_api/`；API 公共别名保持短期可公开读取。
 - **安全**：SSRF 防护（URL 下载统一走公网校验）、50MB URL/20MB 网页直传上限、UUID/file_id/basename/后缀收敛、图片 raw endpoint 仅开放安全 raster MIME、CORS 显式白名单（永不 `*`）、/v1 Bearer 常量时间比较、Web 附件/导出/上传元素按所有者校验、错误不回显 OS 路径；口令 PBKDF2 加盐哈希、令牌只存哈希、历史按账号隔离（§3.4）。图表裁图与扫描页在按需理解时会发送到配置的第三方 VLM，未配置时优雅降级。
 
-### 部署单 worker 约束
+### 部署单 worker 与事件循环隔离
 
-/v1 会话内存、熔断器、LLM 限流信号量均为进程内状态 → uvicorn 必须 `--workers 1`（个人工具量级足够；扩多 worker 需外置共享状态，当前不做）。
+`/v1`、网页 `/api/v1` 和健康检查共享同一个 Uvicorn 事件循环；会话内存、熔断器、LLM 限流信号量也都是进程内状态，因此仍必须 `--workers 1`。同步的 Docling/PyMuPDF 结构解析、SentenceTransformer/CrossEncoder 推理、Chroma 向量读写、附件快速提取和 API Checkpoint 落盘不得直接运行在 async 请求链：统一经 `core.blocking.run_cpu_bound` 投递到一个进程级 daemon worker 串行执行。这样本地重计算可以继续，但网页鉴权启动、`/health`、SSE 心跳和其他网络协程仍能被调度；串行单槽同时限制 4C16G 上的本地 ML 内存峰值。原生调用被取消时无法强杀，后台 worker 会完成当前调用再处理下一项。扩多 worker/多机前仍须外置共享会话、任务队列、熔断和限流状态，不能直接增加 Uvicorn worker。
+
+前端 `fetchAuthConfig` 使用 8 秒超时；超时只结束首屏无限 spinner，并保留本地已有登录信息。所有 `/api/v1` 权限仍由后端逐请求校验，前端降级不构成授权。
 
 ---
 

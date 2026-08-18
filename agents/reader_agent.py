@@ -28,6 +28,7 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 
+from core.blocking import run_cpu_bound
 from core.config import get_settings
 from core.llm import get_llm
 from core.models import FIELD_PROFILES, Paper, PaperSummary, Reference
@@ -352,9 +353,9 @@ async def _process_single_paper(
                     )
                 except Exception as e:  # noqa: BLE001
                     logger.debug("legacy full cache metadata heal write skipped: %s", e)
-                _index_paper(
-                    paper, cached_summary, healed_doc, "full", session_id,
-                    storage_context=storage_context,
+                await run_cpu_bound(
+                    _index_paper, paper, cached_summary, healed_doc, "full",
+                    session_id, storage_context=storage_context,
                 )
         if cached_summary is not None:
             # A summary-cache hit must also restore the independently persisted
@@ -372,7 +373,10 @@ async def _process_single_paper(
             except Exception as e:  # noqa: BLE001
                 logger.debug("cached element restore skipped for %s: %s", paper.id, e)
             # Indexing is best-effort and must never invalidate a cache hit.
-            _index_paper(paper, cached_summary, None, read_mode, session_id, storage_context=storage_context)
+            await run_cpu_bound(
+                _index_paper, paper, cached_summary, None, read_mode, session_id,
+                storage_context=storage_context,
+            )
             return cached_summary, None
 
     # --- Full attempt without an OA PDF: reuse the abstract cache if present.
@@ -391,8 +395,10 @@ async def _process_single_paper(
                         paper, None, read_level="abstract",
                         text_chars=len(paper.abstract or ""),
                     )
-                _index_paper(paper, abstract_summary, None, "abstract",
-                             session_id, storage_context=storage_context)
+                await run_cpu_bound(
+                    _index_paper, paper, abstract_summary, None, "abstract",
+                    session_id, storage_context=storage_context,
+                )
                 return abstract_summary, None
 
     # --- Stage 1 + 1.5 + 2 + 3: parse → recover → understand → persist ---
@@ -461,8 +467,10 @@ async def _process_single_paper(
         logger.warning("Cache write failed for %s: %s", paper.id, e)
 
     # --- Index into the session-scoped RAG vector store (best-effort) ---
-    _index_paper(paper, summary, doc if full_text else None, effective_read_mode,
-                 session_id, storage_context=storage_context)
+    await run_cpu_bound(
+        _index_paper, paper, summary, doc if full_text else None,
+        effective_read_mode, session_id, storage_context=storage_context,
+    )
 
     return summary, None
 
@@ -517,15 +525,19 @@ async def parse_and_understand(
         return None
     assets_dir = assets_dir or get_settings().reader.assets_dir
     try:
-        doc = get_structure_parser().parse(
-            paper.pdf_path, paper_id=paper.id, assets_dir=assets_dir,
+        doc = await run_cpu_bound(
+            get_structure_parser().parse, paper.pdf_path,
+            paper_id=paper.id, assets_dir=assets_dir,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("Parse failed for %s: %s", paper.id, e)
         return None
 
     if storage_context is not None and storage_context.channel == "openai_api":
-        persist_api_element_assets(paper, doc, storage_context, session_id=session_id)
+        await run_cpu_bound(
+            persist_api_element_assets, paper, doc, storage_context,
+            session_id=session_id,
+        )
         for element in doc.elements:
             asset = Path(element.asset_path) if element.asset_path else None
             if asset is not None and asset.is_file():
@@ -580,14 +592,18 @@ async def _understand_and_persist_elements(
             _hydrate_elements(doc, db.get_elements(paper.id))
             # Re-upsert is embedding-only and repairs a missing/rebuilt Chroma
             # collection while still guaranteeing zero VLM cost on cache hits.
-            _index_elements_for_context(paper, doc.elements, storage_context)
+            await run_cpu_bound(
+                _index_elements_for_context, paper, doc.elements, storage_context
+            )
             return  # current; nothing to re-understand or re-persist
         await (
             understand_elements(doc.elements, focus="", storage_context=storage_context)
             if storage_context is not None else understand_elements(doc.elements, focus="")
         )
         db.save_elements(paper.id, doc.elements, doc.doc_fingerprint)
-        _index_elements_for_context(paper, doc.elements, storage_context)
+        await run_cpu_bound(
+            _index_elements_for_context, paper, doc.elements, storage_context
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning("element understand/persist failed for %s: %s", paper.id, e)
 
@@ -665,11 +681,8 @@ def _index_paper(paper: Paper, summary: PaperSummary, parsed: ParsedPaperDocumen
     """Index a paper's summary + full-text chunks into the session-scoped vector store.
 
     Best-effort: any failure (model unavailable, store closed) is logged and
-    swallowed so it never blocks the read pipeline. Summary is always indexed
-    (Level 1); full-mode papers with parsed sections also get chunk indexing
-    (Level 2). All records carry the session_id so retrieval stays scoped to
-    the owning conversation. Element indexing is global (see
-    _index_elements_global) and happens once per paper during understanding.
+    swallowed so it never blocks the read pipeline. Callers execute this
+    synchronous local-ML/storage work through ``run_cpu_bound``.
     """
     try:
         vs = _get_vectorstore(storage_context)
@@ -677,8 +690,10 @@ def _index_paper(paper: Paper, summary: PaperSummary, parsed: ParsedPaperDocumen
         if read_mode == "full":
             sections = parsed.sections if parsed else []
             full_text = getattr(summary, "full_text", None)
-            vs.upsert_fulltext_chunks(paper, session_id=session_id,
-                                      parsed_sections=sections, full_text=full_text)
+            vs.upsert_fulltext_chunks(
+                paper, session_id=session_id, parsed_sections=sections,
+                full_text=full_text,
+            )
     except Exception as e:  # noqa: BLE001
         logger.debug("vector index skipped for %s: %s", paper.id, e)
 

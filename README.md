@@ -138,7 +138,7 @@ cd frontend && pnpm build                     # 前端类型检查 + 构建
 
 ## 服务器部署
 
-**新手请直接按 [Website_deployment_plan.md](Website_deployment_plan.md) 逐步操作**（买 ECS → 安全组 → 装环境 → 密钥 → systemd → nginx/HTTPS → 清小搭向导，每步带解释）。以下是架构要点速览：
+**生产部署与升级请按 [Website_deployment_plan.md](Website_deployment_plan.md) 操作**；手册随仓库维护，但只有用户明确确认某版本上云后，才填写末尾的版本专属发布命令。以下是架构要点速览：
 
 架构无外部服务依赖（SQLite / Chroma / JSON 全在本地文件），从 localhost 迁移到服务器只需环境与反向代理配置：
 
@@ -150,8 +150,8 @@ cd frontend && pnpm build                     # 前端类型检查 + 构建
    - `AUTH_REQUIRED=true`、`REGISTRATION_OPEN=false`、`GUEST_ACCESS=false` — 正式自有前端策略
    - `APP_HOST` / `APP_PORT` — 后端绑定地址与端口
 2. **反向代理**（nginx / caddy）：终结 HTTPS；代理 `/api`、`/v1`、`/files` 到后端；SSE 需要 `proxy_buffering off` 和 `proxy_read_timeout ≥ 300s`。
-3. **单进程约束**：会话内存、熔断器、限流信号量均为进程内状态，uvicorn 必须 `--workers 1`（`start.sh prod` 已内置）。
-4. **本地模型**：嵌入模型 ~120MB + 精排模型 ~1.1GB 首次加载需联网下载；可预置 `HF_ENDPOINT` 或提前下载到 `~/.cache` 打包；精排不可用只影响排序质量，不阻塞服务。
+3. **单进程约束**：会话内存、熔断器、限流信号量均为进程内状态，uvicorn 必须 `--workers 1`（`start.sh prod` 已内置）。`/v1` 与网页 `/api/v1` 共用事件循环；Docling、本地嵌入、CrossEncoder、Chroma 和附件提取统一进入进程内单槽后台 worker，避免清小搭重任务阻塞网页首屏与健康检查。
+4. **本地模型**：嵌入模型 ~120MB + 精排模型 ~1.1GB 首次加载需联网下载；可预置 `HF_ENDPOINT` 或提前下载到 `~/.cache` 打包；精排不可用只影响排序质量，不阻塞服务。前端 `/auth/config` 启动探测有 8 秒上限，后端异常时不会无限停留在加载动画；服务端鉴权仍是最终边界。
 5. **数据持久化**：`data/`（SQLite / Chroma / 上传原件与 `.txt` sidecar / 上传元素裁图 / 产物）与 `history_record/` 挂卷或定期备份。
 6. **进程管理**：systemd 两个 unit（uvicorn + next start），`restart=always`。
 

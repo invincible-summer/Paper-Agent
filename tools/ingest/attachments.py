@@ -17,6 +17,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from core.blocking import run_cpu_bound
 from core.config import get_settings
 from core.models import Paper
 from core.storage_context import StorageContext
@@ -479,6 +480,40 @@ def _image_element(path: Path, document_id: str, caption: str = "", assets_dir: 
     )
 
 
+def _prepare_docx_document(
+    source: Path, document_id: str, assets_dir: str,
+) -> ParsedPaperDocument:
+    """Build DOCX text/elements synchronously for ``run_cpu_bound``."""
+    raw = source.read_bytes()
+    return ParsedPaperDocument(
+        raw_text=_extract_docx_text(raw),
+        elements=_docx_elements(raw, document_id, assets_dir),
+        doc_fingerprint=hashlib.sha256(raw).hexdigest(),
+        parser_backend="docx",
+    )
+
+
+def _prepare_image_document(
+    source: Path, document_id: str, title: str, assets_dir: str,
+) -> ParsedPaperDocument:
+    """Build a standalone-image document synchronously for ``run_cpu_bound``."""
+    element = _image_element(source, document_id, title, assets_dir)
+    raw = source.read_bytes()
+    return ParsedPaperDocument(
+        elements=[element], doc_fingerprint=hashlib.sha256(raw).hexdigest(),
+        parser_backend="image", page_count=1,
+    )
+
+
+def _secure_element_assets(context, elements: list[PaperElement]) -> None:
+    for element in elements:
+        if element.asset_path and Path(element.asset_path).is_file():
+            try:
+                context.secure_private_file(element.asset_path)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 async def ensure_attachment_understood(attachment: dict, session, *, focus: str = "") -> dict:
     """Run cached multimodal understanding for one current-session attachment."""
     aid = attachment.get("id") or ""
@@ -534,53 +569,55 @@ async def ensure_attachment_understood(attachment: dict, session, *, focus: str 
                     elements = doc.elements
                     recovered_text = doc.raw_text or ""
             elif ext == "docx":
-                raw = source.read_bytes()
-                recovered_text = _extract_docx_text(raw)
-                elements = _docx_elements(raw, document_id, assets_dir)
-                if context is not None and context.channel == "openai_api":
-                    for element in elements:
-                        if element.asset_path and Path(element.asset_path).is_file():
-                            try:
-                                context.secure_private_file(element.asset_path)
-                            except Exception:  # noqa: BLE001
-                                pass
-                doc = ParsedPaperDocument(
-                    raw_text=recovered_text, elements=elements,
-                    doc_fingerprint=hashlib.sha256(raw).hexdigest(), parser_backend="docx",
+                doc = await run_cpu_bound(
+                    _prepare_docx_document, source, document_id, assets_dir
                 )
+                recovered_text = doc.raw_text or ""
+                elements = doc.elements
                 if context is not None and context.channel == "openai_api":
-                    persist_api_element_assets(paper, doc, context, session_id=session.session_id)
+                    await run_cpu_bound(_secure_element_assets, context, elements)
+                    await run_cpu_bound(
+                        persist_api_element_assets, paper, doc, context,
+                        session_id=session.session_id,
+                    )
                 if elements:
                     await (_understand_and_persist_elements(paper, doc, db, storage_context=context) if context is not None else _understand_and_persist_elements(paper, doc, db))
             else:
-                el = _image_element(source, document_id, title, assets_dir)
-                elements = [el]
-                if context is not None and context.channel == "openai_api" and el.asset_path:
-                    try:
-                        context.secure_private_file(el.asset_path)
-                    except Exception:  # noqa: BLE001
-                        pass
-                raw = source.read_bytes()
-                doc = ParsedPaperDocument(
-                    elements=elements, doc_fingerprint=hashlib.sha256(raw).hexdigest(),
-                    parser_backend="image", page_count=1,
+                doc = await run_cpu_bound(
+                    _prepare_image_document, source, document_id, title, assets_dir
                 )
+                elements = doc.elements
                 if context is not None and context.channel == "openai_api":
-                    persist_api_element_assets(paper, doc, context, session_id=session.session_id)
+                    await run_cpu_bound(_secure_element_assets, context, elements)
+                    await run_cpu_bound(
+                        persist_api_element_assets, paper, doc, context,
+                        session_id=session.session_id,
+                    )
                 await (_understand_and_persist_elements(paper, doc, db, storage_context=context) if context is not None else _understand_and_persist_elements(paper, doc, db))
         finally:
             db.close()
 
         sidecar_path = attachment_text_path(attachment, session)
-        old_text = sidecar_path.read_text(encoding="utf-8") if sidecar_path and sidecar_path.is_file() else ""
-        enriched = _write_enriched_text(attachment, session, recovered_text or old_text, elements)
+        old_text = await run_cpu_bound(
+            lambda: sidecar_path.read_text(encoding="utf-8")
+            if sidecar_path and sidecar_path.is_file() else ""
+        )
+        enriched = await run_cpu_bound(
+            _write_enriched_text, attachment, session, recovered_text or old_text, elements
+        )
         from tools.storage.vectorstore import VectorStore
-        try:
-            VectorStore(storage_context=getattr(session, "storage_context", None)).upsert_text_chunks(
-                aid, title, enriched, session_id=session.session_id
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.debug("attachment chunk re-index skipped for %s: %s", aid, e)
+
+        def _reindex_attachment() -> None:
+            try:
+                VectorStore(
+                    storage_context=getattr(session, "storage_context", None)
+                ).upsert_text_chunks(
+                    aid, title, enriched, session_id=session.session_id
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("attachment chunk re-index skipped for %s: %s", aid, e)
+
+        await run_cpu_bound(_reindex_attachment)
         attachment.update({
             "char_count": len(enriched), "text_preview": enriched[:500],
             "multimodal_status": "ready", "element_count": len(elements),

@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from core.blocking import run_cpu_bound
+
 logger = logging.getLogger(__name__)
 
 _UPLOAD_DIR = Path(__file__).resolve().parents[4] / "data" / "uploads"
@@ -220,14 +222,16 @@ async def process_media_parts(
                     filename = Path(part.url.split("?", 1)[0]).name or "upload"
             try:
                 if temp_path is not None:
-                    attachment = save_attachment_from_path(
-                        temp_path, filename, content_type=content_type,
-                        storage_context=storage_context, session_id=session_id,
+                    attachment = await run_cpu_bound(
+                        save_attachment_from_path, temp_path, filename,
+                        content_type=content_type, storage_context=storage_context,
+                        session_id=session_id,
                     )
                 else:
-                    attachment = save_attachment(
-                        raw or b"", filename, content_type=content_type,
-                        storage_context=storage_context, session_id=session_id,
+                    attachment = await run_cpu_bound(
+                        save_attachment, raw or b"", filename,
+                        content_type=content_type, storage_context=storage_context,
+                        session_id=session_id,
                     )
             finally:
                 if temp_path is not None:

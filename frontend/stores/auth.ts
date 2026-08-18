@@ -28,10 +28,17 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
 
   hydrate: async () => {
     const saved = readAuth();
-    let cfg = { auth_required: false, registration_open: false, guest_access: true };
+    // A busy/unreachable backend must not leave AppShell on an infinite spinner.
+    // Preserve an existing login locally; without one, keep the old local-dev
+    // fallback. Server-side authorization remains authoritative for every API.
+    let cfg = {
+      auth_required: Boolean(saved.token),
+      registration_open: false,
+      guest_access: !saved.token,
+    };
     try {
       cfg = await fetchAuthConfig();
-    } catch { /* backend unreachable — preserve local development fallback */ }
+    } catch { /* bounded bootstrap fallback; backend still enforces auth */ }
     set({
       checked: true,
       authRequired: cfg.auth_required,
