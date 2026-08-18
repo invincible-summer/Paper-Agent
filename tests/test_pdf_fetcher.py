@@ -366,3 +366,26 @@ def test_europepmc_oa_only():
          "availability": "Subscription required"},
     ]}}
     assert _extract_pdf_url(closed_item) is None
+
+
+def test_unpaywall_lookup_is_lazy_after_direct_download_failure(tmp_path):
+    events=[]
+    f=PDFFetcher.__new__(PDFFetcher)
+    f.pdf_dir=tmp_path
+    f.admin_override=True
+    async def download(url, local_path, title=""):
+        events.append(("download", url))
+        return str(local_path) if "fallback" in url else None
+    async def unpaywall(doi):
+        events.append(("unpaywall", doi))
+        return "https://oa.example/fallback.pdf"
+    f._download=download
+    f._unpaywall_pdf_url=unpaywall
+    paper=Paper(id="lazy",title="Lazy",source="arxiv",doi="10.1/lazy",
+                pdf_url="https://arxiv.org/pdf/lazy")
+    assert asyncio.run(f.fetch(paper)) is not None
+    assert events == [
+        ("download", "https://arxiv.org/pdf/lazy"),
+        ("unpaywall", "10.1/lazy"),
+        ("download", "https://oa.example/fallback.pdf"),
+    ]

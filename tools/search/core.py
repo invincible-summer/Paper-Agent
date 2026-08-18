@@ -12,10 +12,11 @@ import httpx
 from core.config import get_settings
 from core.models import Paper
 from tools.search.base import SearchBackend, generate_paper_id, shorten_chinese_query, RateLimiter
+from tools.search.http_client import get_search_http_client
 
 logger = logging.getLogger(__name__)
 
-API_URL = "https://api.core.ac.uk/v3/search/works"
+API_URL = "https://api.core.ac.uk/v3/search/works/"
 
 _limiter = RateLimiter(max_concurrent=3, min_interval=0.5, source_name="core", fast_fail_429=True)
 _warned_no_key = False
@@ -60,9 +61,9 @@ class CoreBackend(SearchBackend):
     async def search(self, query: str, limit: int = 20) -> list[Paper]:
         global _warned_no_key
         api_key = getattr(get_settings().search, "core_api_key", "") or ""
-        if not api_key:
+        if not api_key or not get_settings().search.core_license_confirmed:
             if not _warned_no_key:
-                logger.info("CORE backend disabled: set CORE_API_KEY (free) to enable.")
+                logger.info("CORE backend disabled: API key and explicit license confirmation are required.")
                 _warned_no_key = True
             return []
 
@@ -70,23 +71,24 @@ class CoreBackend(SearchBackend):
         params = {"q": query, "limit": min(limit, 50)}
         headers = {"Authorization": f"Bearer {api_key}"}
         try:
-            async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-                async with _limiter:
-                    resp = await _limiter.fetch(
-                        client, "GET", API_URL, params=params, headers=headers)
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
+            client = get_search_http_client()
+            async with _limiter:
+                resp = await _limiter.fetch(
+                    client, "GET", API_URL, params=params, headers=headers)
+                self._capture_response(resp)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+                self._forced_status = "schema_mismatch"
+                return []
         except httpx.TimeoutException:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "timeout")
+            self._forced_status = "timeout"
             return []
         except httpx.RequestError:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "connection_error")
+            self._forced_status = "connection_error"
             return []
         except Exception:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "invalid_response")
+            self._forced_status = "schema_mismatch"
             return []
         return parse_results(data)

@@ -177,6 +177,14 @@ Paper_Agent/
 | `/auth/me` | GET | 令牌 → 用户信息 |
 | `/auth/logout` | POST | 吊销令牌 |
 
+### 使用文档公告页
+
+`GET /api/v1/usage-document` 提供全局公开的 Markdown 使用文档，前端页面为 `/usage-doc`，聊天顶部 Nav 始终显示入口。文档正文与版本信息存储在 `data/users.db` 的单行 `usage_document` 表中，首次读取自动 seed 默认功能说明；保存使用 `expected_version` 乐观锁，避免多个管理员标签页互相覆盖。
+
+管理员在同一页面看到一个纯 Markdown 文本框，以及独立的“上传图片并插入”按钮；上传接口为 `POST /api/v1/admin/usage-document/assets`，仅管理员可用，图片写入 `data/usage_document/assets/`，服务端生成 UUID 文件名并只接受 PNG/JPEG/GIF/WebP raster 文件（单文件 ≤10MB）。上传响应返回 Markdown 图片语法，前端按当前 textarea 光标位置插入；普通用户、游客和未登录访问者均只能读取。文档渲染复用 `react-markdown` + `remark-gfm`，不启用原始 HTML，链接协议和图片地址经过安全过滤。
+
+管理员保存接口为 `PUT /api/v1/admin/usage-document`；认证失败返回 403，版本冲突返回 409，内容长度上限为 500,000 字符。公告文档与聊天历史、用户上传、OpenAI API 私有存储相互隔离。
+
 ### 3.5 管理员访问控制端点（`/api/v1/admin/auth-settings`）
 
 `GET` 返回设置行 + SMTP 非机密状态（`{configured, sender, from_name}`）；`PUT`（strict body + `expected_version` 乐观锁，冲突 409）修改四个开关，守卫：`email_requirement=verify` 且 SMTP 未配置 → 422；把 `auth_required` 关为 false 必须携带 `confirm_disable_auth=true`（防误关——关闭后所有未登录访问立即变为 local 用户，穿透数据隔离，且管理页随之不可用）→ 否则 422。`POST /auth-settings/test-email` 向指定邮箱发测试邮件验证 SMTP 连通性。前端页面 `/admin/auth-settings`（访问控制）：开关行 = 标签 + 问号帮助 + 共享 `AdminToggle`，说明文字全部收进 HelpModal；保存走 draft/diff/sticky 保存栏；关账号登录需在 ConfirmModal 中输入「确认」，关游客访问有危险确认弹窗；本地模式下游客/注册/邮箱开关禁用并显示横幅。
@@ -306,10 +314,10 @@ topic (+conception)
 ```
 
 - 无 X/Y/Z 参数、无 Flash/Pro 模式——分层是确定性算法，不花 LLM。
-- **数据源与限流**（`tools/search/base.py::RateLimiter`）：OpenAlex 5/0.5s、arXiv 1/3.0s（ToU 硬性规定：单连接、3 秒 1 请求）、Crossref 5/0.5s、Europe PMC 3/0.5s、DOAJ 2/1.0s、HAL 3/0.5s、OpenAIRE 3/0.5s、CORE 3/0.5s（无 CORE_API_KEY 自动跳过）、Semantic Scholar 3/1.5s（无 key 低频可用，配 S2_API_KEY 更稳）；429 读 Retry-After 精确等待或指数退避 ≤3 次；`trust_env=False` 直连。全部九个源均为免费合法官方 API；全文只跟随各源声明的 OA 链接（另见 §6.2 的 Unpaywall 与 OA-only 策略）。**邮箱参数策略**：OpenAlex/Crossref 未配真实邮箱时匿名访问（绝不发占位身份）；Unpaywall 强制邮箱，未配置则完全不调用。逐平台许可与合规细节见根目录 [Official_Paper_Platform_License_Description.md](../Official_Paper_Platform_License_Description.md)。
+- **数据源与限流**（`tools/search/registry.py`、`tools/search/base.py::RateLimiter`）：来源集中登记协议、许可、路由标签、配置门禁和每轮查询预算。SearchManager 按来源创建一个批处理任务，而不是“来源×查询式”任务；arXiv 单连接/3 秒一次，PubMed 按 NCBI 3/10 RPS，OpenAIRE 按匿名/认证小时额度，其他源使用保守进程级 limiter。共享 `httpx.AsyncClient` 使用 `trust_env=False`。`SearchOutcome` 分别记录真实请求数、限流头、最终域名、重定向以及 queue/connect/read/network 耗时，并区分远端 timeout/429/schema/redirect/challenge 与本地 `local_budget_exhausted`；每源每轮只向熔断器提交一次结果。默认 smart 路由最多 4 个主渠道、2 个兜底渠道，学科、预印本、机构仓储和 dataset/software/report/thesis/DOI 意图使用不同的确定性矩阵。新 bioRxiv/medRxiv 使用官方 metadata API + 本地 FTS5，不抓网页；PubMed/DataCite/DBLP 为元数据源。全文只跟随明确 OA 链接；Crossref/DataCite/PubMed/DBLP 普通链接不构成 PDF 候选。详细许可见根目录 [Official_Paper_Platform_License_Description.md](../Official_Paper_Platform_License_Description.md)。
 - **去重**：DOI 精确 → 标题归一化精确/模糊（Jaccard≥0.95）→ 字段合并（摘要取长、被引取大、来源取并集）。
 - 搜索结果注入 LLM 上下文时用 `<search_results>` 定界标记（数据非指令）。
-- **全文状态不算命**：`paper.pdf_url` 只表示"源 API 声称有链接"（经常是 ACM/Springer 付费墙落地页），绝不直接当作全文可获取。`tools/pdf/availability.py` 在检索完成前解析 OA 候选（源 API + Unpaywall）并**轻量探测**：只发 Range 请求读取前几 KB，确认响应头与 `%PDF-` 文件头，**不下载全文、不跑结构解析**；写入 `fulltext_status`（available/unavailable/unknown）到 SQLite `fulltext_status` 表（30 天 TTL，缓存命中免重复探测）。真正的全文下载与解析仍只在 deep_read / ask_papers 按需升级时发生，其结果回写同一状态字段。`research_map` 谱系图节点和前端检索卡片只显示这一已验证状态；unknown 显示"待验证"。
+- **全文状态不算命**：`paper.pdf_url` 只表示“源 API 提供了明确 PDF 候选”，绝不直接当作全文可获取。`tools/pdf/availability.py` 在检索完成前先探测源 PDF，只有源候选实际失败时才惰性查询 Unpaywall，避免对每篇已有直链的论文重复做 DOI 请求；随后只发 Range 请求读取前几 KB，确认 `%PDF-` 文件头，**不下载全文、不跑结构解析**。探测写入 `fulltext_status`（available/unavailable/unknown）到 SQLite `fulltext_status` 表（30 天 TTL，缓存命中免重复探测）。全文探测总预算硬上限 30 秒。真正的全文下载与解析仍只在 deep_read / ask_papers 按需升级时发生，其结果回写同一状态字段。`research_map` 谱系图节点和前端检索卡片只显示这一已验证状态；unknown 显示“待验证”。
 
 ### 5.4 可靠性质检（`tools/search/integrity.py`，确定性 · 零 LLM）
 
@@ -541,9 +549,10 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 论文检索的实时策略存放在 `data/users.db` 的 `paper_search_policy` 单行表中；`config/settings.yaml` 只负责首次种子。管理员通过独立页面 `/admin/paper-search` 修改后，约 5 秒缓存立即失效，下一次检索生效。策略使用版本乐观锁，不包含 API key、Authorization 或完整配置邮箱。
 
+`paper_search_policy.routing_mode` 默认为 `smart`，管理员可切换 `all_enabled`；新增来源在旧数据库迁移时默认关闭。`data/paper_source_catalog.db` 仅保存 bioRxiv/medRxiv 官方元数据和 FTS 索引；同步状态同时保存历史日期游标与页游标，版本 upsert 幂等。脚本 `scripts/sync_rxiv_metadata.py` 由 `deploy/systemd/paper-agent-rxiv-sync.timer` 周期执行，整个双源任务由全局预算和 systemd `RuntimeMaxSec` 共同限制在 15 分钟以内。
 ### 快速部分结果与按源熔断
 
-`SearchManager` 只调度管理员启用的 9 个元数据源，并同时执行单条渠道时限（默认 12 秒）和全局检索时限（默认 30 秒）。总时限到达后取消并 drain 未完成任务，保留已返回论文继续去重和重排。主检索后端遇到 429 最多短重试一次，等待上限 2 秒，不再让云数据中心 IP 的持续限流占满整个 turn。
+`SearchManager` 从管理员启用的 14 个元数据源中按 smart 路由选取最多 4+2 个渠道（或按管理员要求使用 `all_enabled`），并同时执行单条渠道时限（默认 12 秒）和全局检索硬时限（10–30 秒，默认及上限均为 30 秒）。总时限到达后取消并 drain 未完成任务，保留已返回论文继续去重和重排。主检索后端遇到 429 最多短重试一次，等待上限 2 秒，不再让云数据中心 IP 的持续限流占满整个 turn。
 
 每源维护单 worker 进程内健康状态：连续 3 次 429、超时、连接错误、5xx 或非法响应后熔断 300 秒；冷却后只放行一条 half-open 查询，成功关闭熔断，失败重新打开。HTTP 200 合法空结果、管理员关闭和缺少可选 key 不计入故障。管理员开关优先于熔断，熔断不会永久改写配置。
 

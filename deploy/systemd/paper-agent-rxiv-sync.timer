@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Paper Agent Rxiv metadata sync daily
+
+[Timer]
+OnBootSec=10min
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+Unit=paper-agent-rxiv-sync.service
+
+[Install]
+WantedBy=timers.target

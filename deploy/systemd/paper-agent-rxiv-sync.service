@@ -1,0 +1,26 @@
+[Unit]
+Description=Paper Agent official bioRxiv/medRxiv metadata sync
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/paper-agent/scripts/sync_rxiv_metadata.py
+
+[Service]
+Type=oneshot
+User=paper-agent
+Group=paper-agent
+WorkingDirectory=/opt/paper-agent
+EnvironmentFile=/opt/paper-agent/.env
+ExecStart=/opt/paper-agent/.venv/bin/python /opt/paper-agent/scripts/sync_rxiv_metadata.py --scheduled --max-seconds 870
+RuntimeMaxSec=15min
+TimeoutStopSec=15s
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/paper-agent/data
+
+[Install]
+WantedBy=multi-user.target

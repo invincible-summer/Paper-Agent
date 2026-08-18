@@ -5,7 +5,7 @@ institutions / venues), in contrast to research_map which maps the structure
 of the papers the user already has. Zero LLM for the aggregation; one utility
 LLM pass writes a 3-sentence portrait (degrades to pure tables on failure).
 
-Reuses the search backend RateLimiter + mailto discipline. Greenfield: the
+Reuses the search backend RateLimiter + API-key discipline. Greenfield: the
 codebase never used OpenAlex group_by before.
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ from core.config import get_settings
 from core.llm import ainvoke_utility, get_llm
 from core.prompts.registry import register
 from tools.search.base import RateLimiter
+from tools.search.http_client import get_search_http_client
 from langchain_core.messages import HumanMessage
 
 logger = logging.getLogger(__name__)
@@ -34,9 +35,9 @@ _PORTRAIT_PROMPT = (
 register("field_census.portrait", 1, _PORTRAIT_PROMPT)
 
 
-def _mailto() -> dict:
-    email = get_settings().search.openalex_email
-    return {"mailto": email} if email else {}
+def _auth_params() -> dict:
+    key = getattr(get_settings().search, "openalex_api_key", "")
+    return {"api_key": key} if key else {}
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +78,7 @@ def sort_yearly_ascending(yearly: list[dict]) -> list[dict]:
 
 async def _groupby(client: httpx.AsyncClient, query: str, group_key: str,
                    per_page: int = 10, extra_filter: str = "") -> list:
-    params = {"search": query, "group_by": group_key, "per-page": per_page, **_mailto()}
+    params = {"search": query, "group_by": group_key, "per-page": per_page, **_auth_params()}
     if extra_filter:
         params["filter"] = extra_filter
     try:
@@ -96,16 +97,16 @@ async def fetch_census(query: str) -> dict:
     """Aggregate the field across 4 dimensions. Each may degrade to [] independently."""
     import asyncio
 
-    if not query:
+    if not query or not getattr(get_settings().search, "openalex_api_key", ""):
         return {"yearly": [], "top_authors": [], "top_institutions": [], "top_venues": []}
-    async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-        yearly_raw, authors, insts, sources = await asyncio.gather(
-            _groupby(client, query, "publication_year", per_page=20,
-                     extra_filter="from_publication_date:2011-01-01"),
-            _groupby(client, query, "authors.id", per_page=10),
-            _groupby(client, query, "institutions.id", per_page=10),
-            _groupby(client, query, "primary_location.source.id", per_page=10),
-        )
+    client = get_search_http_client()
+    yearly_raw, authors, insts, sources = await asyncio.gather(
+        _groupby(client, query, "publication_year", per_page=20,
+                 extra_filter="from_publication_date:2011-01-01"),
+        _groupby(client, query, "authors.id", per_page=10),
+        _groupby(client, query, "institutions.id", per_page=10),
+        _groupby(client, query, "primary_location.source.id", per_page=10),
+    )
     yearly = sort_yearly_ascending(parse_groupby(yearly_raw))
     return {
         "yearly": yearly,

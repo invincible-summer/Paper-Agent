@@ -7,6 +7,7 @@ import httpx
 from core.models import Paper
 from core.config import get_settings
 from tools.search.base import SearchBackend, generate_paper_id, shorten_chinese_query, RateLimiter
+from tools.search.http_client import get_search_http_client
 
 API_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 
@@ -33,31 +34,31 @@ class SemanticScholarBackend(SearchBackend):
             "fields": FIELDS,
         }
         s = get_settings()
-        headers = {}
-        if s.search.s2_api_key:
-            headers["x-api-key"] = s.search.s2_api_key
+        if not s.search.s2_api_key or not s.search.s2_license_confirmed:
+            return []
+        headers = {"x-api-key": s.search.s2_api_key}
 
         try:
-            async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-                async with _limiter:
-                    resp = await _limiter.fetch(
-                        client, "GET", API_URL,
-                        params=params, headers=headers or None,
-                    )
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
+            client = get_search_http_client()
+            async with _limiter:
+                resp = await _limiter.fetch(
+                    client, "GET", API_URL, params=params, headers=headers,
+                )
+            self._capture_response(resp)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                self._forced_status = "schema_mismatch"
+                return []
         except httpx.TimeoutException:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "timeout")
+            self._forced_status = "timeout"
             return []
         except httpx.RequestError:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "connection_error")
+            self._forced_status = "connection_error"
             return []
         except Exception:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "invalid_response")
+            self._forced_status = "schema_mismatch"
             return []
 
         papers: list[Paper] = []

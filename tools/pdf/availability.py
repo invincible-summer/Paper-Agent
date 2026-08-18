@@ -116,34 +116,59 @@ async def _check_one(
 
     reasons: list[str] = []
     transient_seen = False
-    for url in urls:
+
+    async def try_url(url: str) -> tuple[bool, str, bool]:
         try:
             ok, reason = await asyncio.wait_for(
                 probe_pdf_url(url), timeout=_PROBE_TIMEOUT_SECONDS + 5
             )
         except asyncio.TimeoutError:
-            transient_seen = True
-            reasons.append("timeout")
-            continue
+            return False, "timeout", True
         except Exception as e:  # noqa: BLE001
             logger.debug("pdf probe failed for %s (%s): %s", paper.id, url, e)
-            transient_seen = True
-            reasons.append("probe_error")
-            continue
+            return False, "probe_error", True
         if ok:
-            return (FULLTEXT_STATUS_AVAILABLE, f"oa_url_probe_verified:{url}",
-                    "", candidate_url)
-        reasons.append(reason)
+            return True, reason, False
         if reason.startswith("http_") and reason not in {
             "http_408", "http_425", "http_429", "http_500",
             "http_502", "http_503", "http_504",
         }:
             # Reached the server and it clearly does not serve this URL as a
             # PDF (403/404/HTML landing page, ...) — a real negative.
-            continue
+            return False, reason, False
         if reason in _DEFINITIVE_NEGATIVE_REASONS:
-            continue
-        transient_seen = True
+            return False, reason, False
+        return False, reason, True
+
+    for url in urls:
+        ok, reason, transient = await try_url(url)
+        if ok:
+            return (FULLTEXT_STATUS_AVAILABLE, f"oa_url_probe_verified:{url}",
+                    "", candidate_url)
+        reasons.append(reason)
+        transient_seen = transient_seen or transient
+
+    # ``candidate_urls`` deliberately avoids an eager Unpaywall lookup when a
+    # source supplied a direct PDF. Resolve it only after that direct probe
+    # failed, so arXiv/repository-heavy searches do not spend their whole
+    # availability budget on redundant DOI lookups.
+    if paper.pdf_url and paper.doi and hasattr(fetcher, "_unpaywall_pdf_url"):
+        try:
+            fallback = await asyncio.wait_for(
+                fetcher._unpaywall_pdf_url(paper.doi), timeout=_PROBE_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            fallback = None; reasons.append("candidate_lookup_timeout"); transient_seen = True
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Unpaywall fallback failed for %s: %s", paper.id, e)
+            fallback = None; reasons.append("candidate_lookup_error"); transient_seen = True
+        if fallback and fallback not in urls:
+            ok, reason, transient = await try_url(fallback)
+            if ok:
+                return (FULLTEXT_STATUS_AVAILABLE, f"oa_url_probe_verified:{fallback}",
+                        "", candidate_url)
+            reasons.append(reason)
+            transient_seen = transient_seen or transient
 
     summary = ";".join(dict.fromkeys(reasons))[:200]
     if transient_seen:

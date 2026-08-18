@@ -1,106 +1,116 @@
-"""arXiv search backend - free API, preprints (DESIGN D-011)."""
-
+"""arXiv official Atom API backend with source-level compliant batching."""
 from __future__ import annotations
+
+import re
+import time
 
 import feedparser
 import httpx
 
 from core.models import Paper
-from tools.search.base import SearchBackend, generate_paper_id, is_chinese, RateLimiter
+from tools.search.base import (
+    SearchBackend,
+    SearchOutcome,
+    classify_search_status,
+    generate_paper_id,
+    is_chinese,
+    RateLimiter,
+)
+from tools.search.http_client import get_search_http_client
 
 API_URL = "https://export.arxiv.org/api/query"
-
-# arXiv ToU hard limit (https://info.arxiv.org/help/api/tou.html):
-# no more than one request every 3 seconds, single connection.
 _limiter = RateLimiter(max_concurrent=1, min_interval=3.0, source_name="arxiv", fast_fail_429=True)
+
+
+def _quote_query(query: str) -> str:
+    clean = re.sub(r"[\x00-\x1f]+", " ", query).replace("\\", " ").replace('"', " ")
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return f'all:"{clean[:240]}"'
+
+
+def _parse_feed(xml: str) -> list[Paper]:
+    feed = feedparser.parse(xml)
+    if getattr(feed, "bozo", False) and not feed.entries:
+        raise ValueError("invalid_atom")
+    papers: list[Paper] = []
+    for entry in feed.entries:
+        title = entry.get("title", "").strip().replace("\n", " ")
+        if not title: continue
+        authors = [a.get("name", "") for a in entry.get("authors", []) if a.get("name")]
+        year = int(entry["published"][:4]) if entry.get("published", "")[:4].isdigit() else None
+        doi = None; pdf_url = None
+        for link in entry.get("links", []):
+            href = link.get("href", "")
+            if "doi.org" in href: doi = href.split("doi.org/", 1)[-1]
+            if link.get("title") == "pdf": pdf_url = href
+        first_author = authors[0] if authors else ""
+        papers.append(Paper(
+            id=generate_paper_id(title, first_author, year, doi), title=title, authors=authors,
+            year=year, venue="arXiv", doi=doi, source="arxiv", language="en",
+            abstract=entry.get("summary", "").strip().replace("\n", " "), pdf_url=pdf_url,
+            keywords=[t.get("term", "") for t in entry.get("tags", [])[:5] if t.get("term")],
+            urls={"arxiv": entry.get("id", "")},
+        ))
+    return papers
 
 
 class ArxivBackend(SearchBackend):
     name = "arxiv"
+    max_queries_per_turn = 2
+
+    async def _request(self, search_query: str, limit: int) -> tuple[list[Paper], int]:
+        params = {"search_query": search_query, "start": 0, "max_results": min(limit, 50), "sortBy": "relevance"}
+        async with _limiter:
+            response = await _limiter.fetch(get_search_http_client(), "GET", API_URL, params=params)
+        self._capture_response(response)
+        if response.status_code != 200:
+            return [], response.status_code
+        return _parse_feed(response.text), response.status_code
 
     async def search(self, query: str, limit: int = 20) -> list[Paper]:
-        # arXiv is English-only, skip Chinese queries
-        if is_chinese(query):
-            return []
-        # arXiv API doesn't handle long queries well - use ti: (title) and abs: (abstract) fields
-        # Build a focused query: take key terms and search in title + abstract
-        # arXiv API works best with simple all: search, but needs shorter queries
-        terms = query.split()
-        if len(terms) > 6:
-            terms = terms[:6]
-        search_query = "all:" + " AND all:".join(terms)
-        params = {
-            "search_query": search_query,
-            "start": 0,
-            "max_results": min(limit, 50),
-            "sortBy": "relevance",
-        }
+        if is_chinese(query): return []
+        try: return (await self._request(_quote_query(query), limit))[0]
+        except (httpx.HTTPError, ValueError): return []
+
+    async def search_many(self, queries: list[str], limit: int = 20) -> SearchOutcome:
+        self._reset_telemetry()
+        english = [q for q in queries if q.strip() and not is_chinese(q)][:8]
+        if not english:
+            return SearchOutcome(self.name, [], "unsupported_language")
+        chunks = [english[:4], english[4:8]]
+        papers: list[Paper] = []; status = 200; batch_requests = 0; started = time.monotonic()
         try:
-            # D-070: bypass Clash proxy — it drops arXiv/OpenAlex connections,
-            # causing search_all to hang at ~half the tasks. Trust no env proxy.
-            async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-                async with _limiter:
-                    resp = await _limiter.fetch(client, "GET", API_URL, params=params)
-                if resp.status_code != 200:
-                    return []
-                xml = resp.text
-        except httpx.TimeoutException:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "timeout")
-            return []
-        except httpx.RequestError:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "connection_error")
-            return []
-        except Exception:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "invalid_response")
-            return []
-
-        feed = feedparser.parse(xml)
-        papers: list[Paper] = []
-        for entry in feed.entries:
-            title = entry.get("title", "").strip().replace("\n", " ")
-            authors = [a.get("name", "") for a in entry.get("authors", [])]
-            year = None
-            if entry.get("published"):
-                year = int(entry["published"][:4])
-
-            # Extract DOI if present
-            doi = None
-            for link in entry.get("links", []):
-                if "doi.org" in link.get("href", ""):
-                    doi = link["href"].replace("https://doi.org/", "")
-
-            # PDF link
-            pdf_url = None
-            for link in entry.get("links", []):
-                if link.get("title") == "pdf":
-                    pdf_url = link.get("href")
-
-            abstract = entry.get("summary", "").strip().replace("\n", " ")
-            first_author = authors[0] if authors else ""
-            arxiv_url = entry.get("id", "")
-
-            paper = Paper(
-                id=generate_paper_id(title, first_author, year, doi),
-                title=title,
-                authors=authors,
-                year=year,
-                venue="arXiv",
-                doi=doi,
-                source=self.name,
-                language="en",
-                citation_count=0,
-                abstract=abstract,
-                pdf_url=pdf_url,
-                keywords=_extract_categories(entry),
-                urls={"arxiv": arxiv_url},
+            for chunk in chunks:
+                if not chunk: continue
+                batch_requests += 1
+                found, status = await self._request(" OR ".join(_quote_query(q) for q in chunk), limit)
+                papers.extend(found)
+                if status != 200: break
+            outcome_status, error = classify_search_status(
+                papers, status, content_type=getattr(self, "_last_content_type", ""),
             )
-            papers.append(paper)
-        return papers
-
-
-def _extract_categories(entry) -> list[str]:
-    tags = entry.get("tags", [])
-    return [t.get("term", "") for t in tags[:5] if t.get("term")]
+            queue_ms = getattr(self, "_last_queue_ms", 0)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            return SearchOutcome(self.name, papers, outcome_status,
+                                 status, max(batch_requests, getattr(self, "_last_request_count", 0)), queue_ms=queue_ms,
+                                 connect_ms=getattr(self,"_last_connect_ms",0), read_ms=getattr(self,"_last_read_ms",0),
+                                 network_ms=max(0, elapsed_ms - queue_ms),
+                                 redirect_count=getattr(self,"_last_redirect_count",0),
+                                 rate_limit_remaining=getattr(self,"_last_rate_remaining",None),
+                                 rate_limit_reset=getattr(self,"_last_rate_reset",None), error_code=error,
+                                 final_domain=getattr(self, "_last_final_domain", None))
+        except httpx.TimeoutException:
+            queue_ms = getattr(self, "_last_queue_ms", 0)
+            return SearchOutcome(self.name, papers, "timeout", request_count=getattr(self, "_last_request_count", 0),
+                                 queue_ms=queue_ms, network_ms=max(0, int((time.monotonic()-started)*1000)-queue_ms),
+                                 error_code="timeout", final_domain=getattr(self, "_last_final_domain", None))
+        except httpx.RequestError:
+            queue_ms = getattr(self, "_last_queue_ms", 0)
+            return SearchOutcome(self.name, papers, "connection_error", request_count=getattr(self, "_last_request_count", 0),
+                                 queue_ms=queue_ms, network_ms=max(0, int((time.monotonic()-started)*1000)-queue_ms),
+                                 error_code="connection_error", final_domain=getattr(self, "_last_final_domain", None))
+        except ValueError:
+            queue_ms = getattr(self, "_last_queue_ms", 0)
+            return SearchOutcome(self.name, papers, "schema_mismatch", request_count=getattr(self, "_last_request_count", 0),
+                                 queue_ms=queue_ms, network_ms=max(0, int((time.monotonic()-started)*1000)-queue_ms),
+                                 error_code="schema_mismatch", final_domain=getattr(self, "_last_final_domain", None))

@@ -275,6 +275,7 @@ export async function updateDisplayPolicy(
 
 export type PaperFetchMode = "enabled" | "explicit_only" | "probe_only" | "disabled";
 export type FetchPolicyDisclosure = "affected_only" | "silent";
+export type PaperRoutingMode = "smart" | "all_enabled";
 
 export interface PaperSearchPolicy {
   sources: Record<string, boolean>;
@@ -284,6 +285,7 @@ export interface PaperSearchPolicy {
   fulltext_verify_timeout_seconds: number;
   paper_fetch_mode: PaperFetchMode;
   fetch_policy_disclosure: FetchPolicyDisclosure;
+  routing_mode: PaperRoutingMode;
   version: number;
   updated_by: string;
   updated_at: number;
@@ -293,13 +295,22 @@ export interface PaperSourceCatalogItem {
   id: string;
   display_name: string;
   coverage: string;
+  protocol: string;
+  license_status: string;
+  routing_tags: string[];
   requires_key: boolean;
   key_configured: boolean;
   configuration_status: string;
+  operational_status: string;
+  operational_reason: string;
+  requires_license_confirmation: boolean;
+  license_confirmation_status: "confirmed" | "not_confirmed" | "not_required";
+  supports_remote_search: boolean;
   supports_search: boolean;
   supports_connectivity: boolean;
   supports_pdf_probe: boolean;
   supports_download_test: boolean;
+  local_index_status: Record<string, string | number | null> | null;
 }
 
 export interface PaperSourceRuntimeStatus {
@@ -342,7 +353,7 @@ export async function updatePaperSearchPolicy(
   changes: Partial<Pick<PaperSearchPolicy,
     "sources" | "search_deadline_seconds" | "per_source_timeout_seconds" |
     "verify_fulltext" | "fulltext_verify_timeout_seconds" | "paper_fetch_mode" |
-    "fetch_policy_disclosure">>,
+    "fetch_policy_disclosure" | "routing_mode">>,
 ): Promise<{ policy: PaperSearchPolicy }> {
   const res = await fetch(`${BASE}/paper-search/policy`, {
     method: "PUT",

@@ -85,6 +85,7 @@ def test_search_all_cancels_and_drains_tasks_at_global_deadline(monkeypatch):
         manager = SearchManager(
             enabled_sources=["fast-test", "hanging-test"],
             results_per_source=1,
+            routing_mode="all_enabled",
         )
         papers = await manager.search_all(["query"])
         assert [paper.title for paper in papers] == ["Fast result"]

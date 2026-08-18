@@ -17,7 +17,11 @@ from app.core.config import settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    yield
+    try:
+        yield
+    finally:
+        from tools.search.http_client import close_search_http_clients
+        await close_search_http_clients()
 
 
 def create_app() -> FastAPI:

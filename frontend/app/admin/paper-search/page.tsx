@@ -56,7 +56,7 @@ const HELP: Record<string, HelpEntry> = {
   ] },
   performance: { title: "时间预算", entries: [
     ["单渠道时限", "一条渠道查询超过该时间后取消，不拖住其他渠道。"],
-    ["检索总时限", "达到总预算后返回已经取得的部分结果。"],
+    ["检索总时限", "可在 10–30 秒内调整；30 秒是硬上限，到期返回已经取得的部分结果。"],
     ["全文探测", "只读取 PDF 文件头，不下载全文；关闭后状态保持待验证。"],
     ["推荐", "云服务器建议单源 12 秒、检索 30 秒、全文探测 30 秒。"],
   ] },
@@ -67,7 +67,13 @@ function statusText(value: unknown): string {
     ok: "正常", reachable_empty: "可达但无结果", rate_limited: "限流",
     timeout: "超时", connection_error: "连接失败", server_error: "服务端错误",
     http_error: "HTTP 异常", not_configured: "未配置", no_candidate: "无可测速 PDF",
-    failed: "失败", not_pdf: "非 PDF",
+    failed: "失败", not_pdf: "非 PDF", local_index_empty: "本地索引为空",
+    unsupported_language: "语言不支持", local_budget_exhausted: "本轮预算耗尽",
+    schema_mismatch: "响应结构异常", unexpected_redirect: "非预期重定向",
+    bot_challenge: "机器人挑战", license_not_confirmed: "许可未确认",
+    missing_api_key: "API Key 未配置", missing_contact_email: "联系邮箱未配置", index_empty: "索引为空",
+    index_unavailable: "索引不可用",
+    confirmed: "已确认", not_confirmed: "未确认", not_required: "无需确认",
   };
   return labels[String(value)] || String(value ?? "—");
 }
@@ -88,7 +94,7 @@ export default function PaperSearchAdminPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [connectSources, setConnectSources] = useState<string[]>([]);
-  const [downloadTargets, setDownloadTargets] = useState<string[]>(["arxiv", "unpaywall", "doi"]);
+  const [downloadTargets, setDownloadTargets] = useState<string[]>(["arxiv", "unpaywall"]);
 
   useEffect(() => { void useAuthStore.getState().hydrate(); }, []);
   const handleError = useCallback((err: unknown) => {
@@ -135,6 +141,7 @@ export default function PaperSearchAdminPage() {
         fulltext_verify_timeout_seconds: draft.fulltext_verify_timeout_seconds,
         paper_fetch_mode: draft.paper_fetch_mode,
         fetch_policy_disclosure: draft.fetch_policy_disclosure,
+        routing_mode: draft.routing_mode,
       });
       setPolicy(result.policy); setDraft(result.policy); setNotice("论文检索策略已保存，下一次请求立即生效。");
     } catch (err) { handleError(err); } finally { setSaving(false); }
@@ -181,13 +188,26 @@ export default function PaperSearchAdminPage() {
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {[
-          ["启用渠道", `${enabledCount} / 9`], ["熔断渠道", String(openCount)],
+          ["启用渠道", `${enabledCount} / ${searchSources.length}`], ["熔断渠道", String(openCount)],
           ["检索总时限", `${draft.search_deadline_seconds}s`],
           ["全文策略", FETCH_MODES.find((item) => item.key === draft.paper_fetch_mode)?.name || draft.paper_fetch_mode],
         ].map(([label, value]) => <div key={label} className="rounded-xl border border-border-light bg-surface p-4">
           <div className="text-xs text-muted">{label}</div><div className="mt-1 text-xl font-semibold">{value}</div>
         </div>)}
       </div>
+
+      <AdminSection title="渠道智能路由" icon={<Gauge className="h-5 w-5 text-accent" />}>
+        <p className="mb-3 text-xs text-muted">智能模式按学科、查询意图、配置、许可和健康状态选择最多 4 个主渠道；结果不足时最多补充 2 个兜底渠道，不再默认全平台广播。</p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          {([
+            ["smart", "智能路由（推荐）", "普通搜索只调用相关渠道，速度和限流风险更可控。"],
+            ["all_enabled", "全部已启用渠道", "管理员排障或特殊研究时使用，仍受 30 秒硬时限和许可门禁约束。"],
+          ] as const).map(([key, name, desc]) => <button key={key} type="button" onClick={() => setDraft({ ...draft, routing_mode: key })}
+            className={`rounded-xl border p-4 text-left ${draft.routing_mode === key ? "border-accent bg-accent/10" : "border-border-light"}`}>
+            <div className="font-medium">{name}</div><p className="mt-1 text-xs text-muted">{desc}</p>
+          </button>)}
+        </div>
+      </AdminSection>
 
       <AdminSection title="论文检索渠道" icon={<Globe2 className="h-5 w-5 text-accent" />}
         info={<InfoButton onClick={() => setHelp(HELP.sources)} label="论文渠道开关说明" />}>
@@ -206,10 +226,18 @@ export default function PaperSearchAdminPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium">{source.display_name}</span>
                   {source.requires_key && <span className={`rounded px-1.5 py-0.5 text-[10px] ${source.key_configured ? "bg-success/15 text-success" : "bg-warning/15 text-warning"}`}>{source.key_configured ? "Key 已配置" : "Key 未配置"}</span>}
+                  {source.requires_license_confirmation && <span className={`rounded px-1.5 py-0.5 text-[10px] ${source.license_confirmation_status === "confirmed" ? "bg-success/15 text-success" : "bg-warning/15 text-warning"}`}>{source.license_confirmation_status === "confirmed" ? "许可已确认" : "许可未确认"}</span>}
                   {state?.state === "open" && <span className="rounded bg-error/15 px-1.5 py-0.5 text-[10px] text-error">熔断 {Math.ceil(state.remaining_seconds)}s</span>}
                 </div>
                 <p className="mt-1 text-xs text-muted">{source.coverage}</p>
-                <p className="mt-1 text-xs text-muted">{source.configuration_status}</p>
+                <p className="mt-1 text-xs text-muted">{source.protocol} · {source.license_status}</p>
+                <p className="mt-1 text-xs text-muted">配置：{statusText(source.configuration_status)} · 许可：{statusText(source.license_confirmation_status)} · 运行：{statusText(source.operational_status)}</p>
+                <p className="mt-1 text-xs text-fg-secondary">{!enabled ? "不会自动选择：管理员已关闭" : source.operational_status !== "ready" ? `不会自动选择：${statusText(source.operational_status)}` : `智能路由标签：${source.routing_tags.join("、") || "通用"}`}</p>
+                {source.local_index_status && <div className="mt-1 space-y-0.5 text-xs text-muted">
+                  <p>本地索引：{String(source.local_index_status.indexed_count ?? 0)} 条 · 覆盖 {String(source.local_index_status.min_published ?? "—")} 至 {String(source.local_index_status.max_published ?? "—")}</p>
+                  <p>历史游标：{String(source.local_index_status.backfill_date ?? "—")} / {String(source.local_index_status.backfill_cursor ?? 0)} · 最近成功：{source.local_index_status.last_success_at ? new Date(Number(source.local_index_status.last_success_at) * 1000).toLocaleString() : "—"}</p>
+                  <p>同步错误：{String(source.local_index_status.last_error || "无")}</p>
+                </div>}
                 <p className="mt-1 text-xs text-fg-secondary">HTTP {state?.last_http_status ?? "—"} · {state?.last_latency_ms ?? "—"} ms · {state?.last_error_code ? statusText(state.last_error_code) : "无异常"}</p>
               </div>
               <AdminToggle checked={enabled} label={`${source.display_name} 检索`}
@@ -253,10 +281,10 @@ export default function PaperSearchAdminPage() {
           <label className="text-sm">单渠道时限（秒）<input type="number" min={3} max={30} value={draft.per_source_timeout_seconds}
             onChange={(e) => setDraft({ ...draft, per_source_timeout_seconds: Number(e.target.value) })}
             className="mt-2 w-full rounded-lg border border-border-light bg-bg px-3 py-2" /></label>
-          <label className="text-sm">检索总时限（秒）<input type="number" min={10} max={120} value={draft.search_deadline_seconds}
+          <label className="text-sm">检索总时限（秒）<input type="number" min={10} max={30} value={draft.search_deadline_seconds}
             onChange={(e) => setDraft({ ...draft, search_deadline_seconds: Number(e.target.value) })}
             className="mt-2 w-full rounded-lg border border-border-light bg-bg px-3 py-2" /></label>
-          <label className="text-sm">全文探测总时限（秒）<input type="number" min={0} max={120} value={draft.fulltext_verify_timeout_seconds}
+          <label className="text-sm">全文探测总时限（秒）<input type="number" min={0} max={30} value={draft.fulltext_verify_timeout_seconds}
             disabled={draft.paper_fetch_mode === "disabled"}
             onChange={(e) => setDraft({ ...draft, fulltext_verify_timeout_seconds: Number(e.target.value) })}
             className="mt-2 w-full rounded-lg border border-border-light bg-bg px-3 py-2 disabled:opacity-50" /></label>
@@ -322,10 +350,14 @@ function DiagnosticTable({ run, kind }: { run: PaperDiagnosticRun; kind: "connec
       <tbody>{run.items.map((item, index) => <tr key={`${String(item.source || item.target)}-${index}`} className="border-b border-border-light/60">
         <td className="p-2 font-medium">{String(item.source || item.target || "—")}</td>
         <td className="p-2">{statusText(item.status)}</td><td className="p-2">{String(item.http_status ?? "—")}</td>
-        <td className="p-2">{String(item.latency_ms ?? item.elapsed_ms ?? "—")} ms</td>
+        <td className="p-2">{String(item.latency_ms ?? item.elapsed_ms ?? "—")} ms{kind === "connectivity" && <div className="mt-1 text-muted">网络 {String(item.network_ms ?? 0)}ms</div>}</td>
         <td className="p-2">{kind === "connectivity" ? `${String(item.result_count ?? 0)} 篇` : `${String(item.bytes_read ?? 0)} B`}</td>
         <td className="p-2">{kind === "connectivity" ? statusText(item.pdf_probe_status) : `${String(item.kb_per_second ?? 0)} KB/s`}</td>
-        <td className="p-2 text-muted">{String(item.error_code || "—")}</td>
+        <td className="p-2 text-muted">{String(item.error_code || "—")}{kind === "connectivity" && <>
+          <div className="mt-1">域名 {String(item.final_domain || "—")} · 重定向 {String(item.redirect_count ?? 0)}</div>
+          <div className="mt-1">请求 {String(item.request_count ?? 0)} · 连接 {String(item.connect_ms ?? 0)}ms · 读取 {String(item.read_ms ?? 0)}ms · 排队 {String(item.queue_ms ?? 0)}ms</div>
+          <div className="mt-1">限流剩余 {String(item.rate_limit_remaining ?? "—")} · 重置 {String(item.rate_limit_reset ?? "—")}</div>
+        </>}</td>
       </tr>)}</tbody>
     </table>
   </div>;

@@ -11,6 +11,8 @@ import httpx
 from core.models import Paper
 from core.config import get_settings
 from tools.search.base import SearchBackend, generate_paper_id, shorten_chinese_query, RateLimiter
+from tools.search.http_client import get_search_http_client
+from tools.search.registry import contact_email
 
 API_URL = "https://api.crossref.org/works"
 
@@ -28,7 +30,7 @@ class CrossrefBackend(SearchBackend):
     async def search(self, query: str, limit: int = 20) -> list[Paper]:
         query = shorten_chinese_query(query)
         s = get_settings()
-        email = s.search.crossref_email or s.search.openalex_email
+        email = contact_email(s.search)
         params = {
             "query": query,
             "rows": min(limit * 2, 50),  # over-fetch; we drop noise types
@@ -37,24 +39,26 @@ class CrossrefBackend(SearchBackend):
         }
         if email:
             params["mailto"] = email  # polite pool; anonymous otherwise
+        headers = {"User-Agent": f"PaperAgent/1.0 (mailto:{email})"} if email else {"User-Agent": "PaperAgent/1.0"}
         try:
-            async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-                async with _limiter:
-                    resp = await _limiter.fetch(client, "GET", API_URL, params=params)
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
+            client = get_search_http_client()
+            async with _limiter:
+                resp = await _limiter.fetch(client, "GET", API_URL, params=params, headers=headers)
+                self._capture_response(resp)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            if not isinstance(data, dict) or not isinstance((data.get("message") or {}).get("items"), list):
+                self._forced_status = "schema_mismatch"
+                return []
         except httpx.TimeoutException:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "timeout")
+            self._forced_status = "timeout"
             return []
         except httpx.RequestError:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "connection_error")
+            self._forced_status = "connection_error"
             return []
         except Exception:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "invalid_response")
+            self._forced_status = "schema_mismatch"
             return []
 
         papers: list[Paper] = []
@@ -70,7 +74,7 @@ class CrossrefBackend(SearchBackend):
             doi = item.get("DOI")
             citation_count = item.get("is-referenced-by-count", 0) or 0
             abstract = _strip_jats(item.get("abstract", ""))
-            pdf_url = _extract_pdf_url(item)
+            pdf_url = None  # Crossref link metadata does not establish OA status
             keywords = item.get("subject") or []
             first_author = authors[0] if authors else ""
             paper = Paper(
@@ -119,11 +123,3 @@ def _strip_jats(abstract: str) -> str:
         return ""
     text = re.sub(r"<[^>]+>", " ", abstract)
     return re.sub(r"\s+", " ", text).strip()
-
-
-def _extract_pdf_url(item: dict) -> str | None:
-    for link in item.get("link", []) or []:
-        ct = (link.get("content-type") or "").lower()
-        if "pdf" in ct:
-            return link.get("URL")
-    return None

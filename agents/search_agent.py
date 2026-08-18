@@ -33,6 +33,7 @@ from core.prompts.search import get_understand_prompt
 from core.state import ResearchState
 from tools.retrieval.bm25 import tokenize
 from tools.search.manager import SearchManager
+from tools.search.router import DISCIPLINES, QUERY_INTENTS
 from tools.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -81,7 +82,8 @@ def parse_understanding(raw: str, topic: str) -> dict:
     if not isinstance(data, dict):
         return {"research_goal": topic,
                 "sub_directions": [{"name": topic, "queries_en": [topic], "queries_zh": []}],
-                "queries": [topic]}
+                "queries": [topic], "disciplines": [], "query_intents": [],
+                "requested_sources": [], "requires_preprints": False, "requires_datasets": False}
 
     sub_directions = []
     queries: list[str] = []
@@ -98,10 +100,16 @@ def parse_understanding(raw: str, topic: str) -> dict:
         queries = [topic]
         if not sub_directions:
             sub_directions = [{"name": topic, "queries_en": [topic], "queries_zh": []}]
+    from tools.search.registry import SOURCE_IDS
+    disciplines = [str(v) for v in (data.get("disciplines") or []) if str(v) in DISCIPLINES][:2]
+    intents = [str(v) for v in (data.get("query_intents") or []) if str(v) in QUERY_INTENTS][:3]
+    requested = [str(v) for v in (data.get("requested_sources") or []) if str(v) in SOURCE_IDS][:4]
     return {
         "research_goal": str(data.get("research_goal") or topic).strip()[:200],
-        "sub_directions": sub_directions,
-        "queries": queries,
+        "sub_directions": sub_directions, "queries": queries,
+        "disciplines": disciplines, "query_intents": intents, "requested_sources": requested,
+        "requires_preprints": bool(data.get("requires_preprints")),
+        "requires_datasets": bool(data.get("requires_datasets")),
     }
 
 
@@ -333,6 +341,7 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
             results_per_source=s.search.results_per_source,
             search_deadline_seconds=policy.search_deadline_seconds,
             per_source_timeout_seconds=policy.per_source_timeout_seconds,
+            routing_mode=policy.routing_mode,
         )
     except TypeError:
         # Compatibility for injected test/extension managers that implement the
@@ -340,7 +349,23 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
         manager = SearchManager(
             enabled_sources=enabled, results_per_source=s.search.results_per_source)
     report(f"在 {len(enabled)} 个数据源中检索...")
-    all_papers = await manager.search_all(plan["queries"], progress_callback=report)
+    route_hints = {k: plan.get(k) for k in ("disciplines", "query_intents", "requested_sources", "requires_preprints", "requires_datasets")}
+    try:
+        all_papers = await manager.search_all(plan["queries"], progress_callback=report, route_hints=route_hints, topic=topic)
+    except TypeError:
+        # Compatibility for injected extension/test managers with the legacy signature.
+        all_papers = await manager.search_all(plan["queries"], progress_callback=report)
+    state["search_route"] = getattr(manager, "last_route", {}) or {}
+    used_sources = {
+        outcome.source for outcome in (getattr(manager, "last_outcomes", []) or [])
+        if getattr(outcome, "request_count", 0) or getattr(outcome, "papers", None)
+    }
+    source_notices: list[str] = []
+    if "pubmed" in used_sources:
+        source_notices.append(
+            "PubMed/NLM 仅提供来源记录；记录收录不代表 NLM 对论文内容、结论或产品用途背书，请核对原始记录。"
+        )
+    state["source_notices"] = source_notices
     report(f"去重后共 {len(all_papers)} 篇")
 
     # ③ Semantic rerank

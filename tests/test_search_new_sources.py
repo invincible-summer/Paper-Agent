@@ -46,33 +46,17 @@ def test_hal_parse_scalar_fields():
     assert papers[0].year == 2018
 
 
-def test_openaire_parse_open_access_only():
+def test_openaire_v3_does_not_infer_pdf_from_landing_or_access_fields():
     from tools.search.openaire import parse_results
 
-    data = {"response": {"results": {"result": [
-        {"metadata": {"oaf:entity": {"oaf:result": {
-            "title": {"$": "OA Paper"},
-            "dateofacceptance": {"$": "2020-03-01"},
-            "description": {"$": "abstract text"},
-            "creator": [{"$": "Alice A"}, {"$": "Bob B"}],
-            "pid": [{"@classid": "doi", "$": "10.2/y"}],
-            "journal": {"title": {"$": "Journal J"}},
-            "children": {"instance": [
-                {"accessright": {"@classid": "closed"},
-                 "webresource": {"url": {"$": "https://closed.example/x.pdf"}}},
-                {"accessright": {"@classid": "open", "@classname": "Open Access"},
-                 "webresource": {"url": {"$": "https://oa.example/x.pdf"}}},
-            ]},
-        }}}},
-        # closed-access only -> pdf_url must be None, never the closed link
-        {"metadata": {"oaf:entity": {"oaf:result": {
-            "title": {"$": "Closed Paper"},
-            "children": {"instance": [
-                {"accessright": {"@classid": "restricted"},
-                 "webresource": {"url": {"$": "https://pub.example/paywalled.pdf"}}},
-            ]},
-        }}}},
-    ]}}}
+    data = {"results": [
+        {"id": "oa-id", "mainTitle": "OA Paper", "publicationDate": "2020-03-01",
+         "description": "abstract text", "authors": [{"fullName": "Alice A"}, {"fullName": "Bob B"}],
+         "pids": [{"scheme": "doi", "value": "10.2/y"}], "publisher": "Journal J",
+         "instances": [{"accessRight": "OPEN", "url": "https://oa.example/x.pdf"}]},
+        {"id": "closed-id", "mainTitle": "Closed Paper",
+         "instances": [{"accessRight": "CLOSED", "url": "https://pub.example/paywalled.pdf"}]},
+    ]}
     papers = parse_results(data)
     assert len(papers) == 2
     oa, closed = papers
@@ -80,7 +64,7 @@ def test_openaire_parse_open_access_only():
     assert oa.year == 2020
     assert oa.authors == ["Alice A", "Bob B"]
     assert oa.venue == "Journal J"
-    assert oa.pdf_url == "https://oa.example/x.pdf"
+    assert oa.pdf_url is None
     assert closed.pdf_url is None
 
 
@@ -117,3 +101,70 @@ def test_new_sources_registered_in_manager():
 
     for name in ("hal", "openaire", "core"):
         assert name in BACKENDS
+
+
+def test_datacite_parse_metadata_only():
+    from tools.search.datacite import parse_results
+    papers=parse_results({"data":[{"id":"10.5/x","attributes":{"doi":"10.5/X","titles":[{"title":"Dataset paper"}],
+        "creators":[{"givenName":"Alice","familyName":"A"}],"publicationYear":2024,"publisher":"Repo",
+        "descriptions":[{"descriptionType":"Abstract","description":"abs"}],"url":"https://example.org/item"}}]})
+    assert len(papers)==1 and papers[0].doi=="10.5/x" and papers[0].pdf_url is None
+
+
+def test_metadata_source_schema_mismatch_is_classified(monkeypatch):
+    import tools.search.datacite as mod
+    class Resp:
+        status_code=200; history=[]; headers={"content-type":"application/json"}
+        def json(self): return {"unexpected": []}
+    class Client:
+        async def request(self,*args,**kwargs): return Resp()
+    monkeypatch.setattr(mod, "get_search_http_client", lambda: Client())
+    outcome = asyncio.run(mod.DataCiteBackend().search_many(["dataset"], 5))
+    assert outcome.status == "schema_mismatch"
+
+
+def test_dblp_parse_metadata_only():
+    from tools.search.dblp import parse_results
+    data={"result":{"hits":{"hit":[{"info":{"title":"A CS Paper.","authors":{"author":[{"text":"Alice"}]},
+        "year":"2023","venue":"Conf","doi":"10.1/CS","url":"db/conf/x"}}]}}}
+    p=parse_results(data)[0]
+    assert p.title=="A CS Paper" and p.doi=="10.1/cs" and p.pdf_url is None
+
+
+def test_pubmed_parse_xml_metadata_only():
+    from tools.search.pubmed import parse_pubmed_xml
+    xml='''<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>123</PMID><Article><ArticleTitle>Clinical Study</ArticleTitle>
+    <Abstract><AbstractText>Results</AbstractText></Abstract><AuthorList><Author><ForeName>Alice</ForeName><LastName>A</LastName></Author></AuthorList>
+    <Journal><Title>Medical Journal</Title><JournalIssue><PubDate><Year>2022</Year></PubDate></JournalIssue></Journal></Article></MedlineCitation>
+    <PubmedData><ArticleIdList><ArticleId IdType="doi">10.2/MED</ArticleId></ArticleIdList></PubmedData></PubmedArticle></PubmedArticleSet>'''
+    p=parse_pubmed_xml(xml)[0]
+    assert p.doi=="10.2/med" and p.urls["pubmed"].endswith("/123/") and p.pdf_url is None
+
+
+def test_all_new_sources_registered_in_manager():
+    from tools.search.manager import BACKENDS
+    for name in ("biorxiv","medrxiv","pubmed","datacite","dblp"):
+        assert name in BACKENDS
+
+
+def test_doaj_only_emits_explicit_pdf_links():
+    from tools.search.doaj import _extract_pdf_url
+    assert _extract_pdf_url({"link": [{
+        "type": "fulltext", "content_type": "text/html", "url": "https://example.org/article"
+    }]}) is None
+    assert _extract_pdf_url({"link": [{
+        "type": "fulltext", "content_type": "application/pdf", "url": "https://example.org/article.pdf"
+    }]}) == "https://example.org/article.pdf"
+
+
+def test_openaire_v3_official_shape_is_metadata_only():
+    from tools.search.openaire import parse_results
+    papers=parse_results({"results":[{
+        "id":"openaire-id","mainTitle":"Graph paper","publicationDate":"2025-01-02",
+        "authors":[{"fullName":"Alice A"}],"pids":[{"scheme":"doi","value":"10.1/graph"}],
+        "publisher":"Open Publisher","description":"abstract",
+    }]})
+    assert len(papers)==1
+    assert papers[0].doi=="10.1/graph"
+    assert papers[0].pdf_url is None
+    assert papers[0].urls["openaire"].endswith("openaire-id")

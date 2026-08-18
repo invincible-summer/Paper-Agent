@@ -29,7 +29,7 @@ def test_update_is_immediate_and_optimistically_locked(isolated):
     current = store.get_paper_search_policy()
     updated = store.update_paper_search_policy(
         {"sources": {"openalex": False}, "paper_fetch_mode": "probe_only",
-         "fetch_policy_disclosure": "silent", "search_deadline_seconds": 45},
+         "fetch_policy_disclosure": "silent", "search_deadline_seconds": 25},
         expected_version=current.version, updated_by="admin",
     )
     assert updated.sources["openalex"] is False
@@ -71,3 +71,22 @@ def test_diagnostics_keep_latest_twenty_without_secrets(isolated):
     finally:
         conn.close()
     assert "Authorization" not in payload
+
+
+def test_upgrade_keeps_new_sources_disabled(tmp_path, monkeypatch):
+    db=tmp_path/"users.db"
+    conn=sqlite3.connect(db)
+    conn.execute("""CREATE TABLE paper_search_policy (
+        id INTEGER PRIMARY KEY, sources_json TEXT NOT NULL, search_deadline_seconds INTEGER NOT NULL,
+        per_source_timeout_seconds INTEGER NOT NULL, verify_fulltext INTEGER NOT NULL,
+        fulltext_verify_timeout_seconds INTEGER NOT NULL, paper_fetch_mode TEXT NOT NULL,
+        fetch_policy_disclosure TEXT NOT NULL, version INTEGER NOT NULL, updated_by TEXT NOT NULL,
+        updated_at REAL NOT NULL)""")
+    conn.execute("INSERT INTO paper_search_policy VALUES(1,?,30,12,1,30,'enabled','affected_only',1,'old',0)",
+                 ('{"arxiv":true,"crossref":true}',))
+    conn.commit();conn.close()
+    monkeypatch.setattr(store,"_DB_PATH",db);store.reset_cache()
+    policy=store.get_paper_search_policy()
+    for source in ("biorxiv","medrxiv","pubmed","datacite","dblp"):
+        assert policy.sources[source] is False
+    assert policy.routing_mode=="smart"

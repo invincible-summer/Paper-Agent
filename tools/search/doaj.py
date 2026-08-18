@@ -10,6 +10,7 @@ import httpx
 
 from core.models import Paper
 from tools.search.base import SearchBackend, generate_paper_id, shorten_chinese_query, RateLimiter
+from tools.search.http_client import get_search_http_client
 
 API_URL = "https://doaj.org/api/search/articles"
 
@@ -23,26 +24,27 @@ class DoajBackend(SearchBackend):
     async def search(self, query: str, limit: int = 20) -> list[Paper]:
         query = shorten_chinese_query(query)
         # DOAJ search is path-based: /api/search/articles/{query}
-        url = f"{API_URL}/{quote(query)}"
+        url = f"{API_URL}/{quote(query, safe='')}"
         params = {"page": 1, "pageSize": min(limit, 50)}
         try:
-            async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-                async with _limiter:
-                    resp = await _limiter.fetch(client, "GET", url, params=params)
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
+            client = get_search_http_client()
+            async with _limiter:
+                resp = await _limiter.fetch(client, "GET", url, params=params)
+            self._capture_response(resp)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+                self._forced_status = "schema_mismatch"
+                return []
         except httpx.TimeoutException:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "timeout")
+            self._forced_status = "timeout"
             return []
         except httpx.RequestError:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "connection_error")
+            self._forced_status = "connection_error"
             return []
         except Exception:
-            from core.search_source_health import get_search_health_registry
-            get_search_health_registry().record_failure(self.name, "invalid_response")
+            self._forced_status = "schema_mismatch"
             return []
 
         papers: list[Paper] = []
@@ -97,11 +99,10 @@ def _strip_html(text: str) -> str:
 
 
 def _extract_pdf_url(bib: dict) -> str | None:
-    # Prefer a PDF fulltext link, fall back to any fulltext link.
+    # A generic fulltext/HTML landing page is not a PDF candidate.  Keep it in
+    # the DOAJ record URL only and let DOI-based Unpaywall resolve OA later.
     for link in bib.get("link", []) or []:
-        if (link.get("type") or "").lower() == "fulltext" and (link.get("content_type") or "").lower() == "pdf":
-            return link.get("url")
-    for link in bib.get("link", []) or []:
-        if (link.get("type") or "").lower() == "fulltext":
+        if ((link.get("type") or "").lower() == "fulltext"
+                and "pdf" in (link.get("content_type") or "").lower()):
             return link.get("url")
     return None

@@ -21,8 +21,8 @@ const _S: Record<string, Record<Lang, string>> = {
   settings_api_not_configured: { en: "API Key not configured", zh: "API 密钥未配置" },
   settings_data_sources: { en: "Data Sources", zh: "数据来源" },
   settings_data_sources_body: {
-    en: "Metadata & OA full texts via official free APIs: OpenAlex (CC0) · Semantic Scholar · arXiv (metadata CC0) · Crossref (CC0/CC-BY) · Europe PMC · DOAJ (CC BY-SA) · HAL · OpenAIRE (CC-BY) · CORE · Unpaywall. OA links only; paywalls are never accessed.",
-    zh: "论文元数据与开放获取全文均来自各平台官方免费 API：OpenAlex（CC0）· Semantic Scholar · arXiv（元数据 CC0）· Crossref（CC0/CC-BY）· Europe PMC · DOAJ（CC BY-SA）· HAL · OpenAIRE（CC-BY）· CORE · Unpaywall。仅访问开放获取链接，绝不访问付费墙。",
+    en: "Metadata and OA analysis via documented official APIs: OpenAlex (CC0, API key) · Semantic Scholar (conditional license) · arXiv (official API; per-paper full-text licenses) · Crossref · Europe PMC · DOAJ (article metadata CC0) · HAL · OpenAIRE (CC-BY) · CORE (conditional license) · bioRxiv/medRxiv metadata · PubMed · DataCite · DBLP · Unpaywall. OA links only; paywalls are never accessed.",
+    zh: "论文元数据与 OA 分析只使用平台公开文档允许的官方 API：OpenAlex（CC0，需 API Key）· Semantic Scholar（条件许可）· arXiv（官方 API，全文逐篇许可）· Crossref · Europe PMC · DOAJ（文章元数据 CC0）· HAL · OpenAIRE（CC-BY）· CORE（条件许可）· bioRxiv/medRxiv 元数据 · PubMed · DataCite · DBLP · Unpaywall。仅访问明确 OA 链接，绝不访问付费墙。",
   },
   sec1_title: { en: "Research Topic", zh: "研究主题" },
   sec1_subtitle: { en: "Define your topic and search parameters", zh: "定义研究主题与搜索参数" },

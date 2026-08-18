@@ -41,6 +41,7 @@ from tools.search.base import RateLimiter  # noqa: E402
 _download_limiter = RateLimiter(max_concurrent=2, min_interval=1.0)
 # Lightweight availability probes (a few KB at most, not full downloads).
 _probe_limiter = RateLimiter(max_concurrent=4, min_interval=0.25)
+_unpaywall_limiter = RateLimiter(max_concurrent=2, min_interval=0.25)
 
 
 def _is_safe_url(url: str) -> tuple[bool, str]:
@@ -200,9 +201,13 @@ class PDFFetcher:
         urls: list[str] = []
         if paper.pdf_url and (override or source_enabled(paper.source, policy)):
             urls.append(paper.pdf_url)
-        oa_url = await self._unpaywall_pdf_url(paper.doi) if paper.doi else None
-        if oa_url and oa_url not in urls:
-            urls.append(oa_url)
+        # Keep the fallback lazy: resolving every DOI up front made a normal
+        # result set issue dozens of unnecessary Unpaywall calls even when an
+        # explicit source PDF was already usable.
+        if not urls:
+            oa_url = await self._unpaywall_pdf_url(paper.doi) if paper.doi else None
+            if oa_url:
+                urls.append(oa_url)
         return urls
 
     async def fetch(self, paper: Paper) -> str | None:
@@ -240,18 +245,26 @@ class PDFFetcher:
             path = await self._download(url, local_path, paper.title)
             if path:
                 return path
+        # An explicit source PDF may be stale.  Only after it actually fails do
+        # the DOI -> Unpaywall fallback, preserving the documented order
+        # without paying the lookup cost on the common success path.
+        if paper.pdf_url and paper.doi:
+            oa_url = await self._unpaywall_pdf_url(paper.doi)
+            if oa_url and oa_url not in urls:
+                path = await self._download(oa_url, local_path, paper.title)
+                if path:
+                    return path
         return None
 
     async def _unpaywall_pdf_url(self, doi: str) -> str | None:
         """Best OA PDF url for a DOI via Unpaywall (free, legal OA copies only).
 
-        Reuses the polite-pool email already configured for OpenAlex/Crossref;
-        returns None when no email is configured or no OA location exists.
+        Uses the configured real platform contact email; returns None when absent.
         """
         from core.config import get_settings
 
-        email = (get_settings().search.openalex_email
-                 or get_settings().search.crossref_email or "")
+        from tools.search.registry import contact_email
+        email = contact_email(get_settings().search)
         doi = (doi or "").strip()
         for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
             if doi.lower().startswith(prefix):
@@ -259,8 +272,11 @@ class PDFFetcher:
         if not doi or not email:
             return None
         try:
-            resp = await self._client.get(
-                f"https://api.unpaywall.org/v2/{doi}", params={"email": email})
+            from urllib.parse import quote
+            encoded_doi = quote(doi, safe="/")
+            async with _unpaywall_limiter:
+                resp = await self._client.get(
+                    f"https://api.unpaywall.org/v2/{encoded_doi}", params={"email": email})
             if resp.status_code != 200:
                 return None
             data = resp.json()

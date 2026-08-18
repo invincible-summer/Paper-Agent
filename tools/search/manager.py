@@ -1,12 +1,14 @@
-"""Dedup + ranking search manager (DESIGN D-006, D-011)."""
-
+"""Source-routed, deadline-bounded paper search manager."""
 from __future__ import annotations
 
 import asyncio
+import time
 
 from core.models import Paper
 from core.search_source_health import get_search_health_registry
-from tools.search.base import SearchBackend, normalize_title, title_similarity
+from tools.search.base import SearchBackend, SearchOutcome, normalize_title, title_similarity
+from tools.search.registry import runtime_gate
+from tools.search.router import RouteHints, choose_sources, infer_route_hints
 from tools.search.openalex import OpenAlexBackend
 from tools.search.semantic_scholar import SemanticScholarBackend
 from tools.search.arxiv import ArxivBackend
@@ -16,132 +18,148 @@ from tools.search.doaj import DoajBackend
 from tools.search.hal import HalBackend
 from tools.search.openaire import OpenAireBackend
 from tools.search.core import CoreBackend
+from tools.search.rxiv import RxivBackend
+from tools.search.pubmed import PubMedBackend
+from tools.search.datacite import DataCiteBackend
+from tools.search.dblp import DblpBackend
 
-SEARCH_DEADLINE_SECONDS = 120.0
-PER_SOURCE_TIMEOUT_SECONDS = 30.0
+SEARCH_DEADLINE_SECONDS = 30.0
+PER_SOURCE_TIMEOUT_SECONDS = 12.0
+FALLBACK_MIN_RESULTS = 8
+FALLBACK_MIN_REMAINING_SECONDS = 8.0
 
 BACKENDS: dict[str, SearchBackend] = {
     "openalex": OpenAlexBackend(), "semantic_scholar": SemanticScholarBackend(),
     "arxiv": ArxivBackend(), "crossref": CrossrefBackend(),
     "europepmc": EuropePmcBackend(), "doaj": DoajBackend(),
     "hal": HalBackend(), "openaire": OpenAireBackend(), "core": CoreBackend(),
+    "biorxiv": RxivBackend("biorxiv"), "medrxiv": RxivBackend("medrxiv"),
+    "pubmed": PubMedBackend(), "datacite": DataCiteBackend(), "dblp": DblpBackend(),
 }
+
+_FAILURE_CODES = {"rate_limited", "timeout", "connection_error", "server_error", "schema_mismatch", "bot_challenge", "unexpected_redirect"}
 
 
 class SearchManager:
-    """Run enabled sources with bounded per-task and global deadlines."""
+    """Run one bounded batch task per selected source, then optional fallbacks."""
 
-    def __init__(self, enabled_sources: list[str] | None = None,
-                 results_per_source: int = 20,
+    def __init__(self, enabled_sources: list[str] | None = None, results_per_source: int = 20,
                  search_deadline_seconds: float | None = None,
-                 per_source_timeout_seconds: float | None = None):
+                 per_source_timeout_seconds: float | None = None,
+                 routing_mode: str = "smart"):
         self.enabled_sources = list(BACKENDS) if enabled_sources is None else list(enabled_sources)
         self.results_per_source = results_per_source
-        self.search_deadline_seconds = (SEARCH_DEADLINE_SECONDS if search_deadline_seconds is None
-                                        else float(search_deadline_seconds))
-        self.per_source_timeout_seconds = (PER_SOURCE_TIMEOUT_SECONDS if per_source_timeout_seconds is None
-                                           else float(per_source_timeout_seconds))
+        requested_deadline = SEARCH_DEADLINE_SECONDS if search_deadline_seconds is None else float(search_deadline_seconds)
+        self.search_deadline_seconds = min(30.0, requested_deadline)
+        self.per_source_timeout_seconds = PER_SOURCE_TIMEOUT_SECONDS if per_source_timeout_seconds is None else float(per_source_timeout_seconds)
+        self.routing_mode = routing_mode if routing_mode in {"smart", "all_enabled"} else "smart"
+        self.last_outcomes: list[SearchOutcome] = []
+        self.last_route: dict = {}
 
     async def _bounded_search(self, source: str, backend: SearchBackend,
-                              query: str) -> tuple[str, list[Paper], str | None]:
+                              queries: list[str]) -> SearchOutcome:
+        started = time.monotonic()
         try:
-            papers = await asyncio.wait_for(
-                backend.search(query, self.results_per_source),
-                timeout=self.per_source_timeout_seconds,
-            )
-            source_health = get_search_health_registry().get(source)
-            recent_error = source_health.get("last_error_code")
-            if not papers and recent_error in {
-                "rate_limited", "timeout", "connection_error", "server_error", "invalid_response"
-            }:
-                return source, [], str(recent_error)
-            return source, papers, None
+            if hasattr(backend, "search_many"):
+                outcome = await asyncio.wait_for(
+                    backend.search_many(queries, self.results_per_source),
+                    timeout=self.per_source_timeout_seconds,
+                )
+            else:  # compatibility for injected extension/test backends
+                papers = []
+                for query in queries[:2]:
+                    papers.extend(await backend.search(query, self.results_per_source))
+                outcome = SearchOutcome(source, papers, "ok" if papers else "reachable_empty", request_count=min(2, len(queries)))
+            outcome.source = source
+            if not outcome.network_ms:
+                outcome.network_ms = int((time.monotonic() - started) * 1000)
+            return outcome
         except asyncio.TimeoutError:
-            get_search_health_registry().record_failure(source, "timeout")
-            return source, [], "timeout"
+            return SearchOutcome(source, [], "local_budget_exhausted", network_ms=int((time.monotonic()-started)*1000), error_code="local_budget_exhausted")
         except asyncio.CancelledError:
             raise
         except Exception:
-            get_search_health_registry().record_failure(source, "invalid_response")
-            return source, [], "invalid_response"
+            return SearchOutcome(source, [], "schema_mismatch", network_ms=int((time.monotonic()-started)*1000), error_code="schema_mismatch")
 
-    async def search_all(self, queries: list[str], progress_callback=None) -> list[Paper]:
-        def report(msg):
-            if progress_callback:
-                progress_callback(msg)
-
-        seen: set[str] = set()
-        unique_queries: list[str] = []
-        for query in queries:
-            norm = normalize_title(query)
-            if norm not in seen:
-                seen.add(norm)
-                unique_queries.append(query)
-        if len(unique_queries) < len(queries):
-            report(f"  → Query dedup: {len(queries)} → {len(unique_queries)} unique queries")
-        queries = unique_queries
-
+    def _record_health(self, outcome: SearchOutcome) -> None:
         health = get_search_health_registry()
-        tasks: set[asyncio.Task] = set()
-        participating_sources = 0
-        for source in self.enabled_sources:
+        latency = outcome.network_ms + outcome.queue_ms
+        code = outcome.error_code or (outcome.status if outcome.status in _FAILURE_CODES else None)
+        if code in _FAILURE_CODES:
+            health.record_failure(outcome.source, code, status=outcome.http_status, latency_ms=latency)
+        elif outcome.status != "local_budget_exhausted":
+            health.record_success(outcome.source, status=outcome.http_status, latency_ms=latency)
+
+    async def _run_wave(self, sources: list[str], queries: list[str], deadline: float, report) -> list[SearchOutcome]:
+        health = get_search_health_registry()
+        tasks: dict[asyncio.Task, str] = {}
+        for source in sources:
             backend = BACKENDS.get(source)
-            if backend is None:
-                continue
+            if backend is None: continue
             allowed, state, remaining = health.allow(source)
             if not allowed:
-                suffix = f"，约 {remaining:.0f}s 后半开" if remaining else ""
-                report(f"  → {source} 已熔断，跳过本次检索{suffix}")
+                report(f"  → {source} 已熔断，跳过（约 {remaining:.0f}s 后半开）")
                 continue
-            participating_sources += 1
-            source_queries = queries[:1] if state == "half_open" else queries
-            for query in source_queries:
-                tasks.add(asyncio.create_task(self._bounded_search(source, backend, query)))
-
-        total = len(tasks)
-        report(f"  → {total} search tasks dispatched across {participating_sources} sources")
-        if not tasks:
-            return []
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.search_deadline_seconds
-        results: list[list[Paper]] = []
-        completed = 0
-        failed = 0
-        pending = tasks
+            batch_queries = queries[:1] if state == "half_open" else queries
+            tasks[asyncio.create_task(self._bounded_search(source, backend, batch_queries))] = source
+        outcomes: list[SearchOutcome] = []
+        pending = set(tasks)
         while pending:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-            done, pending = await asyncio.wait(
-                pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
-            if not done:
-                break
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0: break
+            done, pending = await asyncio.wait(pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+            if not done: break
             for task in done:
-                source, result, error = task.result()
-                results.append(result)
-                completed += 1
-                if error:
-                    failed += 1
-                    report(f"  → {completed}/{total} {source} {error}，返回部分结果")
-                else:
-                    report(f"  → {completed}/{total} {source} done ({len(result)} papers)")
-
-        timed_out = len(pending)
+                outcome = task.result(); outcomes.append(outcome); self._record_health(outcome)
+                report(f"  → {outcome.source} {outcome.status}（{len(outcome.papers)} 篇，{outcome.network_ms}ms）")
         if pending:
-            for task in pending:
-                task.cancel()
+            for task in pending: task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
-            completed += timed_out
-            report(f"  → 全局检索时限到达，取消 {timed_out} 个慢任务")
-        if failed or timed_out:
-            report(f"  → {failed + timed_out} task(s) failed/timed out; proceeding with partial results")
+            for task in pending:
+                source = tasks[task]
+                outcome = SearchOutcome(source, [], "local_budget_exhausted", error_code="local_budget_exhausted")
+                outcomes.append(outcome)
+                report(f"  → {source} 达到本轮总预算，取消且不计远端故障")
+        return outcomes
 
-        all_papers = [paper for result in results for paper in result]
-        deduped = self._dedup(all_papers)
-        report(f"  → Dedup: {len(all_papers)} → {len(deduped)} unique papers")
+    async def search_all(self, queries: list[str], progress_callback=None,
+                         route_hints: RouteHints | dict | None = None,
+                         topic: str = "") -> list[Paper]:
+        report = progress_callback or (lambda _msg: None)
+        seen = set(); unique_queries=[]
+        for query in queries:
+            norm=normalize_title(query)
+            if norm and norm not in seen:
+                seen.add(norm); unique_queries.append(query)
+            if len(unique_queries) >= 8: break
+        queries = unique_queries or ([topic] if topic else [])
+        if not queries: return []
+
+        eligible = {s for s in self.enabled_sources if runtime_gate(s)[0]}
+        if self.routing_mode == "all_enabled":
+            primary=[s for s in self.enabled_sources if s in eligible]; fallback=[]
+            reasons={s:"管理员全启用模式" for s in primary}
+        else:
+            if isinstance(route_hints, dict): route_hints = RouteHints(**{k:v for k,v in route_hints.items() if k in RouteHints.__dataclass_fields__})
+            hints=infer_route_hints(" ".join([topic,*queries]), route_hints)
+            decision=choose_sources(hints, self.enabled_sources, eligible)
+            primary,fallback,reasons=decision.primary,decision.fallback,decision.reasons
+        self.last_route={"primary":primary,"fallback":fallback,"reasons":reasons,
+                         "ineligible":{s:runtime_gate(s)[1] for s in self.enabled_sources if s not in eligible}}
+        report(f"  → 智能路由主渠道：{', '.join(primary) if primary else '无'}")
+        if "pubmed" in primary or "pubmed" in fallback:
+            report("  → PubMed/NLM 仅提供来源记录，不代表 NLM 对内容或结论背书；请核对原始记录。")
+        deadline=asyncio.get_running_loop().time()+self.search_deadline_seconds
+        outcomes=await self._run_wave(primary,queries,deadline,report)
+        papers=[p for o in outcomes for p in o.papers]
+        deduped=self._dedup(papers)
+        if fallback and len(deduped)<FALLBACK_MIN_RESULTS and deadline-asyncio.get_running_loop().time()>FALLBACK_MIN_REMAINING_SECONDS:
+            report(f"  → 主渠道仅 {len(deduped)} 篇，启动兜底：{', '.join(fallback)}")
+            more=await self._run_wave(fallback,queries,deadline,report); outcomes.extend(more)
+            papers.extend(p for o in more for p in o.papers); deduped=self._dedup(papers)
+        self.last_outcomes=outcomes
+        report(f"  → Dedup: {len(papers)} → {len(deduped)} unique papers")
         return deduped
-
     def _dedup(self, papers: list[Paper]) -> list[Paper]:
         by_id: dict[str, Paper] = {}
         by_doi: dict[str, str] = {}

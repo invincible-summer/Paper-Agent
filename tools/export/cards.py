@@ -135,6 +135,9 @@ def _card_search_papers(result: dict) -> str:
     if isinstance(avail, int) and isinstance(target, int):
         legend += f" · 核心层全文保障 {avail}/{target}"
     lines += ["", f"*{legend}*"]
+    for notice in result.get("source_notices") or []:
+        if notice:
+            lines.append(f"> ⚠️ {_short(notice, 180)}")
     return "\n".join(lines)
 
 

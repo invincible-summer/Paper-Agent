@@ -42,6 +42,11 @@ def test_policy_admin_only_and_update_is_immediate(env):
         asyncio.run(admin_api.get_admin_paper_search_policy(env["normal"]))
     assert exc.value.status_code == 403
     current = asyncio.run(admin_api.get_admin_paper_search_policy(env["admin"]))
+    catalog = {item["id"]: item for item in current["source_catalog"]}
+    for field in ("protocol", "license_status", "operational_status", "operational_reason",
+                  "routing_tags", "requires_license_confirmation", "supports_remote_search",
+                  "local_index_status", "license_confirmation_status"):
+        assert field in catalog["core"]
     version = current["policy"]["version"]
     result = asyncio.run(admin_api.put_admin_paper_search_policy(
         admin_api.PaperSearchPolicyUpdate(

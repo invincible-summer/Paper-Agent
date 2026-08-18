@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass, field
 import hashlib
 import re
+import time
 import unicodedata
 
 from core.models import Paper
@@ -59,13 +62,116 @@ def generate_paper_id(title: str, first_author: str, year: int | None, doi: str 
     return f"hash:{hashlib.sha256(raw.encode()).hexdigest()[:16]}"
 
 
+@dataclass
+class SearchOutcome:
+    source: str
+    papers: list[Paper] = field(default_factory=list)
+    status: str = "ok"
+    http_status: int | None = None
+    request_count: int = 0
+    queue_ms: int = 0
+    connect_ms: int = 0
+    read_ms: int = 0
+    network_ms: int = 0
+    redirect_count: int = 0
+    rate_limit_remaining: str | None = None
+    rate_limit_reset: str | None = None
+    error_code: str | None = None
+    final_domain: str | None = None
+
+
+def classify_search_status(
+    papers: list[Paper],
+    http_status: int | None,
+    *,
+    forced_status: str | None = None,
+    content_type: str = "",
+) -> tuple[str, str | None]:
+    """Classify one source batch without conflating local and remote failures."""
+    if forced_status:
+        return forced_status, forced_status
+    if http_status in {403, 429} and "text/html" in content_type.lower():
+        return "bot_challenge", "bot_challenge"
+    if http_status == 429:
+        return "rate_limited", "rate_limited"
+    if http_status is not None and 300 <= http_status < 400:
+        return "unexpected_redirect", "unexpected_redirect"
+    if http_status is not None and http_status >= 500:
+        return "server_error", "server_error"
+    if http_status is not None and http_status >= 400:
+        return "http_error", f"http_{http_status}"
+    return ("ok", None) if papers else ("reachable_empty", None)
+
+
 class SearchBackend:
-    """Base class for all search backends."""
+    """Base class for official API/local-index search backends."""
 
     name: str = "base"
+    max_queries_per_turn: int = 2
+
+    def _reset_telemetry(self) -> None:
+        self._last_http_status = None
+        self._last_redirect_count = 0
+        self._last_rate_remaining = None
+        self._last_rate_reset = None
+        self._last_content_type = ""
+        self._last_request_count = 0
+        self._last_final_domain = None
+        self._last_queue_ms = 0
+        self._last_connect_ms = 0
+        self._last_read_ms = 0
+        self._forced_status = None
+
+    def _capture_response(self, response) -> None:
+        self._last_http_status = int(response.status_code)
+        extensions = response.extensions if hasattr(response, "extensions") else {}
+        self._last_request_count += max(1, int(extensions.get("paper_request_count", 1) or 1))
+        try: self._last_final_domain = response.url.host
+        except Exception:
+            try: self._last_final_domain = response.request.url.host
+            except Exception: pass
+        history_count = len(getattr(response, "history", []) or [])
+        if history_count == 0 and 300 <= int(response.status_code) < 400:
+            history_count = 1
+        self._last_redirect_count += history_count
+        self._last_rate_remaining = response.headers.get("x-ratelimit-remaining") or response.headers.get("ratelimit-remaining")
+        self._last_rate_reset = response.headers.get("x-ratelimit-reset") or response.headers.get("x-ratelimit-retry-after") or response.headers.get("ratelimit-reset")
+        self._last_content_type = response.headers.get("content-type", "").lower()
+        timing = extensions.get("paper_timing", {})
+        self._last_queue_ms += int(timing.get("queue_ms", 0) or 0)
+        self._last_connect_ms += int(timing.get("connect_ms", 0) or 0)
+        self._last_read_ms += int(timing.get("read_ms", 0) or 0)
 
     async def search(self, query: str, limit: int = 20) -> list[Paper]:
         raise NotImplementedError
+
+    async def search_many(self, queries: list[str], limit: int = 20) -> SearchOutcome:
+        """Default source-level batch adapter for legacy/simple backends."""
+        self._reset_telemetry()
+        papers: list[Paper] = []
+        started = time.monotonic()
+        for query in queries[: self.max_queries_per_turn]:
+            papers.extend(await self.search(query, limit))
+            if getattr(self, "_forced_status", None):
+                break
+        http_status = getattr(self, "_last_http_status", None)
+        forced = getattr(self, "_forced_status", None)
+        status, error = classify_search_status(
+            papers, http_status, forced_status=forced,
+            content_type=getattr(self, "_last_content_type", ""),
+        )
+        queue_ms = getattr(self, "_last_queue_ms", 0)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        return SearchOutcome(
+            source=self.name, papers=papers, status=status, http_status=http_status,
+            request_count=getattr(self, "_last_request_count", 0), queue_ms=queue_ms,
+            connect_ms=getattr(self, "_last_connect_ms", 0), read_ms=getattr(self, "_last_read_ms", 0),
+            network_ms=max(0, elapsed_ms - queue_ms),
+            redirect_count=getattr(self, "_last_redirect_count", 0),
+            rate_limit_remaining=getattr(self, "_last_rate_remaining", None),
+            rate_limit_reset=getattr(self, "_last_rate_reset", None), error_code=error,
+            final_domain=getattr(self, "_last_final_domain", None),
+        )
 
 
 class RateLimiter:
@@ -85,16 +191,19 @@ class RateLimiter:
         self._lock = __import__("asyncio").Lock()
         self._source_name = source_name
         self._fast_fail_429 = fast_fail_429
+        import contextvars
+        self._queue_ms = contextvars.ContextVar(f"queue_ms_{id(self)}", default=0)
 
     async def __aenter__(self):
+        queued_at = time.monotonic()
         await self._semaphore.acquire()
         async with self._lock:
-            import time
             now = time.monotonic()
             wait = self._min_interval - (now - self._last_request)
             if wait > 0:
                 await __import__("asyncio").sleep(wait)
             self._last_request = time.monotonic()
+        self._queue_ms.set(int((time.monotonic() - queued_at) * 1000))
         return self
 
     async def __aexit__(self, *args):
@@ -114,9 +223,40 @@ class RateLimiter:
         wait_cap = 2.0 if self._fast_fail_429 else 30.0
         started = time.monotonic()
         resp = None
+        request_count = 0
+        total_timing = {"connect_ms": 0, "read_ms": 0}
+        base_extensions = dict(kwargs.pop("extensions", {}) or {})
         try:
             for attempt in range(attempts):
-                resp = await client.request(method, url, **kwargs)
+                trace_starts = {}
+                timing = {"connect_ms": 0, "read_ms": 0}
+                async def trace(name, info):
+                    now = time.monotonic()
+                    base = name.rsplit(".", 1)[0]
+                    if name.endswith(".started"):
+                        trace_starts[base] = now
+                    elif name.endswith(".complete") and base in trace_starts:
+                        elapsed = int((now - trace_starts.pop(base)) * 1000)
+                        if "connect_tcp" in base or "start_tls" in base:
+                            timing["connect_ms"] += elapsed
+                        elif "receive_response_body" in base:
+                            timing["read_ms"] += elapsed
+                extensions = dict(base_extensions)
+                extensions.setdefault("trace", trace)
+                resp = await client.request(method, url, extensions=extensions, **kwargs)
+                request_count += 1
+                total_timing["connect_ms"] += timing["connect_ms"]
+                total_timing["read_ms"] += timing["read_ms"]
+                total_timing["queue_ms"] = self._queue_ms.get()
+                if hasattr(resp, "extensions"):
+                    resp.extensions["paper_timing"] = dict(total_timing)
+                    resp.extensions["paper_request_count"] = request_count
+                else:
+                    try: setattr(resp, "extensions", {
+                        "paper_timing": dict(total_timing),
+                        "paper_request_count": request_count,
+                    })
+                    except Exception: pass
                 if resp.status_code == 429 and attempt + 1 < attempts:
                     retry_after = resp.headers.get("Retry-After")
                     try:
@@ -130,14 +270,4 @@ class RateLimiter:
             # The backend classifies timeout/request/parse failures so a single
             # network exception is counted exactly once by the source breaker.
             raise
-        if self._source_name and resp is not None:
-            from core.search_source_health import get_search_health_registry
-            status = int(resp.status_code)
-            code = ("rate_limited" if status == 429 else
-                    "server_error" if status >= 500 else None)
-            get_search_health_registry().note(
-                self._source_name, status=status,
-                latency_ms=int((time.monotonic() - started) * 1000),
-                error_code=code,
-            )
         return resp

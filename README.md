@@ -17,6 +17,7 @@
 - **check_structure** — 上传草稿结构体检（`tools/writing/structure_check.py`，纯代码零模型消耗）：章节树（markdown/数字/中文/LaTeX 标题）/ IMRaD 缺失章节 / 章节比例失衡 / 摘要长度 / 引用卫生 / 图表统计，前端专用卡片渲染体检报告
 - **check_format** — 格式检查（纯代码）：图表编号连续性与正文引用、引用风格混用、GB/T 7714 规范度、关键词数量、标题断号；LaTeX 源查 \cite/\ref/参考文献块配对；支持传入用户格式要求逐条对照，排版项诚实列入人工核对清单
 - **export_manuscript** — 写作产物导出：初稿/润色稿/修改清单 → docx / tex（ctexart 中文可编译）/ md 下载文件，清小搭侧经 x_soda 附件下发
+- **使用文档公告页** — `/usage-doc` 始终公开只读展示管理员维护的 Markdown 功能说明；管理员登录后可在同一页面的单个文本框中编辑并保存，使用“上传图片并插入”按钮把 PNG/JPEG/GIF/WebP 上传到受控文档资源目录并插入当前光标位置。
 - **清小搭展示边界与卡片仿真** — 自有前端的 React 工具卡和可交互谱系图不会随 OpenAI 协议跨端执行；`/v1` 通道以文档允许的三个表面复刻视觉效果：正文 **Markdown 卡片仿真**（`tools/export/cards.py`，检索/研究地图/阅读路径/深读/元素解读/领域普查/综述/引文导出等完整卡片，插在回答之前，列表优先保证纯文本降级可读）、思考折叠中的 **emoji 进度与技能加载提示**（`📘 已加载技能《…》` + 正文 `━━ 📘 技能 · … ━━` 行）、以及 `x_soda.attachments` **文件卡片**（研究地图 Markdown 报告 + 静态 SVG 谱系图、元素裁剪图 PNG、BibTeX 文件、领域普查趋势图 SVG）。卡片覆盖范围由管理员在 `/admin/display-policy` 配置（core/all/custom/off 预设，默认 core 重点工具）；交互筛选、缩放、节点“深问”仍需打开本项目自有前端
 - **integrity_sweep** — 可靠性质检（纯官方 API，零模型）：逐篇查撤稿（OpenAlex `is_retracted`）/ 勘误或关切声明（Crossref `relation`）/ arXiv 预印本是否已有正式版；写综述、投稿导出前必跑
 - **bib_import** — 导入 .bib 文献库（Zotero/EndNote/Mendeley 导出）到候选集，DOI 经 Crossref 自动补全，与会话论文去重后并入；与 citation_export 双向互通
@@ -49,7 +50,7 @@
 - Prompt 注册表（`core/prompts/registry.py`）：全部 prompt 带版本号，trace 可溯源
 - 中英双语 UI；「纸墨书院」设计风格（宣纸底 + 黛青主色 + 朱砂点缀）
 - Eval 质量护栏：`tests/eval/` 黄金集，改 prompt / 换模型后对比检索召回率
-- 数据合规：九个数据源 + Unpaywall 均为官方免费 API，全文 OA-only（付费墙无代码路径）；邮箱参数策略=无配置则匿名/不调用，绝不发占位身份；每源进程级限流对多用户部署天然合规。详见 [Official_Paper_Platform_License_Description.md](Official_Paper_Platform_License_Description.md)
+- 数据合规：论文渠道按官方 API/OAI/元数据许可分为开放、条件启用和暂不接入；全文 OA-only（付费墙无代码路径）；CORE/Semantic Scholar 需要额外许可门禁；bioRxiv/medRxiv 只通过官方 metadata API 建立本地索引；ChinaXiv 暂不接入。详见 [Official_Paper_Platform_License_Description.md](Official_Paper_Platform_License_Description.md)
 
 ## OpenAI 兼容端点（清小搭接入）
 
@@ -131,7 +132,7 @@ cd frontend && pnpm build                     # 前端类型检查 + 构建
 管理员页面：`/admin/auth-settings`（访问控制）。运行时开关账号登录、游客访问、开放注册，三档选择注册邮箱要求（不要求 / 仅填写 / 邮箱 + 验证码），显示 SMTP 配置状态并支持发送测试邮件；带版本乐观锁，关账号登录需输入「确认」二次确认。各开关的说明都收在问号帮助弹窗里。
 
 
-管理员页面：`/admin/paper-search`（论文检索）。可逐项启用/关闭 OpenAlex、Semantic Scholar、arXiv、Crossref、Europe PMC、DOAJ、HAL、OpenAIRE、CORE；设置单渠道/检索总时限和搜索期 OA 探测预算；选择四档远程全文拉取策略以及“受影响时提示/静默降级”。持续 429、超时或 5xx 的渠道连续 3 次失败后熔断 300 秒并自动半开恢复。页面还提供与用户路径分离的真实检索连通性检测，以及最多读取 1 MiB、单项 20 秒的管理员 PDF 下载测速；不接受任意 URL、不保存测速 PDF、不显示密钥或完整配置邮箱。默认运行时预算为单源 12 秒、检索总计 30 秒、全文探测 30 秒，达到时限即返回已有部分结果。
+管理员页面：`/admin/paper-search`（论文检索）。可逐项启用/关闭 OpenAlex、Semantic Scholar、arXiv、Crossref、Europe PMC、DOAJ、HAL、OpenAIRE、CORE、bioRxiv、medRxiv、PubMed、DataCite、DBLP；默认智能路由按学科/意图选择最多 4 个主渠道，结果不足时最多 2 个兜底渠道，也可由管理员切换全启用模式。页面展示协议、许可门禁、配置、熔断、Rxiv 本地索引覆盖/日期与分页游标/同步错误，并提供真实检索连通性、arXiv 多查询负载和最多读取 1 MiB 的 PDF 下载测速；不接受任意 URL、不保存测速 PDF、不显示密钥或完整配置邮箱。默认单源预算 12 秒，检索总预算可在 10–30 秒调整且硬上限为 30 秒，全文探测默认 30 秒；达到时限返回部分结果。
 
 管理员页面：`/admin/api-storage`。可查看分类容量、磁盘状态、清理记录，选择 privacy/balanced/performance、自定义 TTL、95% pause/emergency 和 off/metadata/full Trace；每项都有隐私、磁盘、延迟、费用、连续性、重下载/OCR/VLM、生效与恢复默认说明。缩短 TTL、Full Trace、紧急删除、立即清理和遗留扫描必须预览并二次确认。
 

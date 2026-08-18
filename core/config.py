@@ -49,9 +49,16 @@ class SearchConfig:
     results_per_source: int = 20
     dedup_similarity_threshold: float = 0.95
     s2_api_key: str = ""
-    core_api_key: str = ""   # CORE v3 (core.ac.uk); backend auto-disables without it
-    openalex_email: str = ""
-    crossref_email: str = ""    # D-083: Crossref polite pool (falls back to openalex_email)
+    s2_license_confirmed: bool = False
+    core_api_key: str = ""
+    core_license_confirmed: bool = False
+    openalex_api_key: str = ""
+    paper_platform_contact_email: str = ""
+    openalex_email: str = ""  # legacy contact fallback
+    crossref_email: str = ""  # legacy contact fallback
+    ncbi_api_key: str = ""
+    openaire_client_id: str = ""
+    openaire_client_secret: str = ""
     search_deadline_seconds: float = 30.0            # 多源检索总时限，超时返回部分结果
     per_source_timeout_seconds: float = 12.0         # 单条渠道查询时限
     verify_fulltext: bool = True                     # search_papers 探测 OA PDF 文件头
@@ -66,7 +73,12 @@ class SearchConfig:
         "doaj": True,            # D-083
         "hal": True,             # OA repository, humanities/SS strong
         "openaire": True,        # EU OA graph
-        "core": True,            # auto-skips without CORE_API_KEY
+        "core": True,
+        "biorxiv": False,
+        "medrxiv": False,
+        "pubmed": False,
+        "datacite": False,
+        "dblp": False,
     })
 
 
@@ -131,9 +143,16 @@ def load_settings() -> Settings:
         results_per_source=search_raw.get("results_per_source", s.search.results_per_source),
         dedup_similarity_threshold=search_raw.get("dedup_similarity_threshold", s.search.dedup_similarity_threshold),
         s2_api_key=os.getenv("S2_API_KEY", ""),
+        s2_license_confirmed=os.getenv("S2_LICENSE_CONFIRMED", "").lower() in {"1", "true", "yes", "on"},
         core_api_key=os.getenv("CORE_API_KEY", ""),
+        core_license_confirmed=os.getenv("CORE_LICENSE_CONFIRMED", "").lower() in {"1", "true", "yes", "on"},
+        openalex_api_key=os.getenv("OPENALEX_API_KEY", ""),
+        paper_platform_contact_email=os.getenv("PAPER_PLATFORM_CONTACT_EMAIL", ""),
         openalex_email=os.getenv("OPENALEX_EMAIL", ""),
         crossref_email=os.getenv("CROSSREF_EMAIL", ""),
+        ncbi_api_key=os.getenv("NCBI_API_KEY", ""),
+        openaire_client_id=os.getenv("OPENAIRE_CLIENT_ID", ""),
+        openaire_client_secret=os.getenv("OPENAIRE_CLIENT_SECRET", ""),
         search_deadline_seconds=search_raw.get(
             "search_deadline_seconds", s.search.search_deadline_seconds),
         per_source_timeout_seconds=search_raw.get(

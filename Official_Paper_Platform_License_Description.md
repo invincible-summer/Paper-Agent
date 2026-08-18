@@ -1,154 +1,187 @@
-# 论文平台官方说明与许可规范（Paper Agent 合规文档）
+# 论文平台官方接口、许可与调用规范
 
-> 本文档完整列出 Paper Agent 使用的全部论文数据平台：每个平台是什么、Agent 如何使用它、其许可/条款在哪里（附官方链接）、以及我们的合规措施。
-> 原则：**只使用官方公开的免费 API；元数据按各平台许可使用；全文只获取开放获取（OA）版本；绝不抓取付费墙、绝不使用违反 ToS 的渠道。**
+> **最近核对：2026-08-18**
+> 本文件是 Paper Agent 论文平台接入的工程合规基线，不构成法律意见。只允许使用平台明确提供的 API、OAI-PMH 或官方数据下载方式；禁止逆向网页内部接口、绕过登录/付费墙、模拟浏览器批量抓取或未经许可再分发全文。
 
-## 总览表
+## 1. 判定原则
 
-| 平台 | 角色 | 认证方式 | 许可 | 条款链接 |
-|------|------|----------|------|----------|
-| OpenAlex | 检索 + 引用边 | 可选邮箱（polite pool） | 数据 CC0 | https://docs.openalex.org/ |
-| Semantic Scholar | 检索 | 可无 key；S2_API_KEY 更稳 | 免费学术 API | https://www.semanticscholar.org/product/api |
-| arXiv | 检索 + OA 全文 | 无需认证 | 元数据 CC0 | https://info.arxiv.org/help/api/tou.html |
-| Crossref | 检索（全学科 DOI 元数据） | 可选邮箱（polite pool） | 元数据 CC0/CC-BY | https://www.crossref.org/documentation/retrieve-metadata/rest-api/ |
-| Europe PMC | 检索 + OA 全文（生物医学） | 无需认证 | 免费 REST；全文按各篇许可 | https://europepmc.org/RestfulWebService |
-| DOAJ | 检索（OA 期刊，人文社科强） | 无需认证 | 元数据 CC BY-SA | https://doaj.org/api/v4/docs |
-| HAL | 检索 + OA 全文（人文社科/学位论文） | 无需认证 | 免费 API（CCSD） | https://api.archives-ouvertes.fr/search/ |
-| OpenAIRE | 检索 + OA 链接（欧盟 OA 图谱） | 无需认证 | 数据 CC-BY | https://graph.openaire.eu/develop/ |
-| CORE | 检索 + OA 全文（机构库聚合） | CORE_API_KEY（免费注册）；无 key 自动停用 | 免费层 + T&C | https://core.ac.uk/services/api |
-| Unpaywall | OA 全文定位（DOI 查询） | 必须邮箱参数；无邮箱则不调用 | 免费 API（ToS 见下） | https://unpaywall.org/legal/terms-of-service |
+1. **元数据许可不等于全文许可**：标题、DOI、作者可能可开放复用，但摘要和 PDF 仍可能受出版商或作者许可约束。
+2. **公开可读不等于允许镜像/再分发**：Agent 可以在官方条款允许的范围内临时下载 OA 文件做用户请求内分析，但不得因此建立公开 PDF 镜像。
+3. **API Key 不等于产品用途许可**：CORE、Semantic Scholar 等平台除技术凭证外还有用途、展示、归因或商业条件。
+4. 所有渠道都必须经过管理员开关、运行配置、许可门禁、进程级限流、硬时限和熔断器；失败返回部分结果。
+5. 全文只走明确 OA 路径；Crossref、DataCite、DBLP、PubMed 的普通落地链接绝不直接作为 PDF。
 
----
+## 2. 当前接入总表
 
-## 1. OpenAlex — https://openalex.org
+| 平台 | 工程状态 | 官方方式 | 认证/许可门禁 | Agent 用途 |
+|---|---|---|---|---|
+| OpenAlex | 条件启用 | REST API | `OPENALEX_API_KEY` | 综合检索、引用图谱 |
+| Semantic Scholar | 条件启用 | Academic Graph API | Key + `S2_LICENSE_CONFIRMED=true` | 学术检索、OA 候选 |
+| arXiv | 启用 | Atom API | 无 Key；单连接、3 秒一次 | STEM 预印本检索 |
+| Crossref | 启用 | REST API | 真实联系邮箱推荐 | DOI 元数据检索 |
+| Europe PMC | 启用 | REST API | 无 Key | 医学/生命科学检索、明确 OA 链接 |
+| DOAJ | 启用 | REST API v4 | 无 Key | OA 期刊文章检索 |
+| HAL | 启用 | Solr REST API | 无 Key | 开放仓储和学位论文 |
+| OpenAIRE | 启用/低频兜底 | Graph API V3 | 匿名低额度或官方 OAuth 客户端 | 欧盟开放研究图谱 |
+| CORE | 条件启用 | REST API v3 | Key + `CORE_LICENSE_CONFIRMED=true` | 机构仓储聚合 |
+| bioRxiv | 新增、本地索引 | 官方 metadata API | 无 Key；逐记录许可 | 生命科学预印本元数据 |
+| medRxiv | 新增、本地索引 | 官方 metadata API | 无 Key；逐记录许可 | 医学预印本元数据 |
+| PubMed | 新增、条件启用 | NCBI E-utilities | 真实联系邮箱；Key 可选 | 权威生物医学元数据/摘要 |
+| DataCite | 新增、条件启用 | REST API | 无 Key | 数据集、软件、报告、论文和 DOI |
+| DBLP | 新增、条件启用 | Publication Search API | 可识别 User-Agent | 计算机科学元数据 |
+| Unpaywall | OA 辅助 | REST API | 必须真实邮箱 | DOI → 合法 OA 位置 |
+| doi.org | 解析辅助 | HTTPS DOI resolver | 无 | DOI 跳转解析，不判定 OA |
+| ChinaXiv | **不接入** | 尚未取得公开 API/OAI 及自动调用许可依据 | — | 禁止网页逆向/抓取 |
 
-- **是什么**：OurResearch 出品的全学科开放学术图谱（2.5 亿+ 论文元数据：标题/摘要/作者/年份/期刊/被引/DOI/开放获取状态）。
-- **Agent 如何使用**：
-  - 关键词检索：`GET https://api.openalex.org/works?search=...`（`tools/search/openalex.py`）
-  - 谱系图真实引用边：按 DOI 查 `referenced_works`（`tools/search/openalex_refs.py`）
-  - 全文候选：仅取响应中的 `primary_location.pdf_url` / `open_access.oa_url`（平台官方标注的 OA 链接）
-- **许可**：数据 **CC0**（公有领域），可自由使用，含商用；API 免费。
-- **合规措施**：配置真实邮箱时带 `mailto` 进 polite pool（更宽松）；**未配置邮箱时匿名访问标准池，绝不发送占位/虚假身份**（本轮已修正）。限流 5 并发 / 0.5s 间隔。
+新增的 bioRxiv、medRxiv、PubMed、DataCite、DBLP 在已有生产数据库升级后默认关闭，管理员完成配置、许可核对或索引同步后再启用。
 
-## 2. Semantic Scholar — https://www.semanticscholar.org
+## 3. 宽松开放或明确公共接口
 
-- **是什么**：Allen Institute for AI 的学术图谱 API（2.14 亿论文，含 `openAccessPdf` 字段）。
-- **Agent 如何使用**：关键词检索 `GET https://api.semanticscholar.org/graph/v1/paper/search`（`tools/search/semantic_scholar.py`），取 `openAccessPdf.url` 作为 OA 全文候选。
-- **许可**：免费学术 API。官方说明：多数端点无需认证（未认证用户共享全局限流）；申请免费 API key 可获得独立配额（入门 1 RPS）。
-- **合规措施**：配置了 `S2_API_KEY` 时带 `x-api-key`；未配置则以公开匿名方式低频使用（1.5s 间隔 + 429 退避）。限流 3 并发 / 1.5s。
-- 官方说明：<https://www.semanticscholar.org/product/api>
+### 3.1 OpenAlex
 
-## 3. arXiv — https://arxiv.org
+- 官方文档：https://docs.openalex.org/ 、https://help.openalex.org/api/
+- 请求：`GET https://api.openalex.org/works?search=...&api_key=...`
+- 元数据：OpenAlex 数据集按 CC0 发布。
+- 当前规则：自 2026-02-13 起 API 请求需要 API Key；项目不再把旧 `mailto` polite-pool 机制当作生产配额。
+- 实现：没有 `OPENALEX_API_KEY` 时不进入智能路由；只接受 `best_oa_location.pdf_url` 或 `primary_location.pdf_url`，不把 OA 落地页冒充 PDF。
 
-- **是什么**：康奈尔大学运营的预印本平台（CS/物理/数学/定量生物/经济学），作者自存档。
-- **Agent 如何使用**：关键词检索 `GET https://export.arxiv.org/api/query`（`tools/search/arxiv.py`）；全文取结果中的 PDF 链接，服务端解析用于问答，**不对外提供 PDF 副本**。
-- **许可**（[ToU 原文](https://info.arxiv.org/help/api/tou.html)，已逐条核对）：
-  - 元数据 **CC0**，可自由检索/存储/转换/分享；
-  - 明确鼓励"构建帮助用户发现 e-print 的工具与服务"（更好的搜索界面、引用图谱等——正是本 Agent 的形态）；
-  - **禁止"在自己服务器存储并对外提供 e-print（PDF）"**——我们不设 PDF 下载端点，`/files` 只托管 Agent 生成的 .md 报告（代码已核实）；
-  - 硬性限流："**每 3 秒至多 1 请求、单连接**"。
-- **合规措施**：限流器已按其 ToU 调整为 **1 并发 / 3.0s**（`tools/search/arxiv.py:14`）；尊重 robots 与连接数限制。
+### 3.2 arXiv
 
-## 4. Crossref — https://www.crossref.org
+- API 手册：https://info.arxiv.org/help/api/user-manual.html
+- API 条款：https://info.arxiv.org/help/api/tou.html
+- 请求：`GET https://export.arxiv.org/api/query?search_query=...`
+- 速率：单连接，连续请求至少间隔 3 秒。
+- 元数据可按其声明复用；论文全文许可由作者逐篇选择。Agent 只做临时分析缓存，不提供 arXiv PDF 公开下载端点。
+- 实现：每轮来源级批处理，最多两个英文请求；本地限流排队取消不得记作 arXiv 故障。
 
-- **是什么**：DOI 注册机构的官方元数据 API，全学科覆盖（人文/社科/医学的 DOI 元数据基本盘）。
-- **Agent 如何使用**：关键词检索 `GET https://api.crossref.org/works?query=...`（`tools/search/crossref.py`）。仅元数据；其 `link` 字段不作为全文来源（可能指向付费墙）。
-- **许可**：公共 REST API 免费；元数据多为 CC0/CC-BY（因成员出版社而异）。建议带 `mailto` 进 polite pool。
-- **合规措施**：同 OpenAlex 的邮箱策略——有真实邮箱则带，无则匿名，绝不发占位身份。限流 5 并发 / 0.5s。
+### 3.3 Crossref
 
-## 5. Europe PMC — https://europepmc.org
+- 文档：https://www.crossref.org/documentation/retrieve-metadata/rest-api/
+- Etiquette：https://www.crossref.org/documentation/retrieve-metadata/rest-api/rest-api-metadata-retrieval/
+- 请求：`GET https://api.crossref.org/works?query=...&rows=...&mailto=...`
+- Crossref 汇聚成员提交的数据，字段许可可能不同；项目只使用检索所需元数据。
+- `link` 表示登记链接，不证明开放获取，因此本项目不再直接把 Crossref PDF link 交给下载器，而是通过 Unpaywall/OA 校验。
 
-- **是什么**：欧洲生物信息研究所（EMBL-EBI）的生命科学文献库，含 PubMed 内容 + 预印本（bioRxiv/medRxiv 已索引）+ OA 全文。
-- **Agent 如何使用**：关键词检索 `GET https://www.ebi.ac.uk/europepmc/webservices/rest/search`（`tools/search/europepmc.py`）。全文链接**只收 `availabilityCode=OA` / "Open access" 的 PDF**；订阅（subscription）链接在解析层就被丢弃（测试锁定：`tests/test_pdf_fetcher.py::test_europepmc_oa_only`）。
-- **许可**：REST API 免费公开；全文内容按各篇论文自身许可（OA 子集为 CC 系列）。
-- 官方说明：<https://europepmc.org/RestfulWebService>
+### 3.4 Europe PMC
 
-## 6. DOAJ — https://doaj.org
+- 文档：https://europepmc.org/RestfulWebService
+- 请求：`GET https://www.ebi.ac.uk/europepmc/webservices/rest/search`
+- 用途：医学、生命科学、PubMed 内容和预印本检索。
+- 只接受响应明确标为 OA 的全文 URL；文章正文和摘要仍按单篇许可及来源条款处理。
 
-- **是什么**：开放获取期刊目录（瑞典 Lund 大学基础设施），收录的全部是 OA 期刊，人文社科尤其强。
-- **Agent 如何使用**：关键词检索 `GET https://doaj.org/api/search/articles/{query}`（`tools/search/doaj.py`）；全文取 `bibjson.link` 中的 fulltext 链接（DOAJ 收录即 OA）。
-- **许可**：API 免费公开；**元数据 CC BY-SA**（署名 + 相同方式共享）。
-- **合规措施**：署名义务已在产品设置弹窗"数据来源"中履行（见 §署名）。限流 2 并发 / 1.0s。
-- 官方说明：<https://doaj.org/api/v4/docs>
+### 3.5 DOAJ
 
-## 7. HAL — https://hal.science
+- API：https://doaj.org/api/v4/docs
+- 公共数据许可：https://doaj.org/docs/public-data-dump/
+- 请求：`GET https://doaj.org/api/search/articles/{query}`
+- DOAJ 文章元数据按 **CC0** 提供；期刊和文章正文采用各自开放许可。
+- 只有 DOAJ 记录同时标为 fulltext 且明确声明 PDF MIME/type 的链接才可作为候选；HTML 落地页不生成 PDF 候选，后续仍验证 PDF 魔数。
 
-- **是什么**：法国国家开放档案库（CCSD 运营），作者自存档的 OA 知识库，人文社科、欧洲学位论文覆盖强。
-- **Agent 如何使用**：关键词检索 `GET https://api.archives-ouvertes.fr/search/`（`tools/search/hal.py`）；全文取 `fileMain_s`（HAL 托管的作者自存档 PDF，天然 OA）。
-- **许可**：免费开放 API；内容为作者按 HAL 协议自存档的开放副本。
-- 官方说明：<https://api.archives-ouvertes.fr/search/>
+### 3.6 HAL
 
-## 8. OpenAIRE — https://www.openaire.eu
+- API：https://api.archives-ouvertes.fr/docs/search/
+- 开放数据说明：https://doc.hal.science/en/api/
+- 请求：`GET https://api.archives-ouvertes.fr/search/?q=...&fl=...&wt=json`
+- 项目按官方 Solr 语法转义查询；`fileMain_s` 是 HAL 仓储文件候选，使用时仍尊重记录许可。
 
-- **是什么**：欧盟委员会支持的 OA 研究图谱，聚合全球仓储/出版社的 OA 记录。
-- **Agent 如何使用**：关键词检索 `GET https://api.openaire.eu/search/publications?format=json&keywords=...`（`tools/search/openaire.py`）。全文链接**只取 `accessright` 明确标记为 Open Access 的实例**（closed/restricted/embargo 一律不取，测试锁定）。
-- **许可**：数据 **CC-BY**（需署名）；API 免费。
-- 官方说明：<https://graph.openaire.eu/develop/>
+### 3.7 OpenAIRE
 
-## 9. CORE — https://core.ac.uk
+- Graph API V3：https://graph.openaire.eu/docs/apis/graph-api/
+- Research Products：https://graph.openaire.eu/docs/apis/graph-api/research-products/
+- 认证：https://graph.openaire.eu/docs/apis/authorization-and-authentication/
+- 请求：`GET https://api.openaire.eu/graph/v3/research-products?search=...&type=publication`
+- Graph 数据按官方 CC-BY 政策使用并保留来源归因。
+- 匿名调用约 60 次/小时，认证服务约 7200 次/小时；项目把匿名本地预算进一步收紧为 50 次/小时，无服务凭证时仅作低频兜底，不再使用旧 `/search/publications` 接口。
 
-- **是什么**：全球最大的机构知识库聚合（开放大学运营），4.5 亿+ 可检索记录、5700 万+ 全文。
-- **Agent 如何使用**：关键词检索 `GET https://api.core.ac.uk/v3/search/works`（`tools/search/core.py`），全文取 `downloadUrl`（CORE 托管的仓储 OA 副本）。
-- **许可**（[官方页原文](https://core.ac.uk/services/api)，已核对）：API 免费层可用；"可以商用（适用其 T&C）"；机构/企业高速率通常需许可评估。
-- **合规措施**：**未配置 `CORE_API_KEY` 时该源整体自动跳过，不发起任何请求**；免费申请 key 后启用。限流 3 并发 / 0.5s。
+### 3.8 DataCite
 
-## 10. Unpaywall — https://unpaywall.org
+- REST 文档：https://support.datacite.org/docs/api
+- DOI 检索：https://support.datacite.org/docs/api-get-dois
+- 请求：`GET https://api.datacite.org/dois?query=...&resource-type-id=text&page[size]=...`
+- DataCite 元数据按 CC0 提供。
+- 项目只用于数据集、软件、报告、学位论文、论文元数据和 DOI 意图/兜底；记录 URL 是落地页，不是 PDF/OA 证明。
 
-- **是什么**：OurResearch 的 OA 定位数据库——按 DOI 查询某论文在全球的合法 OA 副本位置（出版社金色 OA / PMC / 机构库）。
-- **Agent 如何使用**：全文获取的最后兜底：`GET https://api.unpaywall.org/v2/{doi}?email=...`（`tools/pdf/fetcher.py::_unpaywall_pdf_url`）。只接受 `is_oa=true` 的响应，取 `best_oa_location.url_for_pdf`。
-- **许可**（[ToS 原文](https://unpaywall.org/legal/terms-of-service)，已逐条核对，2020-11-05 版）：
-  - "We provide most features of the Service **free of charge**, and you generally **do not need to register**"——API 属免费功能；
-  - API 本身就是为自动化查询提供的组件，本 Agent 的逐 DOI 查询属于其明示用法；
-  - 收费的是 Data Feed（每周全量变更文件订阅），我们不使用；
-  - 禁止"未经授权复制/再分发 Database"——我们只做单篇实时查询，不建镜像库，符合。
-- **合规措施**：**API 强制要求 email 参数；未配置邮箱时完全不调用 Unpaywall**（代码：`fetcher.py` 中 `if not doi or not email: return None`），配置时复用 `OPENALEX_EMAIL`/`CROSSREF_EMAIL`。
+### 3.9 DBLP
 
----
+- Search API：https://dblp.org/faq/How+to+use+the+dblp+search+API.html
+- 数据许可：https://dblp.org/faq/What+is+the+license+of+the+dblp+dataset.html
+- 请求：`GET https://dblp.org/search/publ/api?q=...&format=json&h=...`
+- 主站发生 5xx 时只回退到 DBLP/Schloss Dagstuhl 官方镜像 `https://dblp.dagstuhl.de/search/publ/api`，不使用第三方抓取镜像。
+- DBLP 元数据 CC0；项目发送可识别 User-Agent，仅用于计算机科学路由，不抓取网页或猜测 PDF。
 
-## 邮箱参数统一策略（公开非个人访问）
+## 4. 条件允许的平台
 
-| 情形 | 行为 |
-|------|------|
-| 平台允许匿名访问（OpenAlex / Crossref）且未配邮箱 | **匿名访问**（标准速率池），不带任何身份参数 |
-| 平台允许匿名访问且已配真实邮箱 | 带 `mailto` 进 polite pool（平台官方鼓励的正当机制） |
-| 平台强制要求邮箱（Unpaywall）且未配邮箱 | **完全不访问该服务**（优雅跳过，不影响主流程） |
-| 任何情况 | **绝不发送占位/伪造邮箱**（本轮已从 OpenAlex/Crossref/openalex_refs 移除 `paper-agent@localhost` 兜底） |
+### 4.1 Semantic Scholar
 
-## 全文获取统一策略（OA-only）
+- API：https://www.semanticscholar.org/product/api
+- License：https://api.semanticscholar.org/license/
+- 请求：`GET https://api.semanticscholar.org/graph/v1/paper/search`，Header `x-api-key`。
+- API License 包含展示、归因、用途和商业使用条件，不能仅凭“免费 Key”断言任意用途均可。
+- 项目要求 `S2_API_KEY` 与 `S2_LICENSE_CONFIRMED=true` 同时存在；管理员页面开关不能绕过该环境门禁。
 
-```
-请求全文 → 源 API 声明的 OA 链接（arXiv / OpenAlex best-OA / Europe PMC 仅OA / DOAJ / HAL fileMain_s / OpenAIRE 仅OA实例 / CORE downloadUrl）
-        → Unpaywall best_oa_location（DOI 查询，仅 is_oa=true）
-        → 全部落空：回退摘要级回答，明示"该文暂无开放获取全文"
-```
+### 4.2 CORE
 
-- 付费墙出版商链接在代码层面无路径（Europe PMC/OpenAIRE 解析层只放 OA 链接，单测锁定）。
-- 下载安全：scheme 白名单 + DNS 逐 IP 公网校验 + 拒云元数据 + 50MB 流式上限 + PDF 魔数校验（SSRF 防护）。
-- PDF 仅服务端解析用于问答，**不设对外 PDF 下载端点**（arXiv ToU 明确要求）；用户通过引用链接回到原平台页面。
+- 官方服务页：https://core.ac.uk/services/api
+- API 文档：https://api.core.ac.uk/docs/v3
+- 请求：`GET https://api.core.ac.uk/v3/search/works/?q=...&limit=...`，Header `Authorization: Bearer ...`。
+- **必须保留尾斜杠**：无尾斜杠会返回 301；本项目已修正，且非预期 3xx 不再伪装成“可达但零结果”。
+- CORE 条款对搜索/发现产品、机构和商业用途有额外许可要求。项目要求 Key 与 `CORE_LICENSE_CONFIRMED=true` 同时存在。
 
-## 多用户部署的访问频率合规（服务器上线）
+### 4.3 PubMed / NCBI
 
-平台看到的是我们后端这一个客户端，合规义务由后端统一承担，现有机制：
+- E-utilities 总览：https://www.ncbi.nlm.nih.gov/books/NBK25501/
+- 使用规则：https://www.ncbi.nlm.nih.gov/books/NBK25497/
+- PubMed 数据条款：https://www.nlm.nih.gov/databases/download/terms_and_conditions.html
+- 调用：ESearch 获取 PMID，再用 EFetch 批量获取 XML；发送工具名和真实联系邮箱，可选 `NCBI_API_KEY`。
+- 速率：无 Key 不超过 3 请求/秒；有 Key 通常不超过 10 请求/秒。
+- PubMed 记录由多来源组成，部分摘要和字段受版权保护；项目只做用户查询所需展示和分析，并保留 NLM/来源免责声明，不下载或再分发出版商 PDF。
 
-1. **每源全局限流器**（`tools/search/base.py::RateLimiter`）是**进程级单例**——无论多少用户同时使用，对 arXiv 的出口流量永远是 3 秒 1 请求单连接，对其他源同样被各自 limiter 收敛。用户并发只影响排队，不放大出站频率。
-2. **PDF 下载全局限流**：2 并发 / 1s 间隔（进程级），全文下载不会对上游形成突发。
-3. **429 处理**：读 `Retry-After` 精确等待或指数退避（≤3 次）。
-4. **全局超时**：一次搜索的所有源任务 120s deadline，超时丢弃，不堆积后台请求。
-5. **熔断器**（`core/circuit_breaker.py`）：某工具持续失败时自动停止调用，避免对故障上游持续加压。
-6. **单 worker 约束**：uvicorn 必须 `--workers 1`（`start.sh prod` 已内置）——限流/熔断均为进程内状态，多 worker 会破坏上述保证。
-7. **建议**：上线前申请免费的 `S2_API_KEY`（无 key 时 Semantic Scholar 走全平台共享的匿名配额，多用户场景会频繁 429；不影响合规，只影响体验）。
+### 4.4 bioRxiv / medRxiv
 
-## 署名（Attribution）
+- 官方 API：https://api.biorxiv.org/
+- API 支持按 server、日期区间、游标或 DOI 获取元数据，**不提供任意历史关键词搜索**。
+- 项目不调用网页搜索，而是通过官方 API 增量同步元数据到 `data/paper_source_catalog.db` 的 FTS5 索引。
+- 本地只保存元数据、版本、来源页和许可标识，不保存 PDF。正文许可逐篇判断；没有明确 OA/许可证明时不生成 PDF 候选。
 
-DOAJ（CC BY-SA）、OpenAIRE（CC-BY）等有署名义务；产品内已统一履行：前端 设置 → 数据来源 中列出全部平台及其许可（`frontend/components/SettingsPopover.tsx` + `frontend/lib/i18n.ts` 的 `settings_data_sources_body`）。
+### 4.5 Unpaywall
 
-## 明确不使用的渠道（红线）
+- API/条款：https://unpaywall.org/products/api 、https://unpaywall.org/legal/terms-of-service
+- 请求：`GET https://api.unpaywall.org/v2/{doi}?email=...`
+- 必须配置真实 `PAPER_PLATFORM_CONTACT_EMAIL`（旧联系邮箱仅兼容回退）。
+- 只接受 `is_oa=true`，优先 `best_oa_location.url_for_pdf`；不镜像 Unpaywall 数据库。
 
-- Sci-Hub 及任何侵权源；
-- Google Scholar / ResearchGate / Academia.edu 抓站（无官方开放 API，ToS 禁止抓取）；
-- 出版商付费墙页面（Elsevier/Springer/IEEE/Wiley 等）的任何形式的绕过、模拟登录、cookie/EZproxy 代持；
-- 未经平台许可的批量镜像/再分发。
+## 5. 暂不接入与禁止路径
 
----
+### ChinaXiv
 
-*本文件为工程合规说明，非法律意见。各平台条款可能更新，上线前请以官方页面为准复核一遍。*
+截至 2026-08-18，本轮未取得 ChinaXiv 官网公开、稳定、面向第三方开发的关键词 API/OAI-PMH 文档及自动调用许可依据。因此：
+
+- 不实现 ChinaXiv 搜索后端；
+- 不逆向网页 XHR、内部 JSON、验证码或 Cookie 接口；
+- 不批量抓取搜索结果页；
+- 不按 URL 规律猜测 PDF。
+
+取得官方书面文档或许可后，必须重新完成接口、速率、元数据许可和全文许可审计才能接入。
+
+同样禁止：Sci-Hub；Google Scholar/ResearchGate/Academia.edu 抓站；出版商付费墙绕过；校园代理、Cookie、EZproxy 代持；未经授权的批量全文镜像。
+
+## 6. 运行时合规控制
+
+- 默认智能路由只选最多 4 个主渠道，结果不足且时间允许时最多增加 2 个兜底渠道。
+- 每个平台每轮只有一个来源任务；远程来源最多消费两条检索式，避免“平台 × 检索式”请求爆炸。
+- arXiv 保持单连接/3 秒；NCBI 3/10 RPS；OpenAIRE 匿名小时预算；其他源使用保守进程级 limiter。
+- `SearchOutcome` 区分远端错误与 `local_budget_exhausted`；本地限流队列取消不会触发上游熔断。
+- 非预期重定向、HTML 机器人挑战、响应 schema 改变、429 和 5xx 分别记录，达到 30 秒硬时限即返回部分结果。
+- OA 下载继续执行公网 DNS/IP 校验、逐跳重定向校验、大小上限、PDF 魔数验证和全局下载限流。
+
+## 7. 部署运营者检查
+
+上线前至少确认：
+
+1. `PAPER_PLATFORM_CONTACT_EMAIL` 是真实可联系地址；
+2. OpenAlex 已配置 `OPENALEX_API_KEY`；
+3. 只有确认符合对应 License 时才设置 `S2_LICENSE_CONFIRMED=true` 或 `CORE_LICENSE_CONFIRMED=true`；
+4. OpenAIRE 服务凭证和 NCBI Key 只从各自官方渠道申请；
+5. bioRxiv/medRxiv 本地索引只由官方 API timer 写入；
+6. 管理员页面显示的平台协议、许可状态和运行状态符合预期；
+7. 条款变化时更新本文件及运行门禁，而不是仅修改文字说明。

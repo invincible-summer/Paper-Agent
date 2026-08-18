@@ -407,6 +407,193 @@ OPENAI_API_POLICY_PRESET=balanced
 - 更新代码时不能用 `.env.example` 覆盖生产 `.env`；
 - `.env.example` 新增配置项时，应人工比较并按需补入 `.env`。
 
+### 8.1 只更新生产环境 `.env` 时的正确流程
+
+`.env` 是服务器上的运行时秘密文件，不属于 Git 发布内容。比如更换 `CORE_API_KEY`、`DEEPSEEK_API_KEY` 或第三方 VLM Key 时，**不需要提交 Git、不需要 `git pull`，也不能用 `.env.example` 覆盖生产 `.env`**。必须在云服务器上直接编辑，并重启读取该文件的后端进程。
+
+先登录服务器并确认当前文件权限：
+
+```bash
+cd /opt/paper-agent
+sudo -u paper-agent test -f .env
+sudo stat -c '%U:%G %a %n' .env
+```
+
+正常结果应为 `paper-agent:paper-agent 600`。如果不是，先修正：
+
+```bash
+sudo chown paper-agent:paper-agent /opt/paper-agent/.env
+sudo chmod 600 /opt/paper-agent/.env
+```
+
+在修改前建立只允许管理员读取的备份。备份文件不能进入 GitHub：
+
+```bash
+STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP_DIR="/var/lib/paper-agent/backup/env-$STAMP"
+sudo install -d -o paper-agent -g paper-agent -m 700 "$BACKUP_DIR"
+sudo -u paper-agent cp -a /opt/paper-agent/.env "$BACKUP_DIR/.env"
+sudo -u paper-agent chmod 600 "$BACKUP_DIR/.env"
+echo "$BACKUP_DIR" | sudo tee /var/lib/paper-agent/last-env-backup-dir
+```
+
+使用服务器本地编辑器修改，避免把密钥放进 shell 历史、命令行参数、终端截图或日志：
+
+```bash
+sudo -u paper-agent nano /opt/paper-agent/.env
+```
+
+例如只修改 CORE 密钥时，在编辑器中找到并替换这一行：
+
+```ini
+CORE_API_KEY=在这里粘贴新的 CORE API Key
+```
+
+保存后只检查变量“是否存在/非空”，**不要打印变量值**：
+
+```bash
+sudo -u paper-agent awk -F= '
+  /^[[:space:]]*#/ { next }
+  /^[[:space:]]*[A-Z_][A-Z0-9_]*=/ {
+    key=$1; sub(/^[[:space:]]+/, "", key); sub(/[[:space:]]+$/, "", key);
+    value=substr($0, index($0, "=") + 1);
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", value);
+    printf "%s=%s\n", key, (length(value) ? "<configured>" : "<empty>");
+  }
+' /opt/paper-agent/.env | grep -E '^(CORE_API_KEY|DEEPSEEK_API_KEY|MULTIMODAL_API_KEY)=' || true
+```
+
+确认文件权限没有被编辑器改变：
+
+```bash
+sudo chown paper-agent:paper-agent /opt/paper-agent/.env
+sudo chmod 600 /opt/paper-agent/.env
+sudo stat -c '%U:%G %a %n' /opt/paper-agent/.env
+```
+
+`EnvironmentFile=/opt/paper-agent/.env` 只在 systemd 服务进程启动时读取。修改 `.env` 后必须重启后端：
+
+```bash
+sudo systemctl restart paper-agent
+sleep 3
+sudo systemctl is-active --quiet paper-agent && echo "paper-agent active"
+curl -fsS http://127.0.0.1:8000/health
+```
+
+本次只是修改后端 `.env` 时：
+
+- 不需要 `git fetch`、`git merge` 或重新安装 Python 依赖；
+- 不需要 `systemctl daemon-reload`，除非同时修改了 `.service` 文件；
+- 通常不需要重启 `paper-agent-web`，因为后端 `.env` 由 `paper-agent` 读取；
+- 不需要重启 Nginx；
+- 如果修改的是前端构建时环境变量（例如 `NEXT_PUBLIC_BACKEND_URL`），则必须重新 build 前端并重启 `paper-agent-web`，不能只重启后端。
+
+以 `CORE_API_KEY` 为例，后端重启后还要在管理员页面 `/admin/paper-search` 检查 CORE：
+
+1. “Key 已配置”状态出现；
+2. 如果 CORE 之前被管理员手动关闭，单纯补 Key 不会自动打开它，需要手动打开 CORE 渠道并保存；
+3. 执行一次小范围论文检索或连通性检测；
+4. 查看日志时只看错误类型和状态码，禁止用会打印环境变量的命令：
+
+```bash
+sudo journalctl -u paper-agent -n 100 --no-pager
+curl -fsS https://paper-agent.ycr10.cn/health
+```
+
+如果更新后服务无法启动，先恢复备份再重启：
+
+```bash
+BACKUP_DIR="$(sudo cat /var/lib/paper-agent/last-env-backup-dir)"
+sudo -u paper-agent cp -a "$BACKUP_DIR/.env" /opt/paper-agent/.env
+sudo chown paper-agent:paper-agent /opt/paper-agent/.env
+sudo chmod 600 /opt/paper-agent/.env
+sudo systemctl restart paper-agent
+sudo systemctl status paper-agent --no-pager
+```
+
+不要执行以下危险操作：
+
+```bash
+# 禁止：会覆盖生产密钥和其他服务器专属配置
+sudo cp .env.example /opt/paper-agent/.env
+
+# 禁止：密钥可能进入 shell history、进程列表或审计日志
+export CORE_API_KEY="..."
+echo "CORE_API_KEY=..." >> /opt/paper-agent/.env
+```
+
+## 8.2 论文平台生产配置与许可门禁
+
+论文平台的生产身份统一放在 `/opt/paper-agent/.env`，不能写入管理员数据库或 Git。推荐至少配置：
+
+```dotenv
+PAPER_PLATFORM_CONTACT_EMAIL=真实可联系邮箱
+OPENALEX_API_KEY=从 OpenAlex 官方申请的 Key
+CORE_LICENSE_CONFIRMED=false
+S2_LICENSE_CONFIRMED=false
+```
+
+按需配置 `S2_API_KEY`、`CORE_API_KEY`、`NCBI_API_KEY`、`OPENAIRE_CLIENT_ID`、`OPENAIRE_CLIENT_SECRET`。`CORE_LICENSE_CONFIRMED` 和 `S2_LICENSE_CONFIRMED` 只能在运营者核对官方条款、确认当前部署用途符合许可后改为 `true`；只有 API Key 不能绕过许可门禁。逐平台依据见仓库根目录 `Official_Paper_Platform_License_Description.md`。
+
+只检查变量是否配置，不显示内容：
+
+```bash
+sudo -u paper-agent awk -F= '
+  /^(PAPER_PLATFORM_CONTACT_EMAIL|OPENALEX_API_KEY|S2_API_KEY|S2_LICENSE_CONFIRMED|CORE_API_KEY|CORE_LICENSE_CONFIRMED|NCBI_API_KEY|OPENAIRE_CLIENT_ID|OPENAIRE_CLIENT_SECRET)=/ {
+    value=substr($0,index($0,"=")+1);
+    printf "%s=%s\n", $1, (length(value) ? "<configured>" : "<empty>")
+  }
+' /opt/paper-agent/.env
+```
+
+保存 `.env` 后必须重启后端，再到 `/admin/paper-search` 核对每个平台的“配置状态、许可状态、运行状态”。OpenAlex 无 Key、CORE/S2 未完成许可确认时显示不可运行属于预期安全行为。
+
+```bash
+sudo systemctl restart paper-agent
+sleep 3
+curl -fsS http://127.0.0.1:8000/health
+sudo journalctl -u paper-agent -n 80 --no-pager
+```
+
+## 8.3 bioRxiv / medRxiv 官方元数据同步
+
+预印本关键词检索来自官方 metadata API 同步后的本地 SQLite FTS，不抓取网页，也不下载 PDF。数据库位于 `/opt/paper-agent/data/paper_source_catalog.db`。安装每日同步 timer：
+
+```bash
+cd /opt/paper-agent
+sudo install -o root -g root -m 0644 deploy/systemd/paper-agent-rxiv-sync.service /etc/systemd/system/paper-agent-rxiv-sync.service
+sudo install -o root -g root -m 0644 deploy/systemd/paper-agent-rxiv-sync.timer /etc/systemd/system/paper-agent-rxiv-sync.timer
+sudo install -d -o paper-agent -g paper-agent -m 0750 /opt/paper-agent/data
+sudo systemctl daemon-reload
+sudo systemctl enable --now paper-agent-rxiv-sync.timer
+sudo systemctl start paper-agent-rxiv-sync.service
+```
+
+单次双源服务最多运行 15 分钟（脚本为正常收尾预留 30 秒，systemd 另设 15 分钟硬上限）：每个来源先重扫最近 7 天，再从 bioRxiv 2013 年、medRxiv 2019 年开始按日期游标和分页游标继续历史回填。首次回填不阻塞后端，可能需要多个 timer 周期。检查状态：
+
+```bash
+sudo systemctl status paper-agent-rxiv-sync.timer --no-pager
+sudo systemctl status paper-agent-rxiv-sync.service --no-pager
+sudo journalctl -u paper-agent-rxiv-sync.service -n 100 --no-pager
+sudo -u paper-agent /opt/paper-agent/.venv/bin/python - <<'PY'
+from tools.search.rxiv_catalog import sync_status
+for name, row in sync_status().items():
+    print(name, "indexed=", row["indexed_count"], "coverage=", row["min_published"], "..", row["max_published"], "cursor=", row["backfill_date"], row["backfill_cursor"], "error=", row["last_error"] or "none")
+PY
+```
+
+升级或维护前只备份该元数据索引，不把它提交 Git：
+
+```bash
+STAMP="$(date +%Y%m%d_%H%M%S)"
+sudo install -d -o paper-agent -g paper-agent -m 0700 "/var/backups/paper-agent/$STAMP"
+sudo systemctl stop paper-agent-rxiv-sync.service 2>/dev/null || true
+sudo -u paper-agent cp -a /opt/paper-agent/data/paper_source_catalog.db* "/var/backups/paper-agent/$STAMP/" 2>/dev/null || true
+sudo systemctl start paper-agent-rxiv-sync.timer
+```
+
+如果索引损坏，可停止同步、移走 `paper_source_catalog.db*` 后重新启动 timer；数据会从官方 API 重新构建。不要从开发机上传该数据库。
+
 ---
 
 ## 9. 初始化管理员和清小搭 Agent API Key
@@ -972,6 +1159,7 @@ sudo -u paper-agent git diff --name-only HEAD..origin/main
 | `requirements.txt`、`requirements-cpu.txt`、`constraints.txt`、`backend/pyproject.toml` | 重新安装 Python 依赖，再重启后端 |
 | `frontend/package.json`、`frontend/pnpm-lock.yaml` | `pnpm install --frozen-lockfile`，再 build |
 | `.env.example`、`core/config.py`、`config/settings.yaml` | 人工比较生产 `.env` 和配置；不得覆盖 `.env` |
+| 仅服务器 `.env`（例如更新 `CORE_API_KEY`） | 服务器上备份并编辑 `.env`，校验权限，重启 `paper-agent`，执行健康/真实渠道验证；不需要 Git、依赖安装或 `daemon-reload` |
 | `deploy/systemd/**` | 复制更新后的 unit，`systemctl daemon-reload`，按需重启 timer/service |
 | Nginx 配置说明或公网路径变化 | 人工修改 Nginx，`nginx -t` 后 reload |
 | 本地模型名称或 Docling/torch/sentence-transformers 版本变化 | 在启动前重新预热相关模型 |
@@ -1529,6 +1717,8 @@ sudo systemctl status paper-agent-cleanup.timer --no-pager
 sudo systemctl restart paper-agent
 sudo systemctl restart paper-agent-web
 ```
+
+只更新生产 `.env`（例如 CORE API Key）时，不要执行 Git 更新；按第 8.1 节备份、编辑并只重启 `paper-agent`。
 
 正常代码更新不需要重启 Nginx；只有 Nginx 配置变化时：
 

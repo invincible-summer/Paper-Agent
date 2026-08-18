@@ -33,6 +33,27 @@ def test_unknown_diagnostic_target_is_rejected():
         asyncio.run(diagnostics.run_connectivity(["http://127.0.0.1/"]))
     with pytest.raises(ValueError, match="未知检测目标"):
         asyncio.run(diagnostics.run_download_speed(["file:///etc/passwd"]))
+    assert "doi" not in diagnostics._validate_sources(None, download=True)
+
+
+def test_rxiv_connectivity_uses_official_metadata_api(monkeypatch):
+    class Resp:
+        status_code = 200
+        def json(self): return {"collection": [{"doi": "10.1101/example"}]}
+    class Client:
+        async def get(self, url):
+            assert url == "https://api.biorxiv.org/details/biorxiv/2013-11-01/2013-11-01/0/json"
+            return Resp()
+    class Limiter:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+        async def fetch(self, client, method, url): return await client.get(url)
+    monkeypatch.setattr(diagnostics, "get_search_http_client", lambda: Client())
+    monkeypatch.setattr(diagnostics, "_RXIV_DIAGNOSTIC_LIMITER", Limiter())
+    row = asyncio.run(diagnostics.run_connectivity(["biorxiv"]))[0]
+    assert row["status"] == "ok"
+    assert row["request_count"] == 1
+    assert row["result_count"] == 1
 
 
 def test_speed_test_caps_ignored_range_and_checks_pdf(monkeypatch):

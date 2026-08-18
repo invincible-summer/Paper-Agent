@@ -258,3 +258,55 @@ input[type="radio"], input[type="checkbox"], input[type="number"] {
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+
+/* Public administrator-managed usage document. */
+.usage-document-prose {
+  color: rgb(var(--fg));
+  font-size: 15px;
+  line-height: 1.85;
+  overflow-wrap: anywhere;
+}
+.usage-document-prose h1,
+.usage-document-prose h2,
+.usage-document-prose h3,
+.usage-document-prose h4 {
+  color: rgb(var(--fg));
+  font-weight: 700;
+  line-height: 1.35;
+  margin: 1.4em 0 0.55em;
+}
+.usage-document-prose h1 { font-size: 1.8em; margin-top: 0; }
+.usage-document-prose h2 { font-size: 1.45em; border-bottom: 1px solid rgb(var(--border-light)); padding-bottom: 0.3em; }
+.usage-document-prose h3 { font-size: 1.2em; }
+.usage-document-prose p { margin: 0.75em 0; }
+.usage-document-prose ul,
+.usage-document-prose ol { margin: 0.75em 0; padding-left: 1.6em; }
+.usage-document-prose li { margin: 0.3em 0; }
+.usage-document-prose blockquote {
+  border-left: 3px solid rgb(var(--accent));
+  color: rgb(var(--muted));
+  margin: 1em 0;
+  padding: 0.2em 1em;
+}
+.usage-document-prose code {
+  background: rgb(var(--surface-hover));
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  padding: 0.15em 0.3em;
+}
+.usage-document-prose pre {
+  background: rgb(var(--surface-sunken));
+  border-radius: 8px;
+  margin: 1em 0;
+  overflow-x: auto;
+  padding: 1em;
+}
+.usage-document-prose pre code { background: transparent; padding: 0; }
+.usage-document-prose table { border-collapse: collapse; display: block; margin: 1em 0; max-width: 100%; overflow-x: auto; }
+.usage-document-prose th,
+.usage-document-prose td { border: 1px solid rgb(var(--border-light)); padding: 0.45em 0.75em; text-align: left; }
+.usage-document-prose th { background: rgb(var(--surface-sunken)); font-weight: 600; }
+.usage-document-prose a { color: rgb(var(--accent)); text-decoration: underline; text-underline-offset: 2px; }
+.usage-document-prose img { border-radius: 10px; display: block; height: auto; margin: 1em 0; max-width: 100%; }
+.usage-document-prose hr { border: 0; border-top: 1px solid rgb(var(--border-light)); margin: 1.5em 0; }

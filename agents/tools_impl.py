@@ -246,6 +246,7 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb) -> 
     n_available = statuses.count("available")
     n_unavailable = statuses.count("unavailable")
     n_unknown = statuses.count("unknown")
+    source_notices = [str(item) for item in result.get("source_notices", []) if str(item).strip()]
     text = (
         f"检索完成：核心集 {len(session.papers)} 篇，候选 {len(session.candidates)} 篇。"
         f"全文状态：{n_available} 篇已探测到可访问的 OA PDF，"
@@ -258,6 +259,8 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb) -> 
         f"本次从候选提升 {len(promoted_ids)} 篇（候选不补位）。"
         f"核心集论文：{'；'.join(p.title for p in session.papers[:5])}"
     )
+    if source_notices:
+        text += "\n来源提示：" + "；".join(source_notices)
     return ok(
         "search_papers",
         text,
@@ -272,6 +275,8 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb) -> 
         fulltext_core_target=fulltext_core_target,
         sub_directions=session.sub_directions,
         search_queries=session.search_queries,
+        source_notices=source_notices,
+        search_route=result.get("search_route", {}),
         papers=[p.to_dict() for p in session.papers],
         candidates=[{"id": p.id, "title": p.title, "year": p.year,
                      "citation_count": p.citation_count, "source": p.source,

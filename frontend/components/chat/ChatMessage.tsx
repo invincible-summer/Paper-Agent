@@ -181,6 +181,7 @@ function SearchResultCard({ result }: { result: Record<string, unknown> }) {
   const papers = (result.papers || []) as Paper[];
   const candidates = (result.candidates || []) as CandidatePaper[];
   const subdirs = (result.sub_directions || []) as { name: string }[];
+  const sourceNotices = (result.source_notices || []) as string[];
   const isError = Boolean(result.error);
   const availableCount = papers.filter(p => p.fulltext_status === "available").length
     + candidates.filter(c => c.fulltext_status === "available").length;
@@ -201,6 +202,11 @@ function SearchResultCard({ result }: { result: Record<string, unknown> }) {
               {promotedCount > 0 ? ` · 从候选提升 ${promotedCount} 篇，候选不补位` : ""}
             </div>
           )}
+          {sourceNotices.map((notice, index) => (
+            <div key={`source-notice-${index}`} className="rounded-lg border border-warning/25 bg-warning/5 px-2.5 py-2 text-[11px] text-fg-secondary">
+              {notice}
+            </div>
+          ))}
           {subdirs.length > 0 && (
             <div className="flex flex-wrap gap-1.5 px-1">
               {subdirs.map((d, i) => (

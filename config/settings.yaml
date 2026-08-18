@@ -30,14 +30,19 @@ search:
   fulltext_status_ttl_days: 30
   sources:
     openalex: true
-    semantic_scholar: true   # 可无 key 低频使用；配 S2_API_KEY 更稳
+    semantic_scholar: true   # 运行时还要求 S2_API_KEY + S2_LICENSE_CONFIRMED=true
     arxiv: true
     crossref: true           # D-083: all-discipline DOI metadata (humanities/SS/medicine)
     europepmc: true          # D-083: biomedicine / life sciences + preprints (bioRxiv/medRxiv) + OA PDFs
     doaj: true               # D-083: OA all-discipline journals, humanities-strong
     hal: true                # 法国国家开放知识库：人文社科/欧洲学位论文，OA 全文
-    openaire: true           # 欧盟 OA 研究图谱：全球仓储 OA 记录
-    core: true               # core.ac.uk 仓储聚合；需 CORE_API_KEY（免费），无 key 自动跳过
+    openaire: true           # OpenAIRE Graph API V3；无认证只作低频兜底
+    core: true               # 运行时还要求 CORE_API_KEY + CORE_LICENSE_CONFIRMED=true
+    biorxiv: false           # 官方 metadata API 同步后的本地 FTS 索引
+    medrxiv: false           # 官方 metadata API 同步后的本地 FTS 索引
+    pubmed: false            # NCBI E-utilities；需真实联系邮箱
+    datacite: false          # DataCite CC0 元数据
+    dblp: false              # DBLP CC0 计算机科学元数据
 
 reader:
   pdf_dir: "data/pdfs"

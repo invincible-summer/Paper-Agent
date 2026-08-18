@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import httpx
 from core.config import get_settings
 from core.models import Paper
 from tools.search.base import RateLimiter
+from tools.search.http_client import get_search_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +20,9 @@ _limiter = RateLimiter(
 )
 
 
-def _mailto() -> dict:
-    """Polite-pool param only when a real email is configured.
-
-    Without one, OpenAlex is queried anonymously (standard pool) — a
-    placeholder identity must never be sent.
-    """
-    email = get_settings().search.openalex_email
-    return {"mailto": email} if email else {}
+def _auth_params() -> dict:
+    key = getattr(get_settings().search, "openalex_api_key", "")
+    return {"api_key": key} if key else {}
 
 
 async def fetch_referenced_works(dois: list[str]) -> dict[str, list[str]]:
@@ -36,15 +31,15 @@ async def fetch_referenced_works(dois: list[str]) -> dict[str, list[str]]:
     Keyed by normalized DOI. Papers with no DOI are the caller's responsibility.
     """
     out: dict[str, list[str]] = {}
-    if not dois:
+    if not dois or not getattr(get_settings().search, "openalex_api_key", ""):
         return out
-    async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-        async def fetch_one(doi: str) -> None:
+    client = get_search_http_client()
+    async def fetch_one(doi: str) -> None:
             ndoi = _norm_doi(doi)
             if not ndoi:
                 return
             url = f"{API_URL}/doi:{ndoi}"
-            params = {"select": "id,referenced_works", **_mailto()}
+            params = {"select": "id,referenced_works", **_auth_params()}
             try:
                 async with _limiter:
                     resp = await _limiter.fetch(client, "GET", url, params=params)
@@ -54,21 +49,21 @@ async def fetch_referenced_works(dois: list[str]) -> dict[str, list[str]]:
                 out[ndoi] = list(resp.json().get("referenced_works") or [])
             except Exception as e:
                 logger.warning("OpenAlex refs lookup failed for %s: %s", ndoi, e)
-        await asyncio.gather(*(fetch_one(doi) for doi in dict.fromkeys(dois)))
+    await asyncio.gather(*(fetch_one(doi) for doi in dict.fromkeys(dois)))
     return out
 
 
 async def resolve_openalex_ids(dois: list[str]) -> dict[str, str]:
     """Map each DOI -> its OpenAlex work id (W...), keyed by normalized DOI."""
     out: dict[str, str] = {}
-    if not dois:
+    if not dois or not getattr(get_settings().search, "openalex_api_key", ""):
         return out
-    async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-        async def fetch_one(doi: str) -> None:
+    client = get_search_http_client()
+    async def fetch_one(doi: str) -> None:
             ndoi = _norm_doi(doi)
             if not ndoi:
                 return
-            params = {"filter": f"doi:{ndoi}", "select": "id,doi", "per-page": 1, **_mailto()}
+            params = {"filter": f"doi:{ndoi}", "select": "id,doi", "per-page": 1, **_auth_params()}
             try:
                 async with _limiter:
                     resp = await _limiter.fetch(client, "GET", API_URL, params=params)
@@ -79,7 +74,7 @@ async def resolve_openalex_ids(dois: list[str]) -> dict[str, str]:
                     out[ndoi] = results[0].get("id", "")
             except Exception as e:
                 logger.debug("OpenAlex id resolve failed for %s: %s", ndoi, e)
-        await asyncio.gather(*(fetch_one(doi) for doi in dict.fromkeys(dois)))
+    await asyncio.gather(*(fetch_one(doi) for doi in dict.fromkeys(dois)))
     return out
 
 
@@ -152,18 +147,20 @@ async def fetch_works_metadata(openalex_ids: list[str]) -> list[dict]:
         "filter": f"ids.openalex:{flt}",
         "select": "id,doi,title,publication_year,cited_by_count,authorships,primary_location",
         "per-page": min(len(openalex_ids), 50),
-        **_mailto(),
+        **_auth_params(),
     }
-    async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-        try:
-            async with _limiter:
-                resp = await _limiter.fetch(client, "GET", API_URL, params=params)
-            if resp.status_code != 200:
-                return []
-            return resp.json().get("results") or []
-        except Exception as e:
-            logger.warning("OpenAlex metadata batch fetch failed: %s", e)
+    if not getattr(get_settings().search, "openalex_api_key", ""):
+        return []
+    client = get_search_http_client()
+    try:
+        async with _limiter:
+            resp = await _limiter.fetch(client, "GET", API_URL, params=params)
+        if resp.status_code != 200:
             return []
+        return resp.json().get("results") or []
+    except Exception as e:
+        logger.warning("OpenAlex metadata batch fetch failed: %s", e)
+        return []
 
 
 def metadata_to_paper(item: dict) -> Paper:

@@ -53,11 +53,13 @@ def test_search_card_lists_papers_with_fulltext_badges():
         ],
         "candidates": [{"title": "C"}] * 10,
         "fulltext_core_available": 1, "fulltext_core_target": 8,
+        "source_notices": ["PubMed/NLM 仅提供来源记录，不代表内容背书。"],
     }
     card = render_tool_card("search_papers", result, CORE_CARD_TOOLS)
     assert "**🔎 文献检索 · 核心集 2 篇 / 候选 10 篇**" in card
     assert "🟢 **Paper A**（2021，被引 5）" in card
     assert "🟡" in card and "核心层全文保障 1/8" in card
+    assert "PubMed/NLM 仅提供来源记录" in card
 
 
 def test_search_card_truncates_long_lists():

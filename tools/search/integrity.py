@@ -24,6 +24,7 @@ import httpx
 from core.config import get_settings
 from core.models import Paper
 from tools.search.base import RateLimiter
+from tools.search.http_client import get_search_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +46,9 @@ def _norm_doi(doi: str | None) -> str:
     return doi.strip().replace("https://doi.org/", "").lower()
 
 
-def _mailto() -> dict:
-    """Polite-pool param only when a real email is configured (never a placeholder)."""
-    email = get_settings().search.openalex_email
-    return {"mailto": email} if email else {}
+def _openalex_auth() -> dict:
+    key = getattr(get_settings().search, "openalex_api_key", "")
+    return {"api_key": key} if key else {}
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +114,10 @@ def _arxiv_id(paper: Paper) -> str:
 # ---------------------------------------------------------------------------
 
 async def _openalex_lookup(client: httpx.AsyncClient, doi: str) -> dict | None:
+    if not getattr(get_settings().search, "openalex_api_key", ""):
+        return None
     url = f"{_OPENALEX}/doi:{doi}"
-    params = {"select": "id,is_retracted,is_paratext,merged_into", **_mailto()}
+    params = {"select": "id,is_retracted,is_paratext,merged_into", **_openalex_auth()}
     try:
         async with _openalex_limiter:
             resp = await _openalex_limiter.fetch(client, "GET", url, params=params)
@@ -128,7 +130,8 @@ async def _openalex_lookup(client: httpx.AsyncClient, doi: str) -> dict | None:
 
 
 async def _crossref_lookup(client: httpx.AsyncClient, doi: str) -> dict | None:
-    email = get_settings().search.crossref_email or get_settings().search.openalex_email
+    from tools.search.registry import contact_email
+    email = contact_email(get_settings().search)
     params = {"mailto": email} if email else None
     try:
         async with _crossref_limiter:
@@ -233,9 +236,9 @@ async def sweep(papers: list[Paper]) -> dict:
     }
     arxiv_lookup_ids = set(list(arxiv_lookup_ids)[:_MAX_ARXIV_LOOKUPS])
 
-    async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-        tasks = [_check_one(client, p, arxiv_lookup_ids) for p in papers]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+    client = get_search_http_client()
+    tasks = [_check_one(client, p, arxiv_lookup_ids) for p in papers]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     report: list[dict] = []
     for p, res in zip(papers, results):

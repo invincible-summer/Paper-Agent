@@ -1,5 +1,5 @@
 "use client";
-import { BookOpen, LogOut, ShieldCheck } from "lucide-react";
+import { BookOpen, BookOpenText, LogOut, ShieldCheck } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
@@ -37,6 +37,14 @@ export function Nav() {
         </div>
       </div>
       <div className="flex items-center gap-2">
+        <button
+          onClick={() => router.push("/usage-doc")}
+          title="使用文档"
+          className="flex h-7 items-center gap-1.5 rounded-lg border border-border-light px-2.5 text-xs text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg"
+        >
+          <BookOpenText className="h-3.5 w-3.5" />
+          使用文档
+        </button>
         {authRequired && (user ? (
           <div className="flex items-center gap-1.5">
             {user.role === "administrator" && (
