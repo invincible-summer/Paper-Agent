@@ -2357,3 +2357,113 @@ sudo dmesg -T | grep -Ei 'oom|out of memory|killed process' || true
 
 若发布前独立 `state-db-v5` 目录原本为空，说明当时没有 API `state.db`，旧后端会自行创建 v5 空库；
 除该明确情形外，不得跳过 v5 恢复，也不要用 v6 库启动旧代码。
+
+### 30.13 发布后 API storage SQLite sidecar 竞态热修复
+
+2026-08-18 首次发布到 `af3bf6dca40c634b8de86ba3439255c49d481557` 后，生产管理员页面并发读取
+`/api/v1/admin/api-storage/usage` 等端点时，日志捕获到间歇性：
+
+```text
+core.storage_context.StoragePathError: private storage file does not exist
+```
+
+根因是最后一个 SQLite 连接关闭时会正常删除 `state.db-wal` / `state.db-shm`，而权限加固代码在
+`exists()` 与 `chmod` 之间存在窄 TOCTOU 窗口。主数据库未丢失，随后请求恢复 200；但该竞态可能造成
+间歇性 500。热修复只忽略“已经消失”的 WAL/SHM sidecar，同时仍严格拒绝仍存在的非法文件或符号链接。
+
+热修复边界：
+
+```text
+生产当前 revision：af3bf6dca40c634b8de86ba3439255c49d481557
+热修复目标 revision：6b2148b5c586577ff7a0e0e00f4cd1823800d668
+GitHub remote：git@github.com:invincible-summer/Paper-Agent.git
+```
+
+从生产当前 revision 到热修复目标只包含部署文档、测试和 `core/api_storage_store.py`；Python/Node
+依赖、`.env`、schema、模型、前端、systemd 和 Nginx 均未变化。无需安装依赖、无需构建前端、无需
+`daemon-reload` 或 reload Nginx。预计后端/网页维护窗口少于 1 分钟。
+
+服务器执行：
+
+```bash
+set -euo pipefail
+export OLD_REV='af3bf6dca40c634b8de86ba3439255c49d481557'
+export HOTFIX_REV='6b2148b5c586577ff7a0e0e00f4cd1823800d668'
+export APP_DIR='/opt/paper-agent'
+export APP_USER='paper-agent'
+export BACKUP_DIR='/var/backups/paper-agent/20260818-api-storage-sidecar-race-6b2148b'
+
+cd "$APP_DIR"
+test "$(sudo -H -u "$APP_USER" git rev-parse HEAD)" = "$OLD_REV"
+test -z "$(sudo -H -u "$APP_USER" git status --porcelain)"
+sudo -H -u "$APP_USER" git fetch --prune origin
+sudo -H -u "$APP_USER" git cat-file -e "$HOTFIX_REV^{commit}"
+sudo -H -u "$APP_USER" git merge-base --is-ancestor "$OLD_REV" "$HOTFIX_REV"
+sudo -H -u "$APP_USER" git diff --name-status "$OLD_REV..$HOTFIX_REV"
+
+test -z "$(sudo -H -u "$APP_USER" git diff --name-only \
+  "$OLD_REV..$HOTFIX_REV" -- requirements.txt requirements-cpu.txt \
+  constraints.txt .env.example config frontend deploy/systemd)"
+
+sudo systemctl stop paper-agent-web
+sudo systemctl stop paper-agent
+sudo systemctl stop paper-agent-cleanup.timer
+sudo systemctl stop paper-agent-rxiv-sync.timer
+sudo systemctl stop paper-agent-cleanup.service paper-agent-rxiv-sync.service || true
+
+sudo install -d -o root -g root -m 0700 "$BACKUP_DIR/state-db-v6"
+sudo find "$APP_DIR/data/openai_api" -maxdepth 1 -type f \
+  -name 'state.db*' -exec cp -a -t "$BACKUP_DIR/state-db-v6" {} +
+
+sudo -H -u "$APP_USER" git switch main
+sudo -H -u "$APP_USER" git merge --ff-only "$HOTFIX_REV"
+test "$(sudo -H -u "$APP_USER" git rev-parse HEAD)" = "$HOTFIX_REV"
+test -z "$(sudo -H -u "$APP_USER" git status --porcelain)"
+
+sudo systemctl start paper-agent
+sleep 5
+curl -fsS --max-time 10 http://127.0.0.1:8000/health
+sudo systemctl start paper-agent-web
+sleep 3
+curl -I --max-time 10 http://127.0.0.1:3000
+sudo systemctl start paper-agent-cleanup.timer
+sudo systemctl start paper-agent-rxiv-sync.timer
+
+curl -fsS --max-time 10 https://paper-agent.ycr10.cn/health
+curl -I --max-time 10 https://paper-agent.ycr10.cn/chat
+sudo systemctl is-active paper-agent
+sudo systemctl is-active paper-agent-web
+sudo systemctl is-active paper-agent-cleanup.timer
+sudo systemctl is-active paper-agent-rxiv-sync.timer
+```
+
+登录 `/admin/api-storage` 后连续刷新或切换页面，确认 usage/policy/status/cleanup-runs 均稳定返回。检查从
+本次后端启动后的日志：
+
+```bash
+sudo journalctl -u paper-agent --since '10 minutes ago' --no-pager -o cat \
+  | grep -F 'private storage file does not exist' \
+  && echo 'FAILED: sidecar race still occurred' \
+  || echo 'PASS: no sidecar disappearance exception'
+
+sudo journalctl -u paper-agent --since '10 minutes ago' --no-pager -o cat \
+  | grep -E '" (500|502|503) |HTTP/[0-9.]+" (500|502|503)' \
+  || echo 'PASS: no target HTTP 5xx'
+```
+
+热修复不改变 schema，若需回滚只回退代码并重启，不需要恢复数据库：
+
+```bash
+sudo systemctl stop paper-agent-web paper-agent
+cd /opt/paper-agent
+sudo -H -u paper-agent git reset --hard \
+  af3bf6dca40c634b8de86ba3439255c49d481557
+sudo systemctl start paper-agent
+sleep 5
+curl -fsS http://127.0.0.1:8000/health
+sudo systemctl start paper-agent-web
+curl -I http://127.0.0.1:3000
+```
+
+`paper-agent-rxiv-sync.service` 的独立失败不属于本 SQLite 竞态；应保留其日志并按同步任务实际异常单独
+处理，不要因为该 oneshot 失败回滚聊天/API 热修复。
