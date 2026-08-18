@@ -572,3 +572,11 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 ### 管理员诊断
 
 管理员接口位于 `/api/v1/admin/paper-search/*`。连通性检测使用固定查询，报告 HTTP 总延迟、真实结果数和可选 PDF 文件头探测，不伪造 DNS/TCP/TLS 分段。下载测速与连接检测分开，管理员可显式测试已关闭渠道或全文关闭状态；目标来自固定登记或经过 SSRF 校验的诊断候选，不接受任意 URL。测速优先 Range，最多读取 1 MiB、单项最多 20 秒、校验 `%PDF-`，不写生产 PDF 目录。数据库只保留最近一次完整连接/测速结果和最多 20 条摘要，不保存响应正文、完整 PDF 或秘密。
+
+## Runtime performance policy（2026-08）
+
+`runtime_performance_policy` 是 `data/users.db` 中的单行管理员设置，采用严格枚举、5 秒读缓存和乐观锁版本。启动预热模式为 `blocking`（默认，lifespan 就绪前完成本地导入）、`background`（先就绪后后台导入）、`role_first`（清小搭流式请求先返回 `role` 帧，再在线程加载 Agent）和 `off`。预热不调用 LLM/VLM、不下载模型；失败只记录并降级。地图引文模式为 `fast`（批量 OpenAlex 最多 3 秒）、`quality`（最多 8 秒）和 `off`，论文搜索策略关闭 OpenAlex 时有效模式强制为 `off`。
+
+研究地图计算一次标题/摘要嵌入并同时用于聚类和语义边；地图簇标签、概述和领域脉络由注册 Prompt 的一次 utility 调用完成，和引文增强并发。所有增强步骤都可失败，结果仍为 success 并包含 `degraded`、各阶段状态、引文状态、缓存命中和 `stage_ms`。地图缓存指纹包含论文 id/标题/年份/引用数/全文状态、Prompt 版本和引文策略；新搜索会清空旧地图。
+
+Web 与 `/v1` 都传递 `TurnExecutionContext`。Web 使用 240 秒软时限和 300 秒硬时限；软时限正常收尾并保存，硬时限取消且不保存半轮历史。OpenAI 保持 95 秒软时限、105 秒硬时限和既有 SSE 帧序。`search_papers`、`research_map` 每轮最多实际开始一次；参数校验失败不占次数，工具耗尽自身预算和整轮剩余预算使用不同 `timeout_kind`，超时文案明确要求本轮不要再次调用该工具。

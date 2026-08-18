@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 
 from langchain_core.messages import HumanMessage
 
@@ -20,11 +21,7 @@ from core.embeddings import embed_texts
 from core.blocking import run_cpu_bound
 from core.llm import ainvoke_utility, get_llm
 from core.models import Paper
-from core.prompts.map_path import (
-    get_cluster_labels_prompt,
-    get_landscape_prompt,
-    get_reading_path_prompt,
-)
+from core.prompts.map_path import get_map_summary_prompt, get_reading_path_prompt
 from tools.retrieval.bm25 import tokenize
 
 logger = logging.getLogger(__name__)
@@ -60,7 +57,7 @@ def _parse_json_obj(raw: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def cluster_papers(papers: list[Paper], sub_directions: list | None = None,
-                   embed_fn=embed_texts) -> dict[str, int]:
+                   embed_fn=embed_texts, vectors=None) -> dict[str, int]:
     """Assign each paper a cluster index.
 
     Embedding path: AgglomerativeClustering with a distance threshold, so the
@@ -73,11 +70,13 @@ def cluster_papers(papers: list[Paper], sub_directions: list | None = None,
     if len(papers) <= 2:
         return {p.id: 0 for p in papers}
 
-    if embed_fn is not None:
+    if vectors is not None or embed_fn is not None:
         try:
-            docs = [f"{p.title or ''}\n{(p.abstract or '')[:300]}" for p in papers]
-            vecs = embed_fn(docs)
-            if vecs and len(vecs) == len(papers):
+            vecs = vectors
+            if vecs is None:
+                docs = [f"{p.title or ''}\n{(p.abstract or '')[:300]}" for p in papers]
+                vecs = embed_fn(docs)
+            if vecs is not None and len(vecs) == len(papers):
                 from sklearn.cluster import AgglomerativeClustering
                 import numpy as np
 
@@ -140,125 +139,168 @@ def build_timeline(papers: list[Paper]) -> list[dict]:
     return out
 
 
-async def _label_clusters(clusters: list[dict], papers_by_id: dict[str, Paper],
-                          language: str) -> None:
-    """One LLM call labels all clusters in place (label + overview)."""
+def _fallback_landscape(clusters: list[dict], papers_by_id: dict[str, Paper], language: str) -> str:
+    if not clusters:
+        return ""
+    parts = []
+    for cluster in clusters:
+        titles = [papers_by_id[pid].title for pid in cluster.get("paper_ids", [])[:2]
+                  if pid in papers_by_id]
+        parts.append(f"{cluster['label']}（{'；'.join(titles)}）" if titles else cluster["label"])
+    years = sorted(p.year for p in papers_by_id.values() if p.year)
+    period = f"{years[0]}–{years[-1]}" if years else "当前"
+    if language == "en":
+        return f"Across {period}, the collection develops through " + "; ".join(parts) + "."
+    return f"该论文集覆盖 {period} 年，主要形成" + "、".join(parts) + "等方向；建议从高被引代表作进入，再沿时间线观察方向分化与交叉。"
+
+
+async def _summarize_map(clusters: list[dict], papers_by_id: dict[str, Paper],
+                         language: str) -> tuple[str, str]:
+    """One bounded utility call produces cluster labels and the landscape."""
     clusters_text = "\n".join(
         f"簇 {c['id']}:\n" + "\n".join(
-            f"  - {papers_by_id[pid].title}" for pid in c["paper_ids"] if pid in papers_by_id
-        )
+            f"  - {papers_by_id[pid].title}" for pid in c["paper_ids"] if pid in papers_by_id)
         for c in clusters
     )
-    prompt = get_cluster_labels_prompt().format(
-        clusters_text=clusters_text,
-        language_instruction=_lang_instruction(language),
-    )
+    prompt = get_map_summary_prompt().format(
+        clusters_text=clusters_text, language_instruction=_lang_instruction(language))
     try:
         llm = get_llm("light")
-        async with asyncio.timeout(12.0):
+        async with asyncio.timeout(15.0):
             resp = await ainvoke_utility(llm, [HumanMessage(content=prompt)])
         data = _parse_json_obj(resp.content if hasattr(resp, "content") else str(resp))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("cluster labeling failed: %s", e)
-        data = None
-    items = [c for c in (data or {}).get("clusters", []) if isinstance(c, dict)]
-    # The model often echoes the id as "簇0" instead of "0" — normalize to
-    # digits, with a positional fallback when ids can't be matched at all.
-    by_id: dict[int, dict] = {}
-    for item in items:
-        digits = re.sub(r"\D", "", str(item.get("id", "")))
-        if digits:
-            by_id[int(digits)] = item
-    for pos, c in enumerate(clusters):
-        hit = by_id.get(c["id"])
-        if hit is None and pos < len(items):
-            hit = items[pos]
-        if hit:
-            c["label"] = str(hit.get("label") or c["label"])[:60]
-            c["overview"] = str(hit.get("overview") or "")[:500]
+        if not data:
+            raise ValueError("map summary response was not JSON")
+        items = [item for item in data.get("clusters", []) if isinstance(item, dict)]
+        by_id = {}
+        for item in items:
+            digits = re.sub(r"\D", "", str(item.get("id", "")))
+            if digits:
+                by_id[int(digits)] = item
+        for pos, cluster in enumerate(clusters):
+            item = by_id.get(cluster["id"]) or (items[pos] if pos < len(items) else None)
+            if item:
+                cluster["label"] = str(item.get("label") or cluster["label"])[:60]
+                cluster["overview"] = str(item.get("overview") or "")[:500]
+        landscape = str(data.get("landscape") or "").strip()
+        if not landscape:
+            landscape = _fallback_landscape(clusters, papers_by_id, language)
+        return landscape, "available"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("map summary failed, using deterministic fallback: %s", exc)
+        return _fallback_landscape(clusters, papers_by_id, language), "fallback"
 
 
-async def _landscape(clusters: list[dict], papers_by_id: dict[str, Paper],
-                     language: str) -> str:
-    """One LLM call: the field's overall landscape paragraph.
-
-    Cluster labels/overviews are the primary material; when labeling failed
-    (empty overviews) the top paper titles keep the call grounded instead of
-    letting the model refuse for lack of content.
-    """
-    lines = []
-    for c in clusters:
-        line = f"- {c['label']}: {c.get('overview', '')}"
-        if not c.get("overview"):
-            titles = [papers_by_id[pid].title for pid in c.get("paper_ids", [])[:4]
-                      if pid in papers_by_id]
-            if titles:
-                line += "（代表论文：" + "；".join(titles) + "）"
-        lines.append(line)
-    clusters_text = "\n".join(lines)
-    prompt = get_landscape_prompt().format(
-        clusters_text=clusters_text,
-        language_instruction=_lang_instruction(language),
-    )
-    try:
-        llm = get_llm("light")
-        async with asyncio.timeout(12.0):
-            resp = await ainvoke_utility(llm, [HumanMessage(content=prompt)])
-        return (resp.content if hasattr(resp, "content") else str(resp)).strip()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("landscape generation failed: %s", e)
-        return ""
+def _fallback_graph(papers: list[Paper], cluster_of: dict[str, int], status: str) -> dict:
+    from core.reading_policy import fulltext_available, normalize_fulltext_status
+    from tools.storage.genealogy import _best_url
+    nodes = [{
+        "id": p.id, "title": p.title, "year": p.year or 0,
+        "citation_count": p.citation_count or 0, "cluster": cluster_of.get(p.id, 0),
+        "role": "", "layer": "core" if p.layer == "core" else "candidate",
+        "authors": (p.authors or [])[:3], "url": _best_url(p),
+        "abstract": (p.abstract or "")[:200], "venue": p.venue or "",
+        "fulltext": fulltext_available(p),
+        "fulltext_status": normalize_fulltext_status(getattr(p, "fulltext_status", "")),
+    } for p in papers]
+    return {"nodes": nodes, "edges": [], "citation_enrichment_status": status}
 
 
 async def build_research_map(papers: list[Paper], candidates: list[Paper],
                              sub_directions: list, language: str,
-                             progress=None) -> dict:
-    """Full research map: clusters + timeline + landscape + genealogy graph."""
-    def report(msg):
-        if progress:
-            progress(msg)
-
+                             progress=None, citation_mode: str = "fast") -> dict:
+    """Fast research map with bounded, independently degrading enhancements."""
     from tools.storage.genealogy import build_genealogy
 
+    started = time.monotonic()
+    stage_ms: dict[str, float] = {}
+    degraded_reasons: list[str] = []
     all_papers = list(papers) + list(candidates)
-    report("语义聚类主题簇...")
-    cluster_of = await run_cpu_bound(cluster_papers, all_papers, sub_directions)
-
     papers_by_id = {p.id: p for p in all_papers}
+
+    def report(message: str) -> None:
+        if progress:
+            progress(message)
+
+    vectors = None
+    embedding_status = "skipped"
+    embed_started = time.monotonic()
+    if len(all_papers) >= 2:
+        try:
+            report("计算一次语义向量，用于聚类和关系边...")
+            docs = [f"{p.title or ''}\n{(p.abstract or '')[:300]}" for p in all_papers]
+            async with asyncio.timeout(12.0):
+                vectors = await run_cpu_bound(embed_texts, docs)
+            if not vectors or len(vectors) != len(all_papers):
+                raise ValueError("embedding count mismatch")
+            embedding_status = "available"
+        except TimeoutError:
+            embedding_status = "timeout"
+            degraded_reasons.append("embedding_timeout")
+            vectors = None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("map embedding failed: %s", exc)
+            embedding_status = "fallback"
+            degraded_reasons.append("embedding_unavailable")
+            vectors = None
+    stage_ms["embedding"] = round((time.monotonic() - embed_started) * 1000, 1)
+
+    cluster_started = time.monotonic()
+    cluster_of = await run_cpu_bound(
+        cluster_papers, all_papers, sub_directions, None, vectors)
     groups: dict[int, list[str]] = {}
     for pid, cid in cluster_of.items():
         groups.setdefault(cid, []).append(pid)
-
     clusters = []
     for cid in sorted(groups):
-        pids = sorted(groups[cid],
-                      key=lambda pid: papers_by_id[pid].citation_count or 0,
+        pids = sorted(groups[cid], key=lambda pid: papers_by_id[pid].citation_count or 0,
                       reverse=True)
         clusters.append({
-            "id": cid,
-            "label": f"主题簇 {cid + 1}",
-            "overview": "",
+            "id": cid, "label": f"主题簇 {cid + 1}", "overview": "",
             "paper_ids": pids,
             "papers": [{"id": pid, "title": papers_by_id[pid].title,
                         "year": papers_by_id[pid].year,
                         "citation_count": papers_by_id[pid].citation_count or 0}
                        for pid in pids],
         })
-
-    report("生成簇标签与领域脉络...")
-    await _label_clusters(clusters, papers_by_id, language)
-    landscape = await _landscape(clusters, papers_by_id, language)
     timeline = build_timeline(all_papers)
+    stage_ms["clustering"] = round((time.monotonic() - cluster_started) * 1000, 1)
 
-    report("构建论文谱系图数据...")
-    graph = await build_genealogy(all_papers, cluster_of)
-    report("论文谱系图数据已生成")
-
+    report("并行生成簇概述与批量引文增强...")
+    summary_started = time.monotonic()
+    graph_started = summary_started
+    summary_task = asyncio.create_task(_summarize_map(clusters, papers_by_id, language))
+    graph_task = asyncio.create_task(build_genealogy(
+        all_papers, cluster_of, embed_fn=None, vectors=vectors, citation_mode=citation_mode))
+    landscape, summary_status = await summary_task
+    stage_ms["summary"] = round((time.monotonic() - summary_started) * 1000, 1)
+    try:
+        graph = await graph_task
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("genealogy enhancement failed, returning node-only map: %s", exc)
+        graph = _fallback_graph(all_papers, cluster_of, "unavailable")
+        degraded_reasons.append("genealogy_unavailable")
+    stage_ms["genealogy"] = round((time.monotonic() - graph_started) * 1000, 1)
+    if summary_status != "available":
+        degraded_reasons.append("summary_fallback")
+    citation_status = graph.get("citation_enrichment_status", "unavailable")
+    if citation_status not in {"available", "no_doi", "disabled"}:
+        degraded_reasons.append(f"citation_{citation_status}")
+    stage_ms["total"] = round((time.monotonic() - started) * 1000, 1)
+    degraded = bool(degraded_reasons)
+    logger.info(
+        "research_map_complete papers=%d citation_mode=%s citation_status=%s "
+        "embedding_status=%s summary_status=%s degraded=%s stage_ms=%s reasons=%s",
+        len(all_papers), citation_mode, citation_status, embedding_status,
+        summary_status, degraded, stage_ms, ",".join(degraded_reasons))
+    report("研究地图已生成")
     return {
-        "clusters": clusters,
-        "timeline": timeline,
-        "landscape": landscape,
-        "graph": graph,
+        "clusters": clusters, "timeline": timeline, "landscape": landscape,
+        "graph": graph, "degraded": degraded,
+        "embedding_status": embedding_status, "summary_status": summary_status,
+        "citation_mode": citation_mode,
+        "citation_enrichment_status": citation_status,
+        "stage_ms": stage_ms, "degraded_reasons": degraded_reasons,
     }
 
 

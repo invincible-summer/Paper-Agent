@@ -219,3 +219,40 @@ def _iter_papers_with_doi(papers: list[Paper]):
     for p in papers:
         if p.doi:
             yield p.id, p.doi
+
+async def fetch_citation_bundle(dois: list[str]) -> tuple[dict[str, list[str]], dict[str, str], str]:
+    """Fetch DOI -> OpenAlex id/references with one batched works request.
+
+    OpenAlex accepts a pipe-separated DOI filter (up to 100 values).  Citation
+    enrichment is optional, so an unavailable response is represented by the
+    status string rather than raised to the map builder.
+    """
+    normalized = list(dict.fromkeys(_norm_doi(d) for d in dois if _norm_doi(d)))[:100]
+    if not normalized:
+        return {}, {}, "no_doi"
+    params = {
+        "filter": "doi:" + "|".join(normalized),
+        "select": "id,doi,referenced_works",
+        "per-page": min(len(normalized), 100),
+        **_auth_params(),
+    }
+    try:
+        client = get_search_http_client()
+        async with _limiter:
+            resp = await _limiter.fetch(client, "GET", API_URL, params=params)
+        if resp.status_code != 200:
+            return {}, {}, "unavailable"
+        refs: dict[str, list[str]] = {}
+        ids: dict[str, str] = {}
+        for item in resp.json().get("results") or []:
+            doi = _norm_doi(item.get("doi"))
+            if not doi:
+                continue
+            ids[doi] = str(item.get("id") or "")
+            refs[doi] = list(item.get("referenced_works") or [])
+        return refs, ids, "available"
+    except asyncio.TimeoutError:
+        return {}, {}, "timeout"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OpenAlex citation batch failed: %s", exc)
+        return {}, {}, "unavailable"

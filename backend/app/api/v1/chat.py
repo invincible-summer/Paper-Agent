@@ -1,6 +1,7 @@
 """Chat API: conversational agent with SSE streaming + chat history CRUD."""
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -81,6 +82,7 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(None)
                             x_guest_id: str | None = Header(None)):
     """SSE endpoint for conversational chat with tool-calling."""
     from agents.chat_agent import ChatSession, chat_turn, load_chat_history, save_chat_history
+    from core.turn_execution import TurnExecutionContext
 
     user = current_user(authorization, x_guest_id)
     uid = user["id"]
@@ -105,6 +107,9 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(None)
     def progress_cb(msg: str):
         progress_queue.put_nowait(("progress", msg))
 
+    execution = TurnExecutionContext(
+        channel="web", soft_timeout_seconds=240.0, hard_timeout_seconds=300.0)
+
     async def event_stream():
         tool_call_active = False
 
@@ -112,7 +117,8 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(None)
             nonlocal tool_call_active
             async for event in chat_turn(req.message, session, progress_cb,
                                           attachments=request_attachments,
-                                          regenerate=req.regenerate):
+                                          regenerate=req.regenerate,
+                                          execution_context=execution):
                 if event["type"] in ("tool_start",):
                     tool_call_active = True
                 # D-071: accumulate trace_id so save_chat_history links the trace
@@ -121,9 +127,12 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(None)
                         session.trace_ids.append(event["trace_id"])
                 await progress_queue.put(("event", event))
 
-            # Save history after turn completes
-            fname = save_chat_history(session, user_id=uid)
-            await progress_queue.put(("saved", fname))
+            # A soft deadline is a normal, saveable degraded completion.
+            # Hard cancellation exits before this block and must not persist a
+            # half-turn.
+            if not execution.hard_expired() and not execution.cancelled():
+                fname = save_chat_history(session, user_id=uid)
+                await progress_queue.put(("saved", fname))
 
         task = asyncio.create_task(run_chat())
         elapsed = 0
@@ -137,9 +146,18 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(None)
         try:
             while True:
                 try:
-                    item = await asyncio.wait_for(progress_queue.get(), timeout=15.0)
+                    remaining_hard = execution.remaining_hard()
+                    wait_seconds = min(15.0, remaining_hard) if remaining_hard is not None else 15.0
+                    item = await asyncio.wait_for(progress_queue.get(), timeout=max(0.001, wait_seconds))
                     elapsed = 0
                 except asyncio.TimeoutError:
+                    if execution.hard_expired():
+                        execution.cancel()
+                        if not task.done():
+                            task.cancel()
+                        error = {"type": "deadline_exceeded", "message": "本轮已超过 300 秒硬时限，未保存半轮历史。"}
+                        yield f"event: error\ndata: {json.dumps(error, ensure_ascii=False)}\n\n"
+                        break
                     # Heartbeat: keep connection alive, show user we are still working
                     elapsed += 15
                     hb = {"type": "heartbeat", "elapsed": elapsed}
@@ -161,7 +179,14 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(None)
                     yield f"event: history_saved\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
                     break
 
-            await task
+            try:
+                await task
+            except asyncio.CancelledError:
+                if not execution.hard_expired():
+                    raise
+            logger.info("web_stream_complete elapsed_ms=%d phase=%s timeout_count=%d timeout_kind=%s cancelled=%s",
+                        round(execution.elapsed() * 1000), execution.phase, execution.timeout_count,
+                        execution.last_timeout_kind, execution.cancelled())
         finally:
             # Client disconnected / aborted: cancel the in-flight turn.
             if not task.done():

@@ -25,6 +25,8 @@ class TurnExecutionContext:
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     phase: str = "preparing"
     last_progress: str = ""
+    last_timeout_kind: str = ""
+    timeout_count: int = 0
 
     @classmethod
     def openai_api(
@@ -78,6 +80,16 @@ class TurnExecutionContext:
         self.last_progress = text[:500]
         if self.progress_cb is not None:
             self.progress_cb(self.last_progress)
+
+    def timeout_for(self, preferred: float | None, *, reserve: float = 0.0) -> tuple[float | None, str]:
+        """Return effective timeout and whether it is tool or turn-budget limited."""
+        remaining = self.remaining_soft()
+        if remaining is None:
+            return (float(preferred) if preferred is not None else None, "tool_budget")
+        available = max(0.0, remaining - max(0.0, reserve))
+        if preferred is None or available <= float(preferred):
+            return max(0.001, available), "turn_budget"
+        return max(0.001, float(preferred)), "tool_budget"
 
     def bounded_timeout(self, preferred: float | None, *, reserve: float = 0.0) -> float | None:
         """Return a timeout capped by the remaining soft budget.

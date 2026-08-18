@@ -179,3 +179,9 @@ tools/           search/（9 数据源 + OpenAlex 引用边）· pdf/（OA-only 
 frontend/        Next.js chat 单页：对话 + 工具卡片 + 谱系图 v2（确定性布局纯函数 + 详情面板）
 tests/           pytest（纯函数 + stubbed LLM/VLM/Docling）+ eval/ 黄金集
 ```
+
+### 管理员性能策略与研究地图降级
+
+管理员可在 `/admin/performance` 配置启动预热（`blocking`、`background`、`role_first`、`off`）和研究地图引文增强（`fast`、`quality`、`off`）。预热只做本地 Python 导入与客户端构造，不调用模型或下载文件；`role_first` 的流式 `/v1` 请求会先发送标准 `role` 帧，非流式请求仍需在处理时完成冷加载。地图引文由后端批量请求 OpenAlex，默认最多等待 3 秒，策略关闭或 OpenAlex 搜索源关闭时不会发起请求。
+
+研究地图的聚类和语义边共享一次嵌入，地图概述与领域脉络共享一次有预算的 utility 调用，并与可选引文增强并发。嵌入、LLM、OpenAlex 任一失败都会保留节点、时间线、Markdown/SVG 附件并返回降级状态；相同论文/全文状态/提示版本/引文策略指纹会跨轮复用地图。Web 渠道使用 240 秒软时限/300 秒硬时限，`/v1` 继续使用 95 秒/105 秒；`search_papers` 与 `research_map` 每轮最多实际开始一次，超时后当前轮不会再次调用。

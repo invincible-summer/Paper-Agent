@@ -55,3 +55,7 @@ storage:
   chroma_dir: "data/chroma"
   embedding_model: "paraphrase-multilingual-MiniLM-L12-v2"  # local bilingual embedder (~120MB, CPU, offline)
   reranker_model: "BAAI/bge-reranker-base"  # cross-encoder reranker (~1.1GB, CPU; "" disables, falls back to RRF order)
+
+performance:
+  startup_prewarm_mode: blocking
+  map_citation_mode: fast

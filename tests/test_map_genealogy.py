@@ -167,3 +167,29 @@ def test_build_genealogy_times_out_optional_citation_enrichment(monkeypatch):
     ))
     assert graph["citation_enrichment_status"] == "timeout"
     assert len(graph["nodes"]) == 2
+
+
+def test_research_map_uses_one_embedding_and_one_summary_call(monkeypatch):
+    from agents import map_agent
+
+    papers = _papers(4)
+    calls = {"embed": 0, "llm": 0}
+
+    def embed(docs):
+        calls["embed"] += 1
+        return _fake_embed(docs)
+
+    class Response:
+        content = '{"clusters":[{"id":"0","label":"主题","overview":"概述"}],"landscape":"脉络"}'
+
+    async def utility(_llm, _messages):
+        calls["llm"] += 1
+        return Response()
+
+    monkeypatch.setattr(map_agent, "embed_texts", embed)
+    monkeypatch.setattr(map_agent, "ainvoke_utility", utility)
+    monkeypatch.setattr(map_agent, "get_llm", lambda _name: object())
+    result = asyncio.run(map_agent.build_research_map(papers, [], [], "zh", citation_mode="off"))
+    assert calls == {"embed": 1, "llm": 1}
+    assert result["citation_enrichment_status"] == "disabled"
+    assert result["graph"]["nodes"]

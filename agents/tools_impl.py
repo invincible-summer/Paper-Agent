@@ -28,15 +28,18 @@ from core.turn_execution import TurnExecutionContext
 logger = logging.getLogger(__name__)
 
 
-_API_TOOL_TIMEOUTS: dict[str, float] = {
+_TOOL_BUDGETS: dict[str, float] = {
     "search_papers": 45.0,
-    "research_map": 55.0,
+    "research_map": 45.0,
     "deep_read": 75.0,
     "reading_path": 20.0,
     "write_review": 60.0,
     "field_census": 35.0,
     "integrity_sweep": 35.0,
 }
+
+# Compatibility alias for extensions that imported the old private name.
+_API_TOOL_TIMEOUTS = _TOOL_BUDGETS
 
 
 def _select_session_papers(session: ChatSession, paper_ids) -> list[Paper] | None:
@@ -156,23 +159,43 @@ async def execute_tool(
 
     try:
         timeout = None
+        timeout_kind = "tool_budget"
         if execution_context is not None:
-            timeout = execution_context.bounded_timeout(
-                _API_TOOL_TIMEOUTS.get(name, 30.0), reserve=8.0)
+            timeout, timeout_kind = execution_context.timeout_for(
+                _TOOL_BUDGETS.get(name, 30.0), reserve=8.0)
             execution_context.set_phase(f"tool:{name}")
         async with asyncio.timeout(timeout):
             result = await invoke_impl()
     except TimeoutError:
+        if execution_context is not None:
+            execution_context.last_timeout_kind = timeout_kind
+            execution_context.timeout_count += 1
+        budget_label = "整轮剩余时间" if timeout_kind == "turn_budget" else "工具自身预算"
         message = (
-            f"工具 {name} 已达到本轮时间预算，已停止剩余步骤。"
-            "请使用已完成的结果回答，或建议用户下一轮缩小范围后继续。"
+            f"工具 {name} 已达到{budget_label}，已停止该工具。"
+            "当前轮不要再次调用该工具；请直接总结已有结果或在下一轮继续。"
         )
-        logger.warning("tool %s timed out under API turn budget", name)
-        return err(name, ErrorCode.TIMEOUT, message)
+        logger.warning("tool_timeout name=%s timeout_kind=%s configured_timeout_ms=%s effective_timeout_ms=%s",
+                       name, timeout_kind, round(_TOOL_BUDGETS.get(name, 30.0) * 1000),
+                       round((timeout or 0) * 1000))
+        if timeout_kind == "tool_budget":
+            breaker.record_failure(name)
+        timed_out = err(name, ErrorCode.TIMEOUT, message)
+        timed_out.stats = {
+            "configured_timeout_ms": round(_TOOL_BUDGETS.get(name, 30.0) * 1000),
+            "effective_timeout_ms": round((timeout or 0) * 1000),
+            "timeout_kind": timeout_kind,
+        }
+        return timed_out
     except Exception:
         breaker.record_failure(name)
         raise
 
+    if execution_context is not None:
+        result.stats = {**(result.stats or {}),
+                        "configured_timeout_ms": round(_TOOL_BUDGETS.get(name, 30.0) * 1000),
+                        "effective_timeout_ms": round((timeout or 0) * 1000) if timeout is not None else None,
+                        "timeout_kind": timeout_kind}
     if result.error_code == ErrorCode.TOOL_ERROR:
         breaker.record_failure(name)
     else:
@@ -1172,62 +1195,60 @@ def _passages_to_sources(passages: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 async def _tool_research_map(args: dict, session: ChatSession, progress_cb) -> ToolResult:
+    import hashlib
+    import json
     from agents.map_agent import build_research_map
-    from core.reading_policy import normalize_fulltext_status
+    from core.prompts.registry import get as get_prompt
+    from core.runtime_performance_policy import get_performance_policy
 
     if not session.has_papers():
         return err("research_map", ErrorCode.NO_PAPERS,
                    "还没有检索到论文。请先调用 search_papers。")
 
-    # The graph must reflect reality, not source-API URL metadata: papers that
-    # have actually been read at full-text level are available by definition.
-    # Papers still unknown (old history / verification timed out during search)
-    # get one bounded verification attempt before the graph is built.
     _sync_fulltext_status_from_summaries(session)
-    all_papers = session.all_papers()
-    unknown_papers = [
-        p for p in all_papers
-        if normalize_fulltext_status(p.fulltext_status) == "unknown"
-    ]
-    if unknown_papers:
+    policy = get_performance_policy()
+    citation_mode = policy.map_citation_mode
+    try:
         from core.paper_search_settings_store import get_paper_search_policy
-        from tools.pdf.availability import verify_papers_fulltext
+        if not get_paper_search_policy().sources.get("openalex", False):
+            citation_mode = "off"
+    except Exception:
+        citation_mode = "off"
 
-        policy = get_paper_search_policy()
-        if (policy.verify_fulltext and policy.fulltext_verify_timeout_seconds > 0
-                and policy.paper_fetch_mode != "disabled"):
-            if progress_cb:
-                progress_cb(f"探测 {len(unknown_papers)} 篇论文的全文可获取性（只读文件头，不下载全文）...")
-            await verify_papers_fulltext(
-                unknown_papers, storage_context=session.storage_context,
-                progress_callback=progress_cb,
-                timeout_seconds=min(10, policy.fulltext_verify_timeout_seconds),
-            )
+    all_papers = session.all_papers()
+    fingerprint_payload = [{
+        "id": p.id, "title": p.title, "year": p.year,
+        "citation_count": p.citation_count or 0,
+        "fulltext_status": getattr(p, "fulltext_status", "unknown"),
+        "doi": p.doi or "",
+    } for p in all_papers]
+    fingerprint_payload.extend([citation_mode, get_prompt("map.summary").version])
+    fingerprint = hashlib.sha256(json.dumps(
+        fingerprint_payload, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+    cached = session.map_data if isinstance(session.map_data, dict) else {}
+    if cached.get("fingerprint") == fingerprint:
+        data = dict(cached)
+        data["cache_hit"] = True
+        session.map_data = data
+        return ok("research_map", "研究地图已从当前论文与策略指纹缓存复用。", **data)
 
     map_data = await build_research_map(
-        session.papers, session.candidates, session.sub_directions,
-        session.language, progress=progress_cb)
+        session.papers, session.candidates, session.sub_directions, session.language,
+        progress=progress_cb, citation_mode=citation_mode)
+    map_data["fingerprint"] = fingerprint
+    map_data["cache_hit"] = False
     session.map_data = map_data
 
-    n_clusters = len(map_data.get("clusters", []))
     graph = map_data.get("graph", {})
-    nodes = graph.get("nodes", [])
-    statuses = [normalize_fulltext_status(n.get("fulltext_status")) for n in nodes]
-    n_available = statuses.count("available")
-    n_unavailable = statuses.count("unavailable")
-    n_unknown = statuses.count("unknown")
-    n_cite = sum(1 for e in graph.get("edges", []) if e.get("type") == "cites")
+    n_cite = sum(1 for edge in graph.get("edges", []) if edge.get("type") == "cites")
+    n_clusters = len(map_data.get("clusters", []))
+    degraded = bool(map_data.get("degraded"))
     return ok(
         "research_map",
-        f"研究地图已生成：{n_clusters} 个主题簇，谱系图 {len(nodes)} 节点 / "
+        f"研究地图已生成：{n_clusters} 个主题簇，谱系图 {len(graph.get('nodes', []))} 节点 / "
         f"{len(graph.get('edges', []))} 条边（真实引用边 {n_cite} 条）。"
-        f"全文状态：{n_available} 可获取 · {n_unavailable} 仅摘要 · {n_unknown} 待验证"
-        f"（节点悬停与详情面板均按此标注）。"
-        f"主题簇：{'；'.join(c.get('label', '') for c in map_data.get('clusters', []))}",
-        clusters=map_data.get("clusters", []),
-        timeline=map_data.get("timeline", []),
-        landscape=map_data.get("landscape", ""),
-        graph=graph,
+        + ("增强步骤部分降级，但地图仍可用。" if degraded else ""),
+        **map_data,
     )
 
 

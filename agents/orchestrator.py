@@ -489,6 +489,10 @@ async def chat_turn(
     all_tool_calls: list[dict] = []
     executed_tool_count = 0
     seen_calls: set[str] = set()
+    # Budgeted heavy tools may start at most once per turn.  Validation errors
+    # are excluded, so the model can correct malformed arguments.
+    budgeted_tool_calls: dict[str, int] = {}
+    _BUDGETED_TOOLS = {"search_papers", "research_map"}
     iterations = 0
     turn_thinking_parts: list[str] = []
     empty_retries = 0
@@ -704,6 +708,10 @@ async def chat_turn(
         async def invoke_entry(entry: dict) -> ToolResult:
             tc = entry["tc"]
             name = tc.get("name", "unknown")
+            if name in _BUDGETED_TOOLS and budgeted_tool_calls.get(name, 0) >= 1:
+                return err(name, ErrorCode.TIMEOUT,
+                           f"工具 {name} 本轮已开始执行过一次。当前轮不要再次调用该工具；"
+                           "请直接总结已有结果或在下一轮继续。")
             started = asyncio.get_running_loop().time()
             trace.event("tool_call_start", name=name, args=tc.get("args", {}))
             try:
@@ -717,8 +725,12 @@ async def chat_turn(
                 except (TypeError, ValueError):
                     pass
                 result = await execute_tool(tc, session, progress_cb, **kwargs)
+                if name in _BUDGETED_TOOLS and result.error_code != ErrorCode.VALIDATION_ERROR:
+                    budgeted_tool_calls[name] = budgeted_tool_calls.get(name, 0) + 1
             except Exception as exc:  # tool failure is data, not a stream failure
                 result = err(name, ErrorCode.TOOL_ERROR, str(exc))
+                if name in _BUDGETED_TOOLS:
+                    budgeted_tool_calls[name] = budgeted_tool_calls.get(name, 0) + 1
             latency_ms = round(
                 (asyncio.get_running_loop().time() - started) * 1000, 1)
             trace.total_latency_ms += latency_ms
@@ -726,6 +738,9 @@ async def chat_turn(
                 "tool_call_end", name=name, status=result.status,
                 error_code=result.error_code,
                 latency_ms=latency_ms,
+                configured_timeout_ms=(result.stats or {}).get("configured_timeout_ms"),
+                effective_timeout_ms=(result.stats or {}).get("effective_timeout_ms"),
+                timeout_kind=(result.stats or {}).get("timeout_kind", ""),
             )
             return result
 

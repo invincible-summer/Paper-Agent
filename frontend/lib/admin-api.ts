@@ -391,3 +391,34 @@ export async function getLatestPaperDiagnostics(): Promise<{
   });
   return parseResponse(res);
 }
+
+export type StartupPrewarmMode = "blocking" | "background" | "role_first" | "off";
+export type MapCitationMode = "fast" | "quality" | "off";
+export interface PerformancePolicy {
+  startup_prewarm_mode: StartupPrewarmMode;
+  map_citation_mode: MapCitationMode;
+  version: number;
+  updated_by: string;
+  updated_at: number;
+}
+export interface PerformancePolicyResponse {
+  settings: PerformancePolicy;
+  defaults: { startup_prewarm_mode: StartupPrewarmMode; map_citation_mode: MapCitationMode };
+  openalex_enabled: boolean;
+  effective_map_citation_mode: MapCitationMode;
+  map_citation_disabled_reason: string;
+  prewarm: { active_mode: string; prewarm_state: string; duration_ms: number; last_error: string };
+  restart_required: boolean;
+}
+
+export async function getPerformancePolicy(): Promise<PerformancePolicyResponse> {
+  const res = await fetch(`${BASE}/performance-policy`, { headers: authHeaders(), cache: "no-store" });
+  return parseResponse(res);
+}
+export async function updatePerformancePolicy(expectedVersion: number, changes: Partial<PerformancePolicy>): Promise<PerformancePolicyResponse> {
+  const res = await fetch(`${BASE}/performance-policy`, {
+    method: "PUT", headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ expected_version: expectedVersion, ...changes }),
+  });
+  return parseResponse(res);
+}

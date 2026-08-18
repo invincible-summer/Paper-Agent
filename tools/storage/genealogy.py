@@ -34,23 +34,26 @@ from core.reading_policy import (
 
 logger = logging.getLogger(__name__)
 _CITATION_ENRICHMENT_TIMEOUT_SECONDS = 8.0
+_CITATION_TIMEOUTS = {"fast": 3.0, "quality": 8.0, "off": 0.0}
 
 _SEMANTIC_TAU = 0.5        # cosine threshold for semantic edges
 _MAX_SEMANTIC_EDGES_PER_NODE = 3
 
 
 def compute_semantic_edges(papers: list[Paper], existing_pairs: set[tuple[str, str]],
-                           embed_fn=embed_texts) -> list[dict]:
+                           embed_fn=embed_texts, vectors=None) -> list[dict]:
     """Cosine-similarity edges between papers not already citation-linked.
 
     Pure-ish (embed_fn injectable). Returns [{source, target, type:"semantic",
     weight}]. Caps edges per node to avoid a hairball.
     """
-    if embed_fn is None or len(papers) < 2:
+    if (embed_fn is None and vectors is None) or len(papers) < 2:
         return []
     try:
-        docs = [f"{p.title or ''}\n{(p.abstract or '')[:300]}" for p in papers]
-        vecs = embed_fn(docs)
+        vecs = vectors
+        if vecs is None:
+            docs = [f"{p.title or ''}\n{(p.abstract or '')[:300]}" for p in papers]
+            vecs = embed_fn(docs)
     except Exception as e:  # noqa: BLE001
         logger.warning("semantic edge embedding failed: %s", e)
         return []
@@ -124,57 +127,63 @@ def compute_roles(papers: list[Paper], citation_edges: list[tuple[str, str]]) ->
     return roles
 
 
-async def fetch_citation_edges(papers: list[Paper]) -> tuple[list[tuple[str, str]], str]:
-    """Real directed citation edges among the given papers (OpenAlex).
-
-    Any failure degrades to [] — the graph still renders with semantic edges.
-    """
+async def fetch_citation_edges(papers: list[Paper], citation_mode: str = "fast") -> tuple[list[tuple[str, str]], str]:
+    """Fetch in-library citation edges using one batched OpenAlex request."""
     from tools.search import openalex_refs
-
+    if citation_mode == "off":
+        return [], "disabled"
     dois = [p.doi for p in papers if p.doi]
     if not dois:
         return [], "no_doi"
     try:
         from core.paper_search_settings_store import get_paper_search_policy
         from core.search_source_health import get_search_health_registry
-
         if not get_paper_search_policy().sources.get("openalex", True):
             return [], "disabled"
         health = get_search_health_registry()
         allowed, state, _ = health.allow("openalex")
         if not allowed:
             return [], f"breaker_{state}"
-        if state == "half_open":
-            dois = dois[:1]
-        refs_by_doi = await openalex_refs.fetch_referenced_works(dois)
-        doi_to_oa = await openalex_refs.resolve_openalex_ids(dois)
-        current = health.get("openalex")
-        status = (
-            "unavailable"
-            if current.get("last_error_code") in {
-                "rate_limited", "timeout", "connection_error", "server_error",
-                "invalid_response",
-            }
-            else "available"
-        )
-        return openalex_refs.build_citation_edges(papers, refs_by_doi, doi_to_oa), status
+        timeout = _CITATION_TIMEOUTS.get(citation_mode, 3.0)
+        async with asyncio.timeout(timeout):
+            refs_by_doi, doi_to_oa, status = await openalex_refs.fetch_citation_bundle(dois)
+        if status == "available":
+            current = health.get("openalex")
+            if current.get("last_error_code") in {"rate_limited", "timeout", "connection_error", "server_error", "invalid_response"}:
+                status = "unavailable"
+            else:
+                edges = openalex_refs.build_citation_edges(papers, refs_by_doi, doi_to_oa)
+                health.record_success("openalex")
+                return edges, status
+        return [], status
     except TimeoutError:
         return [], "timeout"
-    except Exception as e:  # noqa: BLE001
-        logger.warning("citation edge fetch failed: %s", e)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("citation edge fetch failed: %s", exc)
         return [], "unavailable"
 
 
 async def build_genealogy(papers: list[Paper], cluster_of: dict[str, int],
-                          embed_fn=embed_texts) -> dict[str, Any]:
+                          embed_fn=embed_texts, *, vectors=None, citation_mode: str = "fast") -> dict[str, Any]:
     """Full genealogy payload for the frontend.
 
     papers: core set + candidates. cluster_of: paper_id -> cluster index.
     Returns {nodes, edges}.
     """
     try:
-        async with asyncio.timeout(_CITATION_ENRICHMENT_TIMEOUT_SECONDS):
-            citation_result = await fetch_citation_edges(papers)
+        configured_timeout = min(
+            _CITATION_TIMEOUTS.get(citation_mode, _CITATION_ENRICHMENT_TIMEOUT_SECONDS),
+            _CITATION_ENRICHMENT_TIMEOUT_SECONDS,
+        )
+        async with asyncio.timeout(configured_timeout or 0.001):
+            try:
+                citation_result = await fetch_citation_edges(papers, citation_mode)
+            except TypeError as exc:
+                # Compatibility for tests/plugins that monkeypatch the legacy
+                # one-argument helper. Do not mask unrelated TypeErrors.
+                if "positional argument" not in str(exc):
+                    raise
+                citation_result = await fetch_citation_edges(papers)
             if isinstance(citation_result, tuple) and len(citation_result) == 2:
                 citation_edges, citation_status = citation_result
             else:  # compatibility for tests/third-party monkeypatches
@@ -185,7 +194,7 @@ async def build_genealogy(papers: list[Paper], cluster_of: dict[str, int],
     cite_pairs = set(citation_edges)
     from core.blocking import run_cpu_bound
     semantic_edges, roles = await run_cpu_bound(
-        _compute_graph_enrichment, papers, cite_pairs, citation_edges, embed_fn
+        _compute_graph_enrichment, papers, cite_pairs, citation_edges, embed_fn, vectors
     )
 
     nodes = []
@@ -221,9 +230,9 @@ async def build_genealogy(papers: list[Paper], cluster_of: dict[str, int],
     }
 
 
-def _compute_graph_enrichment(papers, cite_pairs, citation_edges, embed_fn):
+def _compute_graph_enrichment(papers, cite_pairs, citation_edges, embed_fn, vectors=None):
     """CPU-only graph work, kept outside the shared asyncio event loop."""
-    semantic_edges = compute_semantic_edges(papers, cite_pairs, embed_fn=embed_fn)
+    semantic_edges = compute_semantic_edges(papers, cite_pairs, embed_fn=embed_fn, vectors=vectors)
     roles = compute_roles(papers, citation_edges)
     return semantic_edges, roles
 

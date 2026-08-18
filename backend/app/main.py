@@ -1,4 +1,5 @@
 """FastAPI application factory."""
+import asyncio
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -15,11 +16,38 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 
 
+def _prewarm_agent_stack(mode: str = "blocking") -> dict:
+    """Testable compatibility wrapper for the local, best-effort warmup."""
+    from core.prewarm import prewarm_agent_stack
+    return prewarm_agent_stack(mode)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Runtime policy is stored in users.db.  Warmup is local-only and best
+    # effort; failure must never prevent the HTTP server from becoming ready.
+    background_task = None
     try:
+        from core.runtime_performance_policy import get_performance_policy
+        policy = get_performance_policy()
+        mode = policy.startup_prewarm_mode
+        if mode == "blocking":
+            await asyncio.to_thread(_prewarm_agent_stack, mode)
+        elif mode == "background":
+            background_task = asyncio.create_task(
+                asyncio.to_thread(_prewarm_agent_stack, mode))
+        else:
+            from core.prewarm import _set
+            _set(active_mode=mode, prewarm_state="disabled")
         yield
     finally:
+        if background_task is not None and not background_task.done():
+            background_task.cancel()
+        try:
+            if background_task is not None:
+                await background_task
+        except (asyncio.CancelledError, Exception):
+            pass
         from tools.search.http_client import close_search_http_clients
         await close_search_http_clients()
 

@@ -146,6 +146,7 @@ const NAV_ITEMS = [
   { href: "/admin/agent-keys", label: "Agent Keys", icon: KeyRound },
   { href: "/admin/display-policy", label: "卡片策略", icon: LayoutGrid },
   { href: "/admin/paper-search", label: "论文检索", icon: Search },
+  { href: "/admin/performance", label: "性能策略", icon: RefreshCw },
   { href: "/admin/api-storage", label: "API 存储", icon: Database },
   { href: "/admin/accounts-data", label: "账号数据", icon: Trash2 },
 ];

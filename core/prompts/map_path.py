@@ -45,3 +45,10 @@ def get_landscape_prompt() -> str:
 
 def get_reading_path_prompt() -> str:
     return get("path.reading_reasons").text
+
+_MAP_SUMMARY = """以下是同一研究领域按语义或词项重叠形成的论文簇。\n\n{clusters_text}\n\n请一次完成：\n1. 为每个簇生成简短 label（中文不超过12字 / English no more than 6 words）与 1-2 句 overview；\n2. 用 3-5 句话生成 landscape，说明奠基方向、当前前沿以及方向间的演进、分化或交叉。\n{language_instruction}\n\n只输出 JSON 对象，不要 markdown：\n{{\"clusters\":[{{\"id\":\"0\",\"label\":\"...\",\"overview\":\"...\"}}],\"landscape\":\"...\"}}"""
+register("map.summary", 2, _MAP_SUMMARY)
+
+
+def get_map_summary_prompt() -> str:
+    return get("map.summary").text

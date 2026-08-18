@@ -99,12 +99,19 @@ class StorageConfig:
 
 
 @dataclass
+class PerformanceConfig:
+    startup_prewarm_mode: str = "blocking"
+    map_citation_mode: str = "fast"
+
+
+@dataclass
 class Settings:
     llm: LLMConfig = field(default_factory=LLMConfig)
     multimodal: MultimodalConfig = field(default_factory=MultimodalConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     reader: ReaderConfig = field(default_factory=ReaderConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
 
 
 def load_settings() -> Settings:
@@ -115,6 +122,12 @@ def load_settings() -> Settings:
             raw = yaml.safe_load(f) or {}
 
     s = Settings()
+
+    performance_raw = raw.get("performance", {})
+    s.performance = PerformanceConfig(
+        startup_prewarm_mode=os.getenv("STARTUP_PREWARM_MODE", performance_raw.get("startup_prewarm_mode", "blocking")),
+        map_citation_mode=os.getenv("MAP_CITATION_MODE", performance_raw.get("map_citation_mode", "fast")),
+    )
 
     llm_raw = raw.get("llm", {})
     s.llm = LLMConfig(

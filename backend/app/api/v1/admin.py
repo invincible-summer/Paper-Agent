@@ -628,3 +628,66 @@ async def get_paper_search_diagnostics_latest(
     from core.paper_search_settings_store import get_latest_diagnostics
 
     return await run_cpu_bound(get_latest_diagnostics)
+
+# ---------------------------------------------------------------------------
+# Runtime performance policy (startup warmup + research-map citations)
+# ---------------------------------------------------------------------------
+
+class PerformancePolicyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_version: int = Field(gt=0)
+    startup_prewarm_mode: Literal["blocking", "background", "role_first", "off"] | None = None
+    map_citation_mode: Literal["fast", "quality", "off"] | None = None
+
+    def changes(self) -> dict:
+        return self.model_dump(exclude={"expected_version"}, exclude_none=True)
+
+    @model_validator(mode="after")
+    def has_changes(self):
+        if not self.changes():
+            raise ValueError("至少提供一个性能策略字段")
+        return self
+
+
+def _performance_policy_response(policy) -> dict:
+    from dataclasses import asdict
+    from core.prewarm import get_prewarm_state
+    from core.paper_search_settings_store import get_paper_search_policy
+
+    openalex_enabled = bool(get_paper_search_policy().sources.get("openalex", False))
+    effective_citation_mode = policy.map_citation_mode if openalex_enabled else "off"
+    warmup = get_prewarm_state()
+    return {
+        "settings": asdict(policy),
+        "defaults": {"startup_prewarm_mode": "blocking", "map_citation_mode": "fast"},
+        "openalex_enabled": openalex_enabled,
+        "effective_map_citation_mode": effective_citation_mode,
+        "map_citation_disabled_reason": "论文搜索策略已关闭 OpenAlex" if not openalex_enabled else "",
+        "prewarm": warmup,
+        "restart_required": warmup.get("active_mode") != policy.startup_prewarm_mode,
+    }
+
+
+@router.get("/performance-policy")
+def get_performance_policy_api(authorization: str | None = Header(None)) -> dict:
+    _administrator(authorization)
+    from core.runtime_performance_policy import get_performance_policy
+    return _performance_policy_response(get_performance_policy())
+
+
+@router.put("/performance-policy")
+def put_performance_policy_api(body: PerformancePolicyUpdate,
+                               authorization: str | None = Header(None)) -> dict:
+    admin = _administrator(authorization)
+    from core.runtime_performance_policy import (
+        PerformancePolicyVersionConflict, update_performance_policy,
+    )
+    try:
+        policy = update_performance_policy(
+            body.changes(), expected_version=body.expected_version, updated_by=admin["id"])
+    except PerformancePolicyVersionConflict:
+        raise HTTPException(409, "性能策略已被其他管理员修改，请刷新后重试") from None
+    response = _performance_policy_response(policy)
+    if "startup_prewarm_mode" in body.changes():
+        response["restart_required"] = True
+    return response

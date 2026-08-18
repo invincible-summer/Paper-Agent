@@ -109,6 +109,21 @@ _SSE_COALESCE_SECONDS = 0.05
 _SSE_COALESCE_CHARS = 256
 
 
+def _load_agent_stack():
+    """Import the heavy chat stack and return the callables used by this route."""
+    from agents.orchestrator import chat_turn
+    from tools.export.cards import (
+        render_skill_card, render_tool_card, resolve_full_card_tools, skill_display_title,
+    )
+    return chat_turn, render_skill_card, render_tool_card, resolve_full_card_tools, skill_display_title
+
+
+async def _load_agent_stack_async(*, threaded: bool):
+    if threaded:
+        return await asyncio.to_thread(_load_agent_stack)
+    return _load_agent_stack()
+
+
 def _check_auth(authorization: str | None):
     """Validate a Bearer credential and return a non-secret API principal.
 
@@ -607,16 +622,12 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         len(str(m.get("content", ""))) for m in (body.get("messages") or [])
     ) // 4
 
-    from agents.orchestrator import chat_turn
+    from core.runtime_performance_policy import get_performance_policy
+    startup_mode = get_performance_policy().startup_prewarm_mode
+    agent_stack = None
     from core.turn_execution import TurnExecutionContext
-    from tools.export.cards import (
-        render_skill_card,
-        render_tool_card,
-        resolve_full_card_tools,
-        skill_display_title,
-    )
 
-    async def prepare():
+    async def prepare(resolve_full_card_tools):
         prepared = await _prepare_turn(body, principal)
         (user_message, session, attachments, checkpoint_store,
          request_messages, checkpoint_scope, caller_system) = prepared
@@ -656,13 +667,15 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         }
 
     if not stream:
+        agent_stack = _load_agent_stack()
+        chat_turn, render_skill_card, render_tool_card, resolve_full_card_tools, skill_display_title = agent_stack
         execution = TurnExecutionContext.openai_api(
             soft_timeout_seconds=_API_SOFT_DEADLINE_SECONDS,
             hard_timeout_seconds=_API_HARD_DEADLINE_SECONDS,
         )
         try:
             async with asyncio.timeout(_API_HARD_DEADLINE_SECONDS):
-                prepared = await prepare()
+                prepared = await prepare(resolve_full_card_tools)
                 session = prepared["session"]
                 policy = prepared["policy"]
                 thinking_parts: list[str] = []
@@ -767,6 +780,11 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 }},
             )
 
+    # blocking/background/off retain the normal load-before-response order.
+    # role_first is the only mode that defers the import until after role.
+    if startup_mode != "role_first":
+        agent_stack = _load_agent_stack()
+
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
     execution: TurnExecutionContext
@@ -796,11 +814,15 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         frame_bytes = 0
         last_frame_at: float | None = None
         max_idle_gap = 0.0
+        first_role_ms: float | None = None
+        first_reasoning_ms: float | None = None
+        first_content_ms: float | None = None
 
         def frame(delta: dict, finish: str | None = None,
                   usage: dict | None = None, x_soda: dict | None = None,
                   error: dict | None = None) -> str:
             nonlocal frame_count, frame_bytes, last_frame_at, max_idle_gap
+            nonlocal first_role_ms, first_reasoning_ms, first_content_ms
             choice = {"index": 0, "delta": delta, "finish_reason": finish}
             chunk = {
                 "id": cid,
@@ -816,6 +838,13 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 chunk["error"] = error
             rendered = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             now = time.monotonic()
+            elapsed_ms = (now - request_started) * 1000
+            if delta.get("role") and first_role_ms is None:
+                first_role_ms = elapsed_ms
+            if delta.get("reasoning") and first_reasoning_ms is None:
+                first_reasoning_ms = elapsed_ms
+            if delta.get("content") and first_content_ms is None:
+                first_content_ms = elapsed_ms
             if last_frame_at is not None:
                 max_idle_gap = max(max_idle_gap, now - last_frame_at)
             last_frame_at = now
@@ -827,14 +856,18 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         # media fetching or any agent/tool work.
         yield frame({"role": "assistant"})
 
+        # role_first performs the heavy import in a worker after the role frame;
+        # other modes already loaded above (normally a prewarm cache hit).
+        stack = agent_stack or await _load_agent_stack_async(threaded=True)
+        loaded_chat_turn, render_skill_card, render_tool_card, resolve_full_card_tools, skill_display_title = stack
         state: dict = {}
 
         async def produce() -> None:
             try:
-                prepared = await prepare()
+                prepared = await prepare(resolve_full_card_tools)
                 state.update(prepared)
                 async for ev in _chat_turn_stream(
-                    chat_turn,
+                    loaded_chat_turn,
                     prepared["user_message"],
                     prepared["session"],
                     prepared["attachments"],
@@ -1061,12 +1094,15 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 pass
             logger.info(
                 "openai_stream_complete id=%s elapsed_ms=%d frames=%d bytes=%d "
-                "max_idle_ms=%d deadline=%s cancelled=%s",
+                "max_idle_ms=%d first_role_ms=%s first_reasoning_ms=%s first_content_ms=%s deadline=%s cancelled=%s",
                 cid,
                 round((time.monotonic() - request_started) * 1000),
                 frame_count,
                 frame_bytes,
                 round(max_idle_gap * 1000),
+                round(first_role_ms, 1) if first_role_ms is not None else None,
+                round(first_reasoning_ms, 1) if first_reasoning_ms is not None else None,
+                round(first_content_ms, 1) if first_content_ms is not None else None,
                 deadline_hit,
                 execution.cancelled(),
             )
