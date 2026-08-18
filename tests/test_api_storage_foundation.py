@@ -99,6 +99,38 @@ def test_schema_is_idempotent_wal_and_foreign_keys(tmp_path: Path):
     assert context.state_db.stat().st_size >= first
 
 
+def test_wal_sidecar_disappearing_during_security_hardening_is_ignored(
+    tmp_path: Path, monkeypatch
+):
+    context = StorageContext.openai_api(root_dir=tmp_path / "api")
+    store = ApiStorageStore(context)
+    store.initialize()
+    wal_path = Path(f"{context.state_db}-wal")
+    wal_path.write_bytes(b"sidecar")
+
+    original = StorageContext.secure_private_file
+
+    def disappear_once(self, path):
+        if Path(path) == wal_path:
+            wal_path.unlink()
+            raise StoragePathError("private storage file does not exist")
+        return original(self, path)
+
+    monkeypatch.setattr(StorageContext, "secure_private_file", disappear_once)
+    store._secure_db_files()
+
+
+def test_present_invalid_wal_sidecar_is_not_ignored(tmp_path: Path):
+    context = StorageContext.openai_api(root_dir=tmp_path / "api")
+    store = ApiStorageStore(context)
+    store.initialize()
+    wal_path = Path(f"{context.state_db}-wal")
+    wal_path.symlink_to(tmp_path / "missing-target")
+
+    with pytest.raises(StoragePathError):
+        store._secure_db_files()
+
+
 def test_exact_balanced_default_policy(tmp_path: Path):
     store = ApiStorageStore(StorageContext.openai_api(root_dir=tmp_path / "api"))
     store.initialize()

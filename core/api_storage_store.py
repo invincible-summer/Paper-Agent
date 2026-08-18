@@ -377,9 +377,20 @@ class ApiStorageStore:
         self._secure_db_files()
 
     def _secure_db_files(self) -> None:
-        for path in (self.db_path, Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm")):
-            if path.exists():
+        # The main database must always exist. SQLite WAL/SHM sidecars, however,
+        # can disappear between ``Path.exists()`` and chmod when the last
+        # connection closes and SQLite checkpoints/removes them. Treat that
+        # narrow sidecar TOCTOU as normal, while still surfacing a present,
+        # invalid sidecar (including a path/security violation).
+        self.context.secure_private_file(self.db_path)
+        for path in (Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm")):
+            if not os.path.lexists(path):
+                continue
+            try:
                 self.context.secure_private_file(path)
+            except (FileNotFoundError, StoragePathError):
+                if os.path.lexists(path):
+                    raise
 
     def _create_private_db_file(self) -> None:
         self.context.resolve_relative(self.db_path.relative_to(self.context.root_dir))
