@@ -1797,14 +1797,12 @@ sudo journalctl -u paper-agent-cleanup.service -n 100 --no-pager
 >
 > 本节只发布“清小搭文件输入协议与 API 上传策略”版本。应用代码目标固定为
 > `af3bf6dca40c634b8de86ba3439255c49d481557`，不得使用无版本边界的 `git pull` 或直接跟随未来的
-> `origin/main`。公网前端代码特征表明生产当前应为
-> `63a0799997fc7dc94fb0e140214d35b0a749b44b`；由于仓库没有保存云主机 SSH 登录用户名，且本地现有
-> SSH 身份不能登录该主机，下面的服务器预检必须在停服务前读取真实 HEAD 并做硬断言。HEAD、分支、
-> remote 或工作树任一项不符，就立即中止，不能猜测或强制更新。
+> `origin/main`。用户已于 2026-08-18 从生产服务器 shell 直接确认当前 HEAD 为
+> `63a0799997fc7dc94fb0e140214d35b0a749b44b`，SSH 登录用户为 `ecs-user`。服务器预检仍必须在停服务前
+> 再次读取 HEAD 并做硬断言；HEAD、分支、remote 或工作树任一项不符，就立即中止，不能猜测或强制更新。
 >
-> SSH 主机已确认是 `paper-agent.ycr10.cn`（公网 IPv4 `123.57.6.126`）。SSH 登录用户名只能使用云控制台
-> 中实际配置且已验证可登录的账号；本节不虚构用户名。登录后，所有“服务器端”命令都在同一个具有
-> `sudo` 权限的 SSH shell 中执行。
+> SSH 主机是 `paper-agent.ycr10.cn`（公网 IPv4 `123.57.6.126`），登录用户是 `ecs-user`。所有“服务器端”
+> 命令都在同一个具有 `sudo` 权限的 SSH shell 中执行。
 
 ### 30.1 版本边界、真实差异和发布影响
 
@@ -1891,11 +1889,10 @@ git merge-base --is-ancestor "$TARGET_REV" origin/main
 
 ### 30.3 SSH 登录和只读预检
 
-先在阿里云控制台确认真实 SSH 用户。开发机只修改第一行右侧，不要把密码或私钥写进命令历史：
+开发机使用已确认的生产 SSH 用户登录；不要把密码或私钥写进命令历史：
 
 ```bash
-export SSH_USER='填写云控制台中已验证的 SSH 用户名'
-ssh "$SSH_USER@paper-agent.ycr10.cn"
+ssh ecs-user@paper-agent.ycr10.cn
 ```
 
 登录后执行：
