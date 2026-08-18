@@ -3,7 +3,7 @@
 ## Project Structure & Architecture
 
 - `backend/app/` is the FastAPI HTTP layer: `/api/v1` for the web UI, `/v1` for OpenAI-compatible clients, `/files` for generated artifacts, and `/elements/assets/{paper_id}/{file}` for figure/table/formula crop images.
-- `agents/orchestrator.py` is the sole orchestration path. `agents/` contains specialist agents and tool dispatch; `core/` contains shared LLM, prompts, sessions, embeddings, tracing, configuration, and protocols.
+- `agents/orchestrator.py` is the single chat-turn entry point — streaming events, checkpoint callbacks and session state all hang off it — but it may freely dispatch work to specialist sub-agents. `agents/` already contains such sub-agents (search/reader/map/review) plus tool dispatch, and adding new sub-agent modules is allowed; sub-agents stay library calls inside the orchestrator's turn, never a second orchestration loop with its own event stream. `core/` contains shared LLM, prompts, sessions, embeddings, tracing, configuration, and protocols.
 - `tools/` contains search, OA-only PDF/ingestion, retrieval, storage, export, and writing modules. `skills/builtin/<name>/SKILL.md` contains zero-code workflow skills.
 - `frontend/` is the Next.js/React chat UI; `tests/` contains pytest coverage and `tests/eval/` golden datasets. Runtime settings are in `config/`; local artifacts live in `data/` and `history_record/`.
 - Read `README.md` for current usage and `docs/DESIGN.md` for the architecture before changing cross-layer behavior. The design document describes implemented behavior, not historical decisions.
