@@ -1793,24 +1793,570 @@ sudo journalctl -u paper-agent-cleanup.service -n 100 --no-pager
 
 ## 30. 当前版本专属云服务器更新步骤
 
-> **状态：尚未获得用户对当前版本上云更新的明确确认。**
+> **状态：已于 2026-08-18 获得用户对当前版本上云更新的明确确认。**
 >
-> 本节目前不是可执行发布方案，不得据此更新生产服务器。只有用户明确确认“将当前版本更新到云服务器”后，才允许根据当时的真实生产旧版本和目标 commit 重写本节。
+> 本节只发布“清小搭文件输入协议与 API 上传策略”版本。应用代码目标固定为
+> `af3bf6dca40c634b8de86ba3439255c49d481557`，不得使用无版本边界的 `git pull` 或直接跟随未来的
+> `origin/main`。公网前端代码特征表明生产当前应为
+> `63a0799997fc7dc94fb0e140214d35b0a749b44b`；由于仓库没有保存云主机 SSH 登录用户名，且本地现有
+> SSH 身份不能登录该主机，下面的服务器预检必须在停服务前读取真实 HEAD 并做硬断言。HEAD、分支、
+> remote 或工作树任一项不符，就立即中止，不能猜测或强制更新。
+>
+> SSH 主机已确认是 `paper-agent.ycr10.cn`（公网 IPv4 `123.57.6.126`）。SSH 登录用户名只能使用云控制台
+> 中实际配置且已验证可登录的账号；本节不虚构用户名。登录后，所有“服务器端”命令都在同一个具有
+> `sudo` 权限的 SSH shell 中执行。
 
-确认后，本节必须写明并逐条展开：
+### 30.1 版本边界、真实差异和发布影响
 
-1. 当前生产 commit、目标 commit、分支和 GitHub remote；
-2. 本版本真实变更文件及其部署影响；
-3. 本地最终测试、提交、推送的每条命令；
-4. 服务器工作树、磁盘、内存、服务状态和远端检查命令；
-5. 停机顺序以及 `.env`、SQLite、Chroma/上传/历史记录的准确备份命令；
-6. 精确的 `git fetch`、diff 审阅和 fast-forward 更新命令；
-7. 仅针对本版本实际变化所需的 Python、Node、系统依赖安装命令；
-8. `.env`、systemd、Nginx、数据库 schema 和本地模型缓存的版本专项处理；
-9. 使用实际生产域名执行的前端构建命令；
-10. 后端、前端、清理 timer 和 Nginx 的准确启动、重启或 reload 顺序；
-11. 本机与公网健康检查、Agent Key 隐藏输入验证、清小搭和网页并发验收命令；
-12. 日志、CPU、内存、磁盘和 OOM 检查命令；
-13. 使用本版本旧 commit 和对应备份目录执行的完整回滚命令。
+```text
+生产旧 revision（服务器必须现场确认）：63a0799997fc7dc94fb0e140214d35b0a749b44b
+应用目标 revision：                    af3bf6dca40c634b8de86ba3439255c49d481557
+分支：                                 main
+GitHub remote：                        git@github.com:invincible-summer/Paper-Agent.git
+生产目录 / 服务账号：                  /opt/paper-agent / paper-agent
+生产域名 / Origin：                    https://paper-agent.ycr10.cn
+后端 / 前端：                          127.0.0.1:8000 / 127.0.0.1:3000
+systemd：                              paper-agent.service
+                                      paper-agent-web.service
+                                      paper-agent-cleanup.timer
+                                      paper-agent-rxiv-sync.timer
+Nginx site：                           /etc/nginx/sites-available/paper-agent
+```
 
-除密钥、密码及尚未由用户提供的必要值外，确认后的版本专属步骤不得保留 `<占位符>`，也不得直接复制通用章节冒充本版本发布方案。
+旧 revision 到目标 revision 修改 21 个文件（556 行新增、63 行删除），涉及 `/v1` 文件 URL 与
+`file_id` 兼容、API 私有附件/checkpoint、200 MiB 管理员策略、DOC/XLS/XLSX `deferred` 通道、
+deep-read/RAG 降级、`/admin/api-storage` 前端和相应文档/测试。
+
+| 项目 | 真实 diff 结果 | 本次动作 |
+|---|---|---|
+| Python 依赖 | `requirements*.txt`、constraints、Python manifest/lock 未变 | **不执行 pip install** |
+| Node 依赖 | frontend package/lock 未变 | `node_modules` 存在时**不执行 pnpm install** |
+| `.env` / 配置 | `.env.example`、`config/**` 未变 | 不改 `.env`，只核对权限和非敏感变量名 |
+| 本地模型 | 模型名、模型配置、模型依赖未变 | 不下载、不预热；缓存缺失时才条件预热 |
+| systemd | `deploy/systemd/**` 未变 | 不覆盖 unit，不执行 `daemon-reload` |
+| Nginx | 路由和配置未变 | 只执行 `nginx -t`，不 reload |
+| 前端 | 管理员 API storage 页面有变化 | 必须用真实 Origin 重新 build |
+| 数据库 | `data/openai_api/state.db` schema **v5 → v6** | 后端启动自动迁移；回滚必须恢复升级前 `state.db*` |
+
+预计维护窗口 **3–8 分钟**。备份范围：生产 `.env`、完整 `data/`、完整 `history_record/`、当前
+systemd/Nginx 配置，以及单独可快速恢复的 `data/openai_api/state.db*`。备份只留在云服务器，禁止
+复制进 Git 或开发机。
+
+### 30.2 开发机最终验证和 GitHub 推送
+
+```bash
+cd /home/invincible/daily/vibecoding/Agent_Develop/Paper_Agent
+export OLD_REV='63a0799997fc7dc94fb0e140214d35b0a749b44b'
+export TARGET_REV='af3bf6dca40c634b8de86ba3439255c49d481557'
+
+test "$(git branch --show-current)" = main
+test "$(git remote get-url origin)" = \
+  'git@github.com:invincible-summer/Paper-Agent.git'
+git cat-file -e "$OLD_REV^{commit}"
+git cat-file -e "$TARGET_REV^{commit}"
+git merge-base --is-ancestor "$OLD_REV" "$TARGET_REV"
+test "$(git show -s --format=%P "$TARGET_REV")" = "$OLD_REV"
+git diff --check
+git show --stat --oneline "$TARGET_REV"
+git diff --name-status "$OLD_REV..$TARGET_REV"
+
+./.env_conda/bin/python -m pytest \
+  tests/test_api_storage_foundation.py \
+  tests/test_admin_api_storage.py \
+  tests/test_openai_compat.py \
+  tests/test_attachment_persist.py \
+  tests/test_attachment_multimodal.py -q
+./.env_conda/bin/python -m pytest tests/ -q
+
+cd frontend
+pnpm lint
+BACKEND_URL=http://127.0.0.1:8000 \
+NEXT_PUBLIC_BACKEND_URL=https://paper-agent.ycr10.cn \
+pnpm build
+cd ..
+
+git diff --check
+test -z "$(git ls-files | grep -E \
+  '(^|/)(data|backend/data|history_record|backend/history_record)/|(^|/)\.env$|\.pem$|\.key$' \
+  || true)"
+git status --short --branch
+git push origin main
+git fetch origin main
+git cat-file -e "$TARGET_REV^{commit}"
+git merge-base --is-ancestor "$TARGET_REV" origin/main
+```
+
+部署手册可能作为目标应用 commit 之后的文档 commit 推送，因此服务器只要求 `$TARGET_REV` 是
+`origin/main` 的祖先；生产实际运行版本仍精确停在 `$TARGET_REV`。
+
+### 30.3 SSH 登录和只读预检
+
+先在阿里云控制台确认真实 SSH 用户。开发机只修改第一行右侧，不要把密码或私钥写进命令历史：
+
+```bash
+export SSH_USER='填写云控制台中已验证的 SSH 用户名'
+ssh "$SSH_USER@paper-agent.ycr10.cn"
+```
+
+登录后执行：
+
+```bash
+set -euo pipefail
+export OLD_REV='63a0799997fc7dc94fb0e140214d35b0a749b44b'
+export TARGET_REV='af3bf6dca40c634b8de86ba3439255c49d481557'
+export APP_DIR='/opt/paper-agent'
+export APP_USER='paper-agent'
+export DOMAIN='paper-agent.ycr10.cn'
+export RELEASE_ID='20260818-qxd-file-input-af3bf6d'
+export BACKUP_DIR="/var/backups/paper-agent/$RELEASE_ID"
+
+cd "$APP_DIR"
+CURRENT_REV="$(sudo -H -u "$APP_USER" git rev-parse HEAD)"
+printf 'current=%s\nexpected-old=%s\ntarget=%s\n' \
+  "$CURRENT_REV" "$OLD_REV" "$TARGET_REV"
+test "$CURRENT_REV" = "$OLD_REV" || {
+  echo "ABORT: server HEAD=$CURRENT_REV, expected $OLD_REV"; exit 1;
+}
+test "$(sudo -H -u "$APP_USER" git branch --show-current)" = main || {
+  echo 'ABORT: production branch is not main'; exit 1;
+}
+test "$(sudo -H -u "$APP_USER" git remote get-url origin)" = \
+  'git@github.com:invincible-summer/Paper-Agent.git' || {
+  echo 'ABORT: production origin mismatch'; exit 1;
+}
+test -z "$(sudo -H -u "$APP_USER" git status --porcelain)" || {
+  echo 'ABORT: production worktree is not clean';
+  sudo -H -u "$APP_USER" git status --short; exit 1;
+}
+
+sudo systemctl is-active paper-agent
+sudo systemctl is-active paper-agent-web
+sudo systemctl is-active paper-agent-cleanup.timer
+sudo systemctl is-active paper-agent-rxiv-sync.timer
+sudo systemctl is-active nginx
+sudo systemctl show paper-agent -p ExecStart -p User -p Group -p WorkingDirectory
+sudo systemctl show paper-agent-web -p ExecStart -p User -p Group -p WorkingDirectory
+sudo ss -ltnp | grep -E '127\.0\.0\.1:(3000|8000)\b'
+df -h / "$APP_DIR" /var/backups
+free -h
+swapon --show
+```
+
+`paper-agent.service` 必须仍只有一个 Uvicorn worker。资源不足时先释放空间或扩容，不要继续。
+
+### 30.4 fetch 和真实 diff 复核
+
+```bash
+cd "$APP_DIR"
+sudo -H -u "$APP_USER" git fetch --prune origin
+sudo -H -u "$APP_USER" git cat-file -e "$TARGET_REV^{commit}"
+sudo -H -u "$APP_USER" git merge-base --is-ancestor "$OLD_REV" "$TARGET_REV"
+sudo -H -u "$APP_USER" git merge-base --is-ancestor \
+  "$TARGET_REV" "$(sudo -H -u "$APP_USER" git rev-parse origin/main)"
+sudo -H -u "$APP_USER" git diff --stat "$OLD_REV..$TARGET_REV"
+sudo -H -u "$APP_USER" git diff --name-status "$OLD_REV..$TARGET_REV"
+
+# 前两条必须无输出；最后一条应显示两个前端源码文件。
+test -z "$(sudo -H -u "$APP_USER" git diff --name-only \
+  "$OLD_REV..$TARGET_REV" -- \
+  requirements.txt requirements-cpu.txt constraints.txt pyproject.toml \
+  poetry.lock uv.lock package.json pnpm-lock.yaml \
+  frontend/package.json frontend/pnpm-lock.yaml)"
+test -z "$(sudo -H -u "$APP_USER" git diff --name-only \
+  "$OLD_REV..$TARGET_REV" -- \
+  .env.example config deploy/systemd deploy/nginx nginx \
+  Dockerfile docker-compose.yml)"
+sudo -H -u "$APP_USER" git diff --name-only \
+  "$OLD_REV..$TARGET_REV" -- frontend
+```
+
+结果与预期不符就停止并重新审计，不要套用本节。
+
+### 30.5 停服务并备份生产数据
+
+```bash
+sudo systemctl stop paper-agent-web
+sudo systemctl stop paper-agent
+sudo systemctl stop paper-agent-cleanup.timer
+sudo systemctl stop paper-agent-rxiv-sync.timer
+sudo systemctl stop paper-agent-cleanup.service paper-agent-rxiv-sync.service || true
+sudo systemctl is-active paper-agent-web && exit 1 || true
+sudo systemctl is-active paper-agent && exit 1 || true
+
+sudo install -d -o root -g root -m 0700 "$BACKUP_DIR"
+sudo install -d -o root -g root -m 0700 "$BACKUP_DIR/state-db-v5"
+sudo sh -c "printf '%s\n' \
+  'release_id=$RELEASE_ID' \
+  'old_rev=$OLD_REV' \
+  'target_rev=$TARGET_REV' \
+  'created_at_utc='\"\$(date -u +%FT%TZ)\" \
+  > '$BACKUP_DIR/release-meta.txt'"
+
+sudo tar --numeric-owner --acls --xattrs -czf \
+  "$BACKUP_DIR/runtime-env-data-history.tar.gz" \
+  -C "$APP_DIR" .env data history_record
+sudo tar --numeric-owner --acls --xattrs -czf \
+  "$BACKUP_DIR/system-config.tar.gz" -C / \
+  etc/systemd/system/paper-agent.service \
+  etc/systemd/system/paper-agent-web.service \
+  etc/systemd/system/paper-agent-cleanup.service \
+  etc/systemd/system/paper-agent-cleanup.timer \
+  etc/systemd/system/paper-agent-rxiv-sync.service \
+  etc/systemd/system/paper-agent-rxiv-sync.timer \
+  etc/nginx/sites-available/paper-agent
+sudo find "$APP_DIR/data/openai_api" -maxdepth 1 -type f \
+  -name 'state.db*' -exec cp -a -t "$BACKUP_DIR/state-db-v5" {} +
+
+sudo sh -c "cd '$BACKUP_DIR' && \
+  find . -type f ! -name SHA256SUMS -print0 | sort -z | \
+  xargs -0 sha256sum > SHA256SUMS"
+sudo tar -tzf "$BACKUP_DIR/runtime-env-data-history.tar.gz" >/dev/null
+sudo tar -tzf "$BACKUP_DIR/system-config.tar.gz" >/dev/null
+sudo sh -c "cd '$BACKUP_DIR' && sha256sum -c SHA256SUMS"
+sudo du -sh "$BACKUP_DIR"
+```
+
+不要 `cat .env`，不要查看或上传备份内容。完整 tar、独立 `state.db*` 或校验失败时不得继续。
+
+### 30.6 精确 fast-forward 到目标 commit
+
+```bash
+cd "$APP_DIR"
+sudo sh -c "printf '%s\n' '$OLD_REV' > /var/lib/paper-agent/last-production-revision"
+sudo -H -u "$APP_USER" git switch main
+sudo -H -u "$APP_USER" git merge --ff-only "$TARGET_REV"
+test "$(sudo -H -u "$APP_USER" git rev-parse HEAD)" = "$TARGET_REV"
+test -z "$(sudo -H -u "$APP_USER" git status --porcelain)"
+sudo -H -u "$APP_USER" git log -1 --oneline
+```
+
+依赖文件未变化，不运行 pip/pnpm/apt 安装。只验证已有环境：
+
+```bash
+sudo -H -u "$APP_USER" "$APP_DIR/.venv/bin/python" --version
+sudo -H -u "$APP_USER" "$APP_DIR/.venv/bin/python" -m pip check
+sudo -H -u "$APP_USER" test -d "$APP_DIR/frontend/node_modules"
+sudo -H -u "$APP_USER" env HOME=/var/lib/paper-agent \
+  /usr/local/bin/pnpm --version
+node --version
+```
+
+只有 `frontend/node_modules` 意外缺失时才执行：
+
+```bash
+cd "$APP_DIR/frontend"
+sudo -H -u "$APP_USER" env HOME=/var/lib/paper-agent \
+  /usr/local/bin/pnpm install --frozen-lockfile
+```
+
+### 30.7 `.env`、模型、systemd 和 Nginx
+
+本版本不改 `.env`。只核对权限，并只输出变量名、不输出值：
+
+```bash
+sudo chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
+sudo chmod 600 "$APP_DIR/.env"
+sudo stat -c '%U:%G %a %n' "$APP_DIR/.env"
+sudo awk -F= '/^[A-Z][A-Z0-9_]*=/{print $1}' "$APP_DIR/.env" \
+  | sort -u \
+  | grep -E '^(APP_ENV|PUBLIC_BASE_URL|FRONTEND_ORIGIN|HF_HUB_OFFLINE|XDG_CACHE_HOME|OPENAI_API_STORAGE_ROOT)$' \
+  || true
+```
+
+模型名、依赖和缓存路径未变化，本次不预热。只有缓存缺失或日志明确报离线模型不存在时，才执行：
+
+```bash
+cd "$APP_DIR"
+sudo -H -u "$APP_USER" env \
+  HOME=/var/lib/paper-agent \
+  XDG_CACHE_HOME=/var/lib/paper-agent/cache \
+  HF_HUB_OFFLINE=0 HF_ENDPOINT=https://hf-mirror.com \
+  .venv/bin/python - <<'PY'
+from core.embeddings import get_embedder
+from tools.retrieval.rerank import get_reranker
+from tools.pdf.structure import get_structure_parser
+assert get_embedder() is not None
+assert get_reranker() is not None
+parser = get_structure_parser()
+if hasattr(parser, "_ensure_converter"):
+    parser._ensure_converter()
+print("embedding, reranker and Docling are ready")
+PY
+```
+
+systemd unit 未变化，不覆盖 unit，也不执行 `daemon-reload`：
+
+```bash
+test -z "$(sudo -H -u "$APP_USER" git diff --name-only \
+  "$OLD_REV..$TARGET_REV" -- deploy/systemd)"
+```
+
+Nginx 未变化，不 reload；只检查：
+
+```bash
+sudo nginx -t
+sudo systemctl is-active nginx
+```
+
+### 30.8 使用真实生产 Origin 构建前端
+
+```bash
+cd "$APP_DIR/frontend"
+sudo -H -u "$APP_USER" env \
+  HOME=/var/lib/paper-agent \
+  BACKEND_URL=http://127.0.0.1:8000 \
+  NEXT_PUBLIC_BACKEND_URL=https://paper-agent.ycr10.cn \
+  /usr/local/bin/pnpm build
+```
+
+构建失败时不要启动前端，修复后重建或直接执行 30.12 回滚。
+
+### 30.9 启动后端、确认 schema v6，再启动其余服务
+
+```bash
+sudo systemctl start paper-agent
+sleep 5
+sudo systemctl --no-pager --full status paper-agent
+curl -fsS --max-time 10 http://127.0.0.1:8000/health
+
+cd "$APP_DIR"
+sudo -H -u "$APP_USER" .venv/bin/python - <<'PY'
+from core.api_storage_store import ApiStorageStore, SCHEMA_VERSION
+from core.storage_context import StorageContext
+ctx = StorageContext.openai_api()
+store = ApiStorageStore(ctx)
+store.initialize()
+policy = store.get_policy()
+assert SCHEMA_VERSION == 6
+assert 1024 * 1024 <= policy.max_upload_bytes <= 200 * 1024 * 1024
+print({"schema_version": SCHEMA_VERSION,
+       "max_upload_mib": policy.max_upload_bytes // 1024 // 1024})
+PY
+
+sudo systemctl start paper-agent-web
+sleep 3
+curl -I --max-time 10 http://127.0.0.1:3000
+sudo systemctl start paper-agent-cleanup.timer
+sudo systemctl start paper-agent-rxiv-sync.timer
+sudo systemctl is-active paper-agent
+sudo systemctl is-active paper-agent-web
+sudo systemctl is-active paper-agent-cleanup.timer
+sudo systemctl is-active paper-agent-rxiv-sync.timer
+sudo systemctl is-active nginx
+```
+
+本版本无 unit/Nginx 变化，因此不执行 `daemon-reload` 或 Nginx reload。
+
+### 30.10 本机、公网、鉴权和文件输入冒烟
+
+```bash
+cd "$APP_DIR"
+test "$(sudo -H -u "$APP_USER" git rev-parse HEAD)" = "$TARGET_REV"
+test -z "$(sudo -H -u "$APP_USER" git status --porcelain)"
+sudo ss -ltnp | grep -E '127\.0\.0\.1:(3000|8000)\b'
+curl -fsS --max-time 10 http://127.0.0.1:8000/health
+curl -fsS --max-time 10 "https://$DOMAIN/health"
+curl -fsS --max-time 10 "https://$DOMAIN/api/v1/auth/config"
+curl -I --max-time 10 "https://$DOMAIN/chat"
+
+read -rsp '粘贴 pa_live_ Agent API Key: ' AGENT_KEY; echo
+curl -fsS --max-time 15 "https://$DOMAIN/v1/models" \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -o /tmp/paper-agent-v1-models.json
+python3 - <<'PY'
+import json
+with open('/tmp/paper-agent-v1-models.json', encoding='utf-8') as f:
+    data = json.load(f)
+assert any(item.get('id') == 'paper-agent' for item in data.get('data', []))
+print('authenticated /v1/models: ok')
+PY
+```
+
+验证 `file_id + url` 始终使用 URL（会触发一次真实模型请求）：
+
+```bash
+curl -fsS --max-time 180 "https://$DOMAIN/v1/chat/completions" \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -H 'Content-Type: application/json' \
+  -o /tmp/paper-agent-file-url-smoke.json \
+  --data-binary @- <<'JSON'
+{
+  "model": "paper-agent",
+  "stream": false,
+  "sessionId": "release-smoke-file-url-af3bf6d",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "只确认附件已接收，并用一句话回答。"},
+      {"type": "file", "file": {
+        "file_id": "qxd-release-smoke-source-id",
+        "url": "https://www.rfc-editor.org/rfc/rfc20.txt",
+        "filename": "release-smoke.md"
+      }}
+    ]
+  }]
+}
+JSON
+python3 - <<'PY'
+import json
+with open('/tmp/paper-agent-file-url-smoke.json', encoding='utf-8') as f:
+    data = json.load(f)
+assert data.get('choices'), data
+print('file_id + url smoke: ok')
+PY
+```
+
+验证仅有 `file_id` 时不返回 500、产生缺少 URL 的降级说明，并且不下载文件：
+
+```bash
+curl -fsS --max-time 180 "https://$DOMAIN/v1/chat/completions" \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -H 'Content-Type: application/json' \
+  -o /tmp/paper-agent-bare-file-id-smoke.json \
+  --data-binary @- <<'JSON'
+{
+  "model": "paper-agent",
+  "stream": false,
+  "sessionId": "release-smoke-bare-file-id-af3bf6d",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "说明该附件当前是否可读取。"},
+      {"type": "file", "file": {
+        "file_id": "qxd-release-smoke-no-url",
+        "filename": "missing-url.pdf"
+      }}
+    ]
+  }]
+}
+JSON
+python3 - <<'PY'
+import json
+with open('/tmp/paper-agent-bare-file-id-smoke.json', encoding='utf-8') as f:
+    data = json.load(f)
+assert data.get('choices'), data
+print('bare file_id returned HTTP success with choices: ok')
+PY
+sudo journalctl -u paper-agent --since '3 minutes ago' --no-pager \
+  | grep -F 'OpenAI-compatible file input degraded'
+unset AGENT_KEY
+```
+
+上面的 RFC Editor URL 是公开、小体积的稳定 `.txt` 测试文件。若组织网络策略禁止该域名，改用已批准的
+公开 HTTP(S) `.txt`/`.md`；不得使用内网、localhost、云元数据地址或含真实凭证的签名 URL。
+
+### 30.11 清小搭、浏览器并发、日志和资源验收
+
+浏览器人工检查：
+
+- `/admin/api-storage` 显示“API 远程文件上限”，默认 200 MiB，可下调但不能超过 200 MiB；
+- Web `/chat/upload` 仍为 20 MiB；
+- 清小搭传 `file_id + file.url + filename` 时可读取文件；仅传 `file_id` 时降级而非 500；
+- DOC/XLS/XLSX 能保存并提示暂不解析；PPT/PPTX 仍拒绝；
+- 浏览器普通对话、历史和附件权限正常。
+
+终端 A：
+
+```bash
+while true; do
+  printf '%s auth=' "$(date '+%F %T')"
+  curl -fsS -o /dev/null -w '%{http_code} %{time_total}s' \
+    --max-time 2 "https://$DOMAIN/api/v1/auth/config" || printf 'FAILED'
+  printf ' health='
+  curl -fsS -o /dev/null -w '%{http_code} %{time_total}s' \
+    --max-time 2 "https://$DOMAIN/health" || printf 'FAILED'
+  echo; sleep 1
+done
+```
+
+终端 B：
+
+```bash
+sudo journalctl -u paper-agent -f
+```
+
+在清小搭发起一次带文件请求，同时在浏览器 `/chat` 发普通文字请求。预期接口持续 HTTP 200，两端均能
+流式完成。不得通过增加 Uvicorn worker 解决拥塞。停止监控后执行：
+
+```bash
+sudo journalctl -u paper-agent -n 300 --no-pager \
+  | grep -Ei 'error|traceback|exception|schema|permission denied|out of memory|killed process' \
+  || echo '后端近期日志未发现目标错误'
+sudo journalctl -u paper-agent-web -n 150 --no-pager
+sudo journalctl -u paper-agent-cleanup.service -n 100 --no-pager
+sudo journalctl -u paper-agent-rxiv-sync.service -n 100 --no-pager
+free -h
+df -h / "$APP_DIR" "$BACKUP_DIR"
+uptime
+ps -eo pid,%cpu,%mem,rss,cmd --sort=-%mem | head -20
+sudo dmesg -T | grep -Ei 'oom|out of memory|killed process' || true
+sudo systemctl --failed --no-pager
+```
+
+全部通过后保留旧 revision 与备份到观察期结束，不要立即删除。
+
+### 30.12 精确回滚：代码回到旧 commit 并恢复 v5 `state.db*`
+
+目标版会把 `state.db` 升到 v6，而旧代码只支持 v5，因此**仅回滚 Git 不够**；必须恢复 30.5 单独
+保存的升级前 `state.db*`。
+
+```bash
+set -euo pipefail
+export OLD_REV='63a0799997fc7dc94fb0e140214d35b0a749b44b'
+export APP_DIR='/opt/paper-agent'
+export APP_USER='paper-agent'
+export BACKUP_DIR='/var/backups/paper-agent/20260818-qxd-file-input-af3bf6d'
+export FAILED_STATE_DIR="$BACKUP_DIR/state-db-v6-failed-$(date +%Y%m%d-%H%M%S)"
+
+sudo test -f "$BACKUP_DIR/release-meta.txt"
+sudo sh -c "cd '$BACKUP_DIR' && sha256sum -c SHA256SUMS"
+sudo systemctl stop paper-agent-web
+sudo systemctl stop paper-agent
+sudo systemctl stop paper-agent-cleanup.timer
+sudo systemctl stop paper-agent-rxiv-sync.timer
+sudo systemctl stop paper-agent-cleanup.service paper-agent-rxiv-sync.service || true
+
+sudo install -d -o root -g root -m 0700 "$FAILED_STATE_DIR"
+sudo find "$APP_DIR/data/openai_api" -maxdepth 1 -type f \
+  -name 'state.db*' -exec cp -a -t "$FAILED_STATE_DIR" {} +
+cd "$APP_DIR"
+sudo -H -u "$APP_USER" git reset --hard "$OLD_REV"
+test "$(sudo -H -u "$APP_USER" git rev-parse HEAD)" = "$OLD_REV"
+test -z "$(sudo -H -u "$APP_USER" git status --porcelain)"
+
+sudo find "$APP_DIR/data/openai_api" -maxdepth 1 -type f \
+  -name 'state.db*' -delete
+sudo cp -a "$BACKUP_DIR/state-db-v5/." "$APP_DIR/data/openai_api/"
+sudo chown -R "$APP_USER:$APP_USER" "$APP_DIR/data/openai_api"
+
+cd "$APP_DIR/frontend"
+sudo -H -u "$APP_USER" env \
+  HOME=/var/lib/paper-agent \
+  BACKEND_URL=http://127.0.0.1:8000 \
+  NEXT_PUBLIC_BACKEND_URL=https://paper-agent.ycr10.cn \
+  /usr/local/bin/pnpm build
+
+sudo nginx -t
+sudo systemctl start paper-agent
+sleep 5
+curl -fsS --max-time 10 http://127.0.0.1:8000/health
+sudo systemctl start paper-agent-web
+sleep 3
+curl -I --max-time 10 http://127.0.0.1:3000
+sudo systemctl start paper-agent-cleanup.timer
+sudo systemctl start paper-agent-rxiv-sync.timer
+curl -fsS --max-time 10 https://paper-agent.ycr10.cn/health
+curl -fsS --max-time 10 https://paper-agent.ycr10.cn/api/v1/auth/config
+curl -I --max-time 10 https://paper-agent.ycr10.cn/chat
+sudo systemctl is-active paper-agent
+sudo systemctl is-active paper-agent-web
+sudo systemctl is-active paper-agent-cleanup.timer
+sudo systemctl is-active paper-agent-rxiv-sync.timer
+sudo journalctl -u paper-agent -n 200 --no-pager
+free -h
+df -h /
+sudo dmesg -T | grep -Ei 'oom|out of memory|killed process' || true
+```
+
+若发布前独立 `state-db-v5` 目录原本为空，说明当时没有 API `state.db`，旧后端会自行创建 v5 空库；
+除该明确情形外，不得跳过 v5 恢复，也不要用 v6 库启动旧代码。

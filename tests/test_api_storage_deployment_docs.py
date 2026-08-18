@@ -39,7 +39,15 @@ def test_deployment_runbook_is_tracked_in_docs_and_release_gated():
 
     assert "/Website_deployment_plan.md" not in ignore
     assert "当前版本专属云服务器更新步骤" in manual
-    assert "尚未获得用户对当前版本上云更新的明确确认" in manual
+    unconfirmed = "尚未获得用户对当前版本上云更新的明确确认" in manual
+    confirmed = all(marker in manual for marker in (
+        "获得用户对当前版本上云更新的明确确认",
+        "生产旧 revision",
+        "应用目标 revision",
+        "git merge --ff-only",
+        "精确回滚",
+    ))
+    assert unconfirmed or confirmed
     assert "用户明确确认" in agents
     assert "需要随仓库提交到 GitHub" in agents
     assert "[Website_deployment_plan.md](Website_deployment_plan.md)" in readme
