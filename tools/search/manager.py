@@ -5,11 +5,8 @@ from __future__ import annotations
 import asyncio
 
 from core.models import Paper
-from tools.search.base import (
-    SearchBackend,
-    normalize_title,
-    title_similarity,
-)
+from core.search_source_health import get_search_health_registry
+from tools.search.base import SearchBackend, normalize_title, title_similarity
 from tools.search.openalex import OpenAlexBackend
 from tools.search.semantic_scholar import SemanticScholarBackend
 from tools.search.arxiv import ArxivBackend
@@ -21,148 +18,138 @@ from tools.search.openaire import OpenAireBackend
 from tools.search.core import CoreBackend
 
 SEARCH_DEADLINE_SECONDS = 120.0
-
+PER_SOURCE_TIMEOUT_SECONDS = 30.0
 
 BACKENDS: dict[str, SearchBackend] = {
-    "openalex": OpenAlexBackend(),
-    "semantic_scholar": SemanticScholarBackend(),
-    "arxiv": ArxivBackend(),
-    "crossref": CrossrefBackend(),
-    "europepmc": EuropePmcBackend(),
-    "doaj": DoajBackend(),
-    "hal": HalBackend(),
-    "openaire": OpenAireBackend(),
-    "core": CoreBackend(),
+    "openalex": OpenAlexBackend(), "semantic_scholar": SemanticScholarBackend(),
+    "arxiv": ArxivBackend(), "crossref": CrossrefBackend(),
+    "europepmc": EuropePmcBackend(), "doaj": DoajBackend(),
+    "hal": HalBackend(), "openaire": OpenAireBackend(), "core": CoreBackend(),
 }
 
 
 class SearchManager:
-    """Orchestrates multi-source search, dedup, and ranking."""
+    """Run enabled sources with bounded per-task and global deadlines."""
 
-    def __init__(
-        self,
-        enabled_sources: list[str] | None = None,
-        results_per_source: int = 20,
-    ):
-        self.enabled_sources = enabled_sources or list(BACKENDS.keys())
+    def __init__(self, enabled_sources: list[str] | None = None,
+                 results_per_source: int = 20,
+                 search_deadline_seconds: float | None = None,
+                 per_source_timeout_seconds: float | None = None):
+        self.enabled_sources = list(BACKENDS) if enabled_sources is None else list(enabled_sources)
         self.results_per_source = results_per_source
+        self.search_deadline_seconds = (SEARCH_DEADLINE_SECONDS if search_deadline_seconds is None
+                                        else float(search_deadline_seconds))
+        self.per_source_timeout_seconds = (PER_SOURCE_TIMEOUT_SECONDS if per_source_timeout_seconds is None
+                                           else float(per_source_timeout_seconds))
+
+    async def _bounded_search(self, source: str, backend: SearchBackend,
+                              query: str) -> tuple[str, list[Paper], str | None]:
+        try:
+            papers = await asyncio.wait_for(
+                backend.search(query, self.results_per_source),
+                timeout=self.per_source_timeout_seconds,
+            )
+            source_health = get_search_health_registry().get(source)
+            recent_error = source_health.get("last_error_code")
+            if not papers and recent_error in {
+                "rate_limited", "timeout", "connection_error", "server_error", "invalid_response"
+            }:
+                return source, [], str(recent_error)
+            return source, papers, None
+        except asyncio.TimeoutError:
+            get_search_health_registry().record_failure(source, "timeout")
+            return source, [], "timeout"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            get_search_health_registry().record_failure(source, "invalid_response")
+            return source, [], "invalid_response"
 
     async def search_all(self, queries: list[str], progress_callback=None) -> list[Paper]:
-        """Run all backends in parallel for all queries, then dedup + rank."""
         def report(msg):
             if progress_callback:
                 progress_callback(msg)
 
-        # Dedup queries: remove exact duplicates and near-identical (same token set)
-        seen = set()
-        unique_queries = []
-        for q in queries:
-            norm = normalize_title(q)
+        seen: set[str] = set()
+        unique_queries: list[str] = []
+        for query in queries:
+            norm = normalize_title(query)
             if norm not in seen:
                 seen.add(norm)
-                unique_queries.append(q)
+                unique_queries.append(query)
         if len(unique_queries) < len(queries):
             report(f"  → Query dedup: {len(queries)} → {len(unique_queries)} unique queries")
         queries = unique_queries
 
-        coroutines = []
-        s2_delay = 0.0
+        health = get_search_health_registry()
+        tasks: set[asyncio.Task] = set()
+        participating_sources = 0
         for source in self.enabled_sources:
             backend = BACKENDS.get(source)
-            if not backend:
+            if backend is None:
                 continue
-            for q in queries:
-                if source == "semantic_scholar":
-                    coroutines.append(self._delayed_search(backend, q, s2_delay))
-                    s2_delay += 1.5
-                else:
-                    coroutines.append(backend.search(q, self.results_per_source))
+            allowed, state, remaining = health.allow(source)
+            if not allowed:
+                suffix = f"，约 {remaining:.0f}s 后半开" if remaining else ""
+                report(f"  → {source} 已熔断，跳过本次检索{suffix}")
+                continue
+            participating_sources += 1
+            source_queries = queries[:1] if state == "half_open" else queries
+            for query in source_queries:
+                tasks.add(asyncio.create_task(self._bounded_search(source, backend, query)))
 
-        tasks = {asyncio.create_task(coro) for coro in coroutines}
         total = len(tasks)
-        report(f"  → {total} search tasks dispatched across {len(self.enabled_sources)} sources")
+        report(f"  → {total} search tasks dispatched across {participating_sources} sources")
+        if not tasks:
+            return []
 
-        # D-070: global deadline so a single hung backend cannot stall the whole
-        # turn. Explicit Tasks are required here: asyncio.as_completed() creates
-        # wrapper coroutines, and leaving those wrappers un-awaited at the deadline
-        # emits RuntimeWarning and leaves backend requests running in the background.
-        # Cancel and drain every pending Task before returning partial results.
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + SEARCH_DEADLINE_SECONDS
-
+        deadline = loop.time() + self.search_deadline_seconds
         results: list[list[Paper]] = []
         completed = 0
-        failed_or_empty = 0
+        failed = 0
         pending = tasks
         while pending:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
             done, pending = await asyncio.wait(
-                pending,
-                timeout=remaining,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+                pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
             if not done:
                 break
             for task in done:
-                try:
-                    result = task.result()
-                except Exception:
-                    result = []
+                source, result, error = task.result()
                 results.append(result)
-                if not result:
-                    failed_or_empty += 1
                 completed += 1
-                report(f"  → {completed}/{total} search tasks done ({len(result)} papers)")
+                if error:
+                    failed += 1
+                    report(f"  → {completed}/{total} {source} {error}，返回部分结果")
+                else:
+                    report(f"  → {completed}/{total} {source} done ({len(result)} papers)")
 
         timed_out = len(pending)
         if pending:
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
-            for _ in range(timed_out):
-                results.append([])
-                completed += 1
-                report(f"  → {completed}/{total} search tasks done (0 papers)")
+            completed += timed_out
+            report(f"  → 全局检索时限到达，取消 {timed_out} 个慢任务")
+        if failed or timed_out:
+            report(f"  → {failed + timed_out} task(s) failed/timed out; proceeding with partial results")
 
-        unavailable = failed_or_empty + timed_out
-        if unavailable:
-            report(f"  → {unavailable} task(s) timed out / empty; proceeding with partial results")
-
-        all_papers: list[Paper] = []
-        for result in results:
-            all_papers.extend(result)
-
+        all_papers = [paper for result in results for paper in result]
         deduped = self._dedup(all_papers)
         report(f"  → Dedup: {len(all_papers)} → {len(deduped)} unique papers")
         return deduped
 
-    async def _delayed_search(self, backend, query: str, delay: float) -> list[Paper]:
-        """Run a search after a delay to respect rate limits."""
-        if delay > 0:
-            await asyncio.sleep(delay)
-        return await backend.search(query, self.results_per_source)
-
     def _dedup(self, papers: list[Paper]) -> list[Paper]:
-        """Cross-source dedup pipeline (DESIGN 12.5).
-
-        Step 1: DOI exact match
-        Step 2: title normalization + fuzzy match (>= 0.95)
-        Step 3: merge info from duplicates
-        """
         by_id: dict[str, Paper] = {}
         by_doi: dict[str, str] = {}
         by_norm_title: dict[str, str] = {}
-
         for paper in papers:
-            # Step 1: DOI match
             if paper.doi and paper.doi in by_doi:
-                existing = by_id[by_doi[paper.doi]]
-                _merge(existing, paper)
+                _merge(by_id[by_doi[paper.doi]], paper)
                 continue
-
-            # Step 2: title fuzzy match
             norm = normalize_title(paper.title)
             matched_id = by_norm_title.get(norm)
             if matched_id is None:
@@ -170,7 +157,6 @@ class SearchManager:
                     if title_similarity(norm, existing_norm) >= 0.95:
                         matched_id = existing_id
                         break
-
             if matched_id:
                 existing = by_id[matched_id]
                 _merge(existing, paper)
@@ -178,17 +164,14 @@ class SearchManager:
                     existing.doi = paper.doi
                     by_doi[paper.doi] = existing.id
                 continue
-
-            # Step 3: new paper
             by_id[paper.id] = paper
             if paper.doi:
                 by_doi[paper.doi] = paper.id
             by_norm_title[norm] = paper.id
-
         return list(by_id.values())
 
+
 def _merge(existing: Paper, new: Paper) -> None:
-    """Merge info from a duplicate into the existing record (DESIGN 12.5)."""
     if new.abstract and len(new.abstract) > len(existing.abstract):
         existing.abstract = new.abstract
     if new.citation_count > existing.citation_count:

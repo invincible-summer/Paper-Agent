@@ -148,3 +148,22 @@ def test_pick_reading_order_roles_and_dedup():
 
 def test_pick_reading_order_empty():
     assert pick_reading_order([], {}, {}) == []
+
+
+def test_build_genealogy_times_out_optional_citation_enrichment(monkeypatch):
+    async def slow_citations(papers):
+        await asyncio.sleep(1)
+        return [], "available"
+
+    monkeypatch.setattr(genealogy_mod, "fetch_citation_edges", slow_citations)
+    monkeypatch.setattr(genealogy_mod, "_CITATION_ENRICHMENT_TIMEOUT_SECONDS", 0.02)
+    papers = [
+        Paper(id="p1", title="A", abstract="alpha", citation_count=2),
+        Paper(id="p2", title="B", abstract="beta", citation_count=1),
+    ]
+    graph = asyncio.run(build_genealogy(
+        papers, {"p1": 0, "p2": 1},
+        embed_fn=lambda docs: [[1.0, 0.0], [0.0, 1.0]],
+    ))
+    assert graph["citation_enrichment_status"] == "timeout"
+    assert len(graph["nodes"]) == 2

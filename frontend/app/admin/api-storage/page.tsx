@@ -2,14 +2,18 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, Database, HelpCircle, Loader2, ShieldCheck, Trash2 } from "lucide-react";
+import {
+  AlertTriangle, Check, Database, Loader2, RotateCcw, Save, ShieldCheck, Trash2,
+} from "lucide-react";
 import {
   AdminApiError, executeApiStorageCleanup, executeApiStorageLegacyScan,
   getApiStorageCleanupRuns, getApiStoragePolicy, getApiStorageStatus,
   getApiStorageUsage, previewApiStorageAction, updateApiStoragePolicy,
   type ApiStoragePolicy, type StorageHelpItem,
 } from "@/lib/admin-api";
-import { AdminHeader } from "@/components/admin/AdminUI";
+import {
+  AdminHeader, AdminSection, ConfirmModal, HelpModal, InfoButton, type HelpEntry,
+} from "@/components/admin/AdminUI";
 import { useAuthStore } from "@/stores/auth";
 
 const PRESETS: Record<string, Partial<ApiStoragePolicy>> = {
@@ -18,6 +22,37 @@ const PRESETS: Record<string, Partial<ApiStoragePolicy>> = {
   performance: { preset: "performance", session_ttl_seconds: 2592000, upload_ttl_seconds: 2592000, export_ttl_seconds: 604800, public_pdf_ttl_seconds: 259200, cache_ttl_seconds: 15552000, trace_mode: "metadata", trace_ttl_seconds: 604800 },
 };
 
+const PRESET_NAMES: Record<string, string> = {
+  privacy: "隐私优先", balanced: "均衡", performance: "性能优先",
+};
+
+const TTL_FIELDS = [
+  ["session_ttl_seconds", "会话 Checkpoint"],
+  ["upload_ttl_seconds", "私有上传"],
+  ["export_ttl_seconds", "导出"],
+  ["public_pdf_ttl_seconds", "公共 PDF"],
+  ["cache_ttl_seconds", "语义/视觉缓存"],
+] as const;
+
+const THRESHOLD_FIELDS = [
+  ["observe_threshold_percent", "观察"],
+  ["pressure_threshold_percent", "持续清理"],
+  ["critical_threshold_percent", "关键"],
+  ["hard_stop_threshold_percent", "强制保护"],
+] as const;
+
+/** StorageHelpItem 的固定字段 → 共享 HelpModal 的条目列表。 */
+const STORAGE_HELP_FIELDS: Array<[string, keyof StorageHelpItem]> = [
+  ["功能", "does"], ["涉及数据", "affected"], ["优点", "benefits"], ["缺点", "drawbacks"],
+  ["隐私", "privacy"], ["磁盘", "disk"], ["延迟与模型费用", "latency_cost"],
+  ["会话连续性", "continuity"], ["生效时间", "effective"], ["安全兜底", "fallback"],
+  ["恢复默认", "restore"],
+];
+
+function storageHelpEntry(item: StorageHelpItem): HelpEntry {
+  return { title: item.title, entries: STORAGE_HELP_FIELDS.map(([label, key]) => [label, item[key]]) };
+}
+
 function bytes(value: number) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`;
@@ -25,8 +60,12 @@ function bytes(value: number) {
   return `${(value / 1024 ** 3).toFixed(2)} GiB`;
 }
 
-function InfoButton({ onClick }: { onClick: () => void }) {
-  return <button type="button" onClick={onClick} className="rounded p-1 text-muted hover:bg-surface-hover hover:text-accent" aria-label="查看详细说明"><HelpCircle className="h-4 w-4" /></button>;
+const inputClass = "h-9 rounded-lg border border-border-light bg-bg px-2.5 text-sm text-fg outline-none transition-colors focus:border-accent/50";
+
+interface ConfirmState {
+  title: string;
+  summary: string;
+  execute: () => Promise<void>;
 }
 
 export default function ApiStorageAdminPage() {
@@ -40,8 +79,8 @@ export default function ApiStorageAdminPage() {
   const [usage, setUsage] = useState<{ categories: Array<{ category: string; status: string; count: number; bytes: number }>; total_bytes: number } | null>(null);
   const [status, setStatus] = useState<{ heavy_writes_paused: boolean; disk_percent: number | null; pause_reason: string | null } | null>(null);
   const [runs, setRuns] = useState<Array<Record<string, string | number | null>>>([]);
-  const [helpItem, setHelpItem] = useState<StorageHelpItem | null>(null);
-  const [confirm, setConfirm] = useState<{ title: string; summary: string; execute: () => Promise<void> } | null>(null);
+  const [helpItem, setHelpItem] = useState<HelpEntry | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
@@ -77,8 +116,10 @@ export default function ApiStorageAdminPage() {
     return out;
   }, [policy, draft]);
 
+  const dirty = Object.keys(changes).length > 0;
+
   const save = async () => {
-    if (!policy || !Object.keys(changes).length) return;
+    if (!policy || !dirty) return;
     setWorking(true); setError("");
     try {
       const result = await updateApiStoragePolicy(policy.version, changes);
@@ -118,32 +159,181 @@ export default function ApiStorageAdminPage() {
 
   if (!checked || loading) return <div className="flex min-h-screen items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>;
   if (!user || user.role !== "administrator") return <div className="p-8 text-center text-muted">仅管理员可访问。</div>;
-  if (!draft || !policy) return <div className="p-8 text-center text-red-500">{error || "策略加载失败"}</div>;
+  if (!draft || !policy) return <div className="p-8 text-center text-error">{error || "策略加载失败"}</div>;
 
-  const show = (key: string) => setHelpItem(help[key]);
+  const show = (key: string) => {
+    const item = help[key];
+    if (item) setHelpItem(storageHelpEntry(item));
+  };
+
   return <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-8">
-    <div className="mx-auto max-w-6xl space-y-6">
+    <div className="mx-auto max-w-6xl space-y-6 pb-24">
       <AdminHeader title="OpenAI API 存储管理" icon={<Database className="h-5 w-5" />}
         subtitle="仅管理清小搭 /v1 数据，不影响自制前端持久化。"
         current="/admin/api-storage" onRefresh={() => void refresh()} refreshing={loading} />
-      {error && <div className="rounded-lg border border-red-400/40 bg-red-500/10 p-3 text-sm text-red-500">{error}</div>}
+
+      {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
+
       <section className="grid gap-4 md:grid-cols-3">
-        <div className="rounded-xl border border-border-light bg-surface p-4"><Database className="mb-2 h-5 w-5 text-accent" /><div className="text-2xl font-bold">{bytes(usage?.total_bytes ?? 0)}</div><div className="text-sm text-muted">API artifact 逻辑容量</div></div>
-        <div className="rounded-xl border border-border-light bg-surface p-4"><ShieldCheck className="mb-2 h-5 w-5 text-accent" /><div className="text-2xl font-bold">{status?.disk_percent?.toFixed(1) ?? "--"}%</div><div className="text-sm text-muted">服务器磁盘占用</div></div>
-        <div className={`rounded-xl border p-4 ${status?.heavy_writes_paused ? "border-amber-500 bg-amber-500/10" : "border-border-light bg-surface"}`}><AlertTriangle className="mb-2 h-5 w-5 text-amber-500" /><div className="text-lg font-bold">{status?.heavy_writes_paused ? "文件重任务已暂停" : "文件重任务正常"}</div><div className="text-sm text-muted">普通文字问答始终可用</div></div>
+        <div className="rounded-xl border border-border-light bg-surface p-4">
+          <Database className="mb-2 h-5 w-5 text-accent" />
+          <div className="tnum text-2xl font-bold">{bytes(usage?.total_bytes ?? 0)}</div>
+          <div className="text-sm text-muted">API artifact 逻辑容量</div>
+        </div>
+        <div className="rounded-xl border border-border-light bg-surface p-4">
+          <ShieldCheck className="mb-2 h-5 w-5 text-accent" />
+          <div className="tnum text-2xl font-bold">{status?.disk_percent?.toFixed(1) ?? "--"}%</div>
+          <div className="text-sm text-muted">服务器磁盘占用</div>
+        </div>
+        <div className={`rounded-xl border p-4 ${status?.heavy_writes_paused ? "border-warning bg-warning/10" : "border-border-light bg-surface"}`}>
+          <AlertTriangle className="mb-2 h-5 w-5 text-warning" />
+          <div className="text-lg font-bold">{status?.heavy_writes_paused ? "文件重任务已暂停" : "文件重任务正常"}</div>
+          <div className="text-sm text-muted">普通文字问答始终可用</div>
+        </div>
       </section>
-      <section className="rounded-xl border border-border-light bg-surface p-5"><div className="mb-4 flex items-center justify-between"><h2 className="font-semibold">策略预设</h2><InfoButton onClick={() => show(`preset.${draft.preset === "custom" ? "balanced" : draft.preset}`)} /></div><div className="grid gap-3 sm:grid-cols-3">{(["privacy", "balanced", "performance"] as const).map((name) => <button key={name} onClick={() => setDraft({ ...draft, ...PRESETS[name] })} className={`rounded-lg border p-4 text-left ${draft.preset === name ? "border-accent bg-accent/10" : "border-border-light"}`}><div className="font-medium">{{ privacy: "隐私优先", balanced: "均衡", performance: "性能优先" }[name]}</div><div className="mt-1 text-xs text-muted">{help[`preset.${name}`]?.does}</div></button>)}</div></section>
+
+      <AdminSection title="策略预设"
+        info={<InfoButton onClick={() => show(`preset.${draft.preset === "custom" ? "balanced" : draft.preset}`)} label="当前预设说明" />}>
+        <div className="grid gap-3 sm:grid-cols-3">
+          {(["privacy", "balanced", "performance"] as const).map((name) => {
+            const active = draft.preset === name;
+            return (
+              <div key={name} role="button" tabIndex={0} aria-pressed={active}
+                onClick={() => setDraft({ ...draft, ...PRESETS[name] })}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDraft({ ...draft, ...PRESETS[name] }); }
+                }}
+                className={`flex h-11 cursor-pointer items-center justify-between gap-2 rounded-lg border px-4 text-left text-sm transition-colors ${
+                  active ? "border-accent bg-accent/10 font-medium text-accent" : "border-border-light hover:bg-surface-hover"}`}>
+                <span>{PRESET_NAMES[name]}</span>
+                <span className="flex items-center gap-1">
+                  {active && <Check className="h-4 w-4 text-accent" aria-label="已选中" />}
+                  <InfoButton onClick={() => show(`preset.${name}`)} label={`${PRESET_NAMES[name]}说明`} />
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </AdminSection>
+
       <section className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-xl border border-border-light bg-surface p-5"><div className="mb-3 flex items-center justify-between"><h2 className="font-semibold">关键保留期</h2><InfoButton onClick={() => show("ttl")} /></div>{([['session_ttl_seconds','会话 Checkpoint'],['upload_ttl_seconds','私有上传'],['export_ttl_seconds','导出'],['public_pdf_ttl_seconds','公共 PDF'],['cache_ttl_seconds','语义/视觉缓存']] as const).map(([key,label]) => <label key={key} className="mb-3 flex items-center justify-between gap-3 text-sm"><span>{label}</span><input type="number" min={1} value={Math.round(draft[key] / 3600)} onChange={(e) => setDraft({ ...draft, preset: "custom", [key]: Number(e.target.value) * 3600 })} className="w-28 rounded border border-border-light bg-bg px-2 py-1 text-right" /><span className="w-8 text-muted">小时</span></label>)}</div>
-        <div className="rounded-xl border border-border-light bg-surface p-5"><div className="mb-3 flex items-center justify-between"><h2 className="font-semibold">磁盘阈值</h2><InfoButton onClick={() => show("thresholds")} /></div>{([['observe_threshold_percent','观察'],['pressure_threshold_percent','持续清理'],['critical_threshold_percent','关键'],['hard_stop_threshold_percent','强制保护']] as const).map(([key,label]) => <label key={key} className="mb-3 flex items-center justify-between text-sm"><span>{label}</span><input type="number" disabled={key === "hard_stop_threshold_percent"} value={draft[key]} onChange={(e) => setDraft({ ...draft, preset: "custom", [key]: Number(e.target.value) })} className="w-24 rounded border border-border-light bg-bg px-2 py-1 text-right disabled:opacity-60" /></label>)}</div>
-        <div className="rounded-xl border border-border-light bg-surface p-5"><div className="mb-3 flex items-center justify-between"><h2 className="font-semibold">95% 策略</h2><InfoButton onClick={() => show(`critical.${draft.critical_strategy}`)} /></div><select value={draft.critical_strategy} onChange={(e) => setDraft({ ...draft, preset: "custom", critical_strategy: e.target.value as ApiStoragePolicy["critical_strategy"] })} className="w-full rounded border border-border-light bg-bg p-2"><option value="pause_heavy">暂停文件重任务（推荐）</option><option value="emergency_evict">紧急清理，包括最旧非活跃私有上传</option></select></div>
-        <div className="rounded-xl border border-border-light bg-surface p-5"><div className="mb-3 flex items-center justify-between"><h2 className="font-semibold">API Trace</h2><InfoButton onClick={() => show(`trace.${draft.trace_mode}`)} /></div><select value={draft.trace_mode} onChange={(e) => setDraft({ ...draft, preset: "custom", trace_mode: e.target.value as ApiStoragePolicy["trace_mode"] })} className="w-full rounded border border-border-light bg-bg p-2"><option value="off">关闭（推荐）</option><option value="metadata">Metadata，最长 7 天</option><option value="full">Full 脱敏排障，最长 7 天</option></select></div>
+        <AdminSection title="关键保留期"
+          info={<InfoButton onClick={() => show("ttl")} label="保留期说明" />}>
+          {TTL_FIELDS.map(([key, label]) => (
+            <label key={key} className="mb-3 flex items-center justify-between gap-3 text-sm">
+              <span>{label}</span>
+              <span className="flex items-center gap-1.5">
+                <input type="number" min={1} value={Math.round(draft[key] / 3600)}
+                  onChange={(e) => setDraft({ ...draft, preset: "custom", [key]: Number(e.target.value) * 3600 })}
+                  className={`${inputClass} tnum w-24 text-right`} />
+                <span className="w-7 text-xs text-muted">小时</span>
+              </span>
+            </label>
+          ))}
+        </AdminSection>
+
+        <AdminSection title="磁盘阈值"
+          info={<InfoButton onClick={() => show("thresholds")} label="磁盘阈值说明" />}>
+          {THRESHOLD_FIELDS.map(([key, label]) => (
+            <label key={key} className="mb-3 flex items-center justify-between text-sm">
+              <span>{label}</span>
+              <input type="number" disabled={key === "hard_stop_threshold_percent"} value={draft[key]}
+                onChange={(e) => setDraft({ ...draft, preset: "custom", [key]: Number(e.target.value) })}
+                className={`${inputClass} tnum w-24 text-right disabled:opacity-60`} />
+            </label>
+          ))}
+        </AdminSection>
+
+        <AdminSection title="95% 策略"
+          info={<InfoButton onClick={() => show(`critical.${draft.critical_strategy}`)} label="95% 策略说明" />}>
+          <select value={draft.critical_strategy}
+            onChange={(e) => setDraft({ ...draft, preset: "custom", critical_strategy: e.target.value as ApiStoragePolicy["critical_strategy"] })}
+            className={`${inputClass} w-full`}>
+            <option value="pause_heavy">暂停文件重任务（推荐）</option>
+            <option value="emergency_evict">紧急清理，包括最旧非活跃私有上传</option>
+          </select>
+        </AdminSection>
+
+        <AdminSection title="API Trace"
+          info={<InfoButton onClick={() => show(`trace.${draft.trace_mode}`)} label="Trace 说明" />}>
+          <select value={draft.trace_mode}
+            onChange={(e) => setDraft({ ...draft, preset: "custom", trace_mode: e.target.value as ApiStoragePolicy["trace_mode"] })}
+            className={`${inputClass} w-full`}>
+            <option value="off">关闭（推荐）</option>
+            <option value="metadata">Metadata，最长 7 天</option>
+            <option value="full">Full 脱敏排障，最长 7 天</option>
+          </select>
+        </AdminSection>
       </section>
-      <div className="flex flex-wrap gap-3"><button disabled={working || !Object.keys(changes).length} onClick={() => void save()} className="rounded-lg bg-accent px-5 py-2 text-sm font-medium text-white disabled:opacity-50">保存策略</button><button disabled={working} onClick={() => void requestAction("immediate_cleanup")} className="flex items-center gap-2 rounded-lg border border-amber-500 px-4 py-2 text-sm text-amber-600"><Trash2 className="h-4 w-4" />预览并立即清理</button><button disabled={working} onClick={() => void requestAction("legacy_scan")} className="rounded-lg border border-border-light px-4 py-2 text-sm">扫描 API 遗留文件</button><InfoButton onClick={() => show("cleanup")} /></div>
-      <section className="rounded-xl border border-border-light bg-surface p-5"><h2 className="mb-3 font-semibold">分类容量</h2><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{usage?.categories.map((item) => <div key={`${item.category}-${item.status}`} className="rounded border border-border-light p-3 text-sm"><div className="font-medium">{item.category}</div><div className="text-muted">{item.status} · {item.count} 个 · {bytes(item.bytes)}</div></div>)}</div></section>
-      <section className="rounded-xl border border-border-light bg-surface p-5"><h2 className="mb-3 font-semibold">最近清理记录</h2><div className="space-y-2 text-sm">{runs.slice(0, 8).map((run) => <div key={String(run.id)} className="flex justify-between rounded border border-border-light p-2"><span>{String(run.mode)} · {String(run.status)}</span><span className="text-muted">释放 {bytes(Number(run.reclaimed_bytes ?? 0))}</span></div>)}{!runs.length && <p className="text-muted">暂无清理记录</p>}</div></section>
+
+      <AdminSection title="清理操作" icon={<Trash2 className="h-5 w-5 text-accent" />}
+        info={<InfoButton onClick={() => show("cleanup")} label="清理操作说明" />}>
+        <div className="flex flex-wrap gap-3">
+          <button disabled={working} onClick={() => void requestAction("immediate_cleanup")}
+            className="flex h-9 items-center gap-2 rounded-lg border border-warning px-4 text-sm text-warning transition-colors hover:bg-warning/10 disabled:opacity-50">
+            <Trash2 className="h-4 w-4" />预览并立即清理
+          </button>
+          <button disabled={working} onClick={() => void requestAction("legacy_scan")}
+            className="h-9 rounded-lg border border-border-light px-4 text-sm text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-50">
+            扫描 API 遗留文件
+          </button>
+        </div>
+      </AdminSection>
+
+      <AdminSection title="分类容量">
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {usage?.categories.map((item) => (
+            <div key={`${item.category}-${item.status}`} className="rounded-lg border border-border-light p-3 text-sm">
+              <div className="font-medium">{item.category}</div>
+              <div className="tnum text-muted">{item.status} · {item.count} 个 · {bytes(item.bytes)}</div>
+            </div>
+          ))}
+        </div>
+      </AdminSection>
+
+      <AdminSection title="最近清理记录">
+        <div className="space-y-2 text-sm">
+          {runs.slice(0, 8).map((run) => (
+            <div key={String(run.id)} className="flex justify-between rounded border border-border-light p-2">
+              <span>{String(run.mode)} · {String(run.status)}</span>
+              <span className="tnum text-muted">释放 {bytes(Number(run.reclaimed_bytes ?? 0))}</span>
+            </div>
+          ))}
+          {!runs.length && <p className="text-muted">暂无清理记录</p>}
+        </div>
+      </AdminSection>
     </div>
-    {helpItem && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setHelpItem(null)}><div className="max-h-[85vh] w-full max-w-2xl overflow-auto rounded-xl bg-surface p-6" onClick={(e) => e.stopPropagation()}><h2 className="mb-4 text-xl font-bold">{helpItem.title}</h2><dl className="grid gap-3 text-sm">{Object.entries({"功能":helpItem.does,"涉及数据":helpItem.affected,"优点":helpItem.benefits,"缺点":helpItem.drawbacks,"隐私":helpItem.privacy,"磁盘":helpItem.disk,"延迟与模型费用":helpItem.latency_cost,"会话连续性":helpItem.continuity,"生效时间":helpItem.effective,"安全兜底":helpItem.fallback,"恢复默认":helpItem.restore}).map(([k,v]) => <div key={k}><dt className="font-semibold">{k}</dt><dd className="mt-1 text-muted">{v}</dd></div>)}</dl><button onClick={() => setHelpItem(null)} className="mt-5 rounded bg-accent px-4 py-2 text-white">我知道了</button></div></div>}
-    {confirm && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"><div className="w-full max-w-lg rounded-xl bg-surface p-6"><AlertTriangle className="mb-3 h-7 w-7 text-amber-500" /><h2 className="text-xl font-bold">{confirm.title}</h2><p className="mt-3 text-sm text-muted">{confirm.summary}</p><div className="mt-5 flex justify-end gap-2"><button onClick={() => setConfirm(null)} className="rounded border border-border-light px-4 py-2">取消</button><button onClick={() => { const action = confirm.execute; setConfirm(null); setWorking(true); void action().then(refresh).catch(handleError).finally(() => setWorking(false)); }} className="rounded bg-red-600 px-4 py-2 text-white">再次确认并执行</button></div></div></div>}
+
+    <div className="sticky bottom-0 border-t border-border-light bg-bg/90 backdrop-blur">
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-8">
+        <span className="text-xs text-muted">版本 v{policy.version} · 上次由 {policy.updated_by} 更新</span>
+        <div className="flex gap-2">
+          {dirty && (
+            <button onClick={() => setDraft({ ...policy })}
+              className="flex h-9 items-center gap-1.5 rounded-lg border border-border-light px-4 text-sm text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg">
+              <RotateCcw className="h-4 w-4" />重置修改
+            </button>
+          )}
+          <button disabled={working || !dirty} onClick={() => void save()}
+            className="flex h-9 items-center gap-1.5 rounded-lg bg-accent px-5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">
+            {working ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            保存策略
+          </button>
+        </div>
+      </div>
+    </div>
+
+    {confirm && (
+      <ConfirmModal title={confirm.title} body={confirm.summary} danger
+        confirmLabel="再次确认并执行" busy={working}
+        onConfirm={() => {
+          const action = confirm.execute;
+          setConfirm(null);
+          setWorking(true);
+          void action().then(refresh).catch(handleError).finally(() => setWorking(false));
+        }}
+        onClose={() => setConfirm(null)} />
+    )}
+    <HelpModal item={helpItem} onClose={() => setHelpItem(null)} />
   </main>;
 }

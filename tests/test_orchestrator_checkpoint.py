@@ -86,3 +86,49 @@ async def test_attachment_registration_invokes_partial_checkpoint(monkeypatch):
     )]
     assert calls[0] == (False, 1)
     assert calls[-1] == (True, 1)
+
+
+@pytest.mark.anyio
+async def test_read_only_native_tool_batch_runs_with_bounded_parallelism(monkeypatch):
+    import asyncio
+    import time
+
+    class _ParallelThenAnswer:
+        model = "parallel-test"
+
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        async def astream(self, messages, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                yield SimpleNamespace(
+                    content="", additional_kwargs={}, usage_metadata=None,
+                    tool_call_chunks=[
+                        {"index": 0, "name": "ask_papers", "args": '{"query":"a"}'},
+                        {"index": 1, "name": "check_structure", "args": '{}'},
+                    ],
+                )
+            else:
+                yield SimpleNamespace(
+                    content="done", additional_kwargs={}, usage_metadata=None,
+                    tool_call_chunks=[],
+                )
+
+    monkeypatch.setattr(orchestrator, "get_llm", lambda tier="light": _ParallelThenAnswer())
+
+    async def execute(tool_call, session, progress_cb, **kwargs):
+        await asyncio.sleep(0.1)
+        return ok(tool_call["name"], "ok")
+
+    monkeypatch.setattr(orchestrator, "execute_tool", execute)
+    started = time.monotonic()
+    events = [event async for event in orchestrator.chat_turn(
+        "parallel", ChatSession(channel="openai_api", session_id="parallel")
+    )]
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.18
+    assert sum(event.get("type") == "tool_result" for event in events) == 2

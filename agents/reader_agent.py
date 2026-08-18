@@ -37,6 +37,7 @@ from core.prompts.reader_prompts import build_extraction_prompt
 from core.reading_policy import (
     FULLTEXT_STATUS_AVAILABLE,
     FULLTEXT_STATUS_UNAVAILABLE,
+    FULLTEXT_STATUS_UNKNOWN,
     is_full_text,
     summary_has_full_text,
 )
@@ -115,25 +116,36 @@ async def reader_agent(
 
     # --- Phase 1: Download PDFs (skip if abstract-only mode) ---
     read_mode = state.get("read_mode", read_mode)
+    fetch_origin = state.get("fetch_origin", "automatic")
+    from core.paper_search_settings_store import (
+        disclose_fetch_policy, get_paper_search_policy, remote_download_allowed,
+    )
+    fetch_policy = get_paper_search_policy()
+    remote_fetch_blocked = (read_mode == "full" and
+                            not remote_download_allowed(fetch_origin, fetch_policy))
+    state["remote_fetch_blocked"] = remote_fetch_blocked
     n_with_pdf = 0
     if read_mode == "full":
-        # Reset any stale pdf_path from a restored history; fetch_many below is
-        # the only authority for what is locally available in this run.
-        for paper in papers_to_process:
-            paper.pdf_path = None
-        fetcher = PDFFetcher(s.reader.pdf_dir, storage_context=storage_context)
+        if remote_fetch_blocked and disclose_fetch_policy(fetch_policy):
+            report("管理员当前限制远程论文全文拉取；将复用本地缓存，其他论文按摘要级处理。")
+        fetcher = PDFFetcher(
+            s.reader.pdf_dir, storage_context=storage_context,
+            fetch_origin=fetch_origin,
+        )
         pdf_paths = await fetcher.fetch_many(papers_to_process)
         await fetcher.close()
 
         for paper in papers_to_process:
-            if paper.id in pdf_paths:
-                paper.pdf_path = pdf_paths[paper.id]
+            paper.pdf_path = pdf_paths.get(paper.id)
 
         n_with_pdf = len(pdf_paths)
-        report(
-            f"Downloaded {n_with_pdf} PDFs; "
-            f"{len(papers_to_process) - n_with_pdf} without OA PDF will stay abstract-level"
-        )
+        if not remote_fetch_blocked:
+            report(
+                f"Downloaded/reused {n_with_pdf} PDFs; "
+                f"{len(papers_to_process) - n_with_pdf} will stay abstract-level"
+            )
+        elif not disclose_fetch_policy(fetch_policy):
+            report(f"Full-text evidence ready for {n_with_pdf}/{len(papers_to_process)} papers")
     else:
         report(f"Abstract-only mode: skipping PDF download for {len(papers_to_process)} papers")
 
@@ -163,7 +175,8 @@ async def reader_agent(
                 # Full attempt was requested but this paper ended at abstract
                 # level. Report the real level so callers never label it full.
                 fallback_reason = (
-                    "oa_fulltext_unavailable" if not getattr(paper, "pdf_path", None)
+                    "remote_fetch_restricted" if remote_fetch_blocked and not getattr(paper, "pdf_path", None)
+                    else "oa_fulltext_unavailable" if not getattr(paper, "pdf_path", None)
                     else "fulltext_parse_degraded"
                 )
                 fulltext_fallbacks.append({
@@ -171,9 +184,11 @@ async def reader_agent(
                     "title": paper.title or paper.id,
                     "reason": fallback_reason,
                 })
-                paper.fulltext_status = FULLTEXT_STATUS_UNAVAILABLE
+                fallback_status = (FULLTEXT_STATUS_UNKNOWN if fallback_reason == "remote_fetch_restricted"
+                                   else FULLTEXT_STATUS_UNAVAILABLE)
+                paper.fulltext_status = fallback_status
                 fulltext_status_rows.append(
-                    (paper.id, FULLTEXT_STATUS_UNAVAILABLE, fallback_reason,
+                    (paper.id, fallback_status, fallback_reason,
                      paper.pdf_path or "", paper.pdf_url or ""))
             elif read_mode == "full" and summary_has_full_text(summary):
                 paper.fulltext_status = FULLTEXT_STATUS_AVAILABLE

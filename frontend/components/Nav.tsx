@@ -41,8 +41,8 @@ export function Nav() {
           <div className="flex items-center gap-1.5">
             {user.role === "administrator" && (
               <button
-                onClick={() => router.push("/admin/api-storage")}
-                title="OpenAI API 管理"
+                onClick={() => router.push("/admin/auth-settings")}
+                title="管理后台（访问控制）"
                 className="flex h-7 items-center gap-1.5 rounded-lg border border-border-light px-2.5 text-xs text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg"
               >
                 <ShieldCheck className="h-3.5 w-3.5" />

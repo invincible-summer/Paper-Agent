@@ -206,6 +206,52 @@ export interface ApiDisplayPolicy {
   updated_at: number;
 }
 
+export interface AuthSettingsData {
+  auth_required: boolean;
+  guest_access: boolean;
+  registration_open: boolean;
+  email_requirement: "none" | "collect" | "verify";
+  version: number;
+  updated_by: string;
+  updated_at: number;
+}
+
+export interface AuthSettingsResponse {
+  settings: AuthSettingsData;
+  smtp: { configured: boolean; sender: string; from_name: string };
+}
+
+export async function getAuthSettings(): Promise<AuthSettingsResponse> {
+  const res = await fetch(`${BASE}/auth-settings`, { headers: authHeaders(), cache: "no-store" });
+  return parseResponse(res);
+}
+
+export async function updateAuthSettings(
+  expectedVersion: number,
+  changes: Partial<Pick<AuthSettingsData, "auth_required" | "guest_access" | "registration_open" | "email_requirement">>,
+  confirmDisableAuth = false,
+): Promise<{ settings: AuthSettingsData }> {
+  const res = await fetch(`${BASE}/auth-settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      expected_version: expectedVersion,
+      confirm_disable_auth: confirmDisableAuth,
+      ...changes,
+    }),
+  });
+  return parseResponse(res);
+}
+
+export async function sendAuthTestEmail(to: string): Promise<void> {
+  const res = await fetch(`${BASE}/auth-settings/test-email`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ to }),
+  });
+  await parseResponse(res);
+}
+
 export async function getDisplayPolicy(): Promise<{
   policy: ApiDisplayPolicy;
   tools: string[];
@@ -223,6 +269,114 @@ export async function updateDisplayPolicy(
     method: "PUT",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ expected_version: expectedVersion, ...changes }),
+  });
+  return parseResponse(res);
+}
+
+export type PaperFetchMode = "enabled" | "explicit_only" | "probe_only" | "disabled";
+export type FetchPolicyDisclosure = "affected_only" | "silent";
+
+export interface PaperSearchPolicy {
+  sources: Record<string, boolean>;
+  search_deadline_seconds: number;
+  per_source_timeout_seconds: number;
+  verify_fulltext: boolean;
+  fulltext_verify_timeout_seconds: number;
+  paper_fetch_mode: PaperFetchMode;
+  fetch_policy_disclosure: FetchPolicyDisclosure;
+  version: number;
+  updated_by: string;
+  updated_at: number;
+}
+
+export interface PaperSourceCatalogItem {
+  id: string;
+  display_name: string;
+  coverage: string;
+  requires_key: boolean;
+  key_configured: boolean;
+  configuration_status: string;
+  supports_search: boolean;
+  supports_connectivity: boolean;
+  supports_pdf_probe: boolean;
+  supports_download_test: boolean;
+}
+
+export interface PaperSourceRuntimeStatus {
+  source: string;
+  state: "closed" | "open" | "half_open";
+  consecutive_failures: number;
+  open_until: number;
+  remaining_seconds: number;
+  last_http_status: number | null;
+  last_latency_ms: number | null;
+  last_error_code: string | null;
+  last_checked_at: number | null;
+}
+
+export interface PaperSearchPolicyResponse {
+  policy: PaperSearchPolicy;
+  defaults: Omit<PaperSearchPolicy, "version" | "updated_by" | "updated_at">;
+  quick_preset: Partial<PaperSearchPolicy>;
+  source_catalog: PaperSourceCatalogItem[];
+  runtime_status: PaperSourceRuntimeStatus[];
+  breaker: { threshold: number; cooldown_seconds: number };
+}
+
+export interface PaperDiagnosticRun {
+  id: string;
+  kind: "connectivity" | "download";
+  started_at: number;
+  finished_at: number;
+  summary: { count: number; statuses: Record<string, number> };
+  items: Array<Record<string, string | number | boolean | null>>;
+}
+
+export async function getPaperSearchPolicy(): Promise<PaperSearchPolicyResponse> {
+  const res = await fetch(`${BASE}/paper-search/policy`, { headers: authHeaders(), cache: "no-store" });
+  return parseResponse(res);
+}
+
+export async function updatePaperSearchPolicy(
+  expectedVersion: number,
+  changes: Partial<Pick<PaperSearchPolicy,
+    "sources" | "search_deadline_seconds" | "per_source_timeout_seconds" |
+    "verify_fulltext" | "fulltext_verify_timeout_seconds" | "paper_fetch_mode" |
+    "fetch_policy_disclosure">>,
+): Promise<{ policy: PaperSearchPolicy }> {
+  const res = await fetch(`${BASE}/paper-search/policy`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ expected_version: expectedVersion, ...changes }),
+  });
+  return parseResponse(res);
+}
+
+export async function runPaperConnectivity(sources?: string[]): Promise<PaperDiagnosticRun> {
+  const res = await fetch(`${BASE}/paper-search/diagnostics/connectivity`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ sources: sources?.length ? sources : null }),
+  });
+  return parseResponse(res);
+}
+
+export async function runPaperDownloadTest(sources?: string[]): Promise<PaperDiagnosticRun> {
+  const res = await fetch(`${BASE}/paper-search/diagnostics/download`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ sources: sources?.length ? sources : null }),
+  });
+  return parseResponse(res);
+}
+
+export async function getLatestPaperDiagnostics(): Promise<{
+  connectivity: PaperDiagnosticRun | null;
+  download: PaperDiagnosticRun | null;
+  recent: Array<Omit<PaperDiagnosticRun, "items">>;
+}> {
+  const res = await fetch(`${BASE}/paper-search/diagnostics/latest`, {
+    headers: authHeaders(), cache: "no-store",
   });
   return parseResponse(res);
 }

@@ -15,7 +15,7 @@ from tools.search.base import SearchBackend, generate_paper_id, shorten_chinese_
 API_URL = "https://api.crossref.org/works"
 
 # Polite pool: 5 concurrent, 0.5s between requests
-_limiter = RateLimiter(max_concurrent=5, min_interval=0.5)
+_limiter = RateLimiter(max_concurrent=5, min_interval=0.5, source_name="crossref", fast_fail_429=True)
 
 # Skip these Crossref record types - figure/table/dataset snippets that
 # pollute literature search results (e.g. "Figure 10: ...").
@@ -44,7 +44,17 @@ class CrossrefBackend(SearchBackend):
                 if resp.status_code != 200:
                     return []
                 data = resp.json()
+        except httpx.TimeoutException:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "timeout")
+            return []
+        except httpx.RequestError:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "connection_error")
+            return []
         except Exception:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "invalid_response")
             return []
 
         papers: list[Paper] = []

@@ -52,8 +52,10 @@ class SearchConfig:
     core_api_key: str = ""   # CORE v3 (core.ac.uk); backend auto-disables without it
     openalex_email: str = ""
     crossref_email: str = ""    # D-083: Crossref polite pool (falls back to openalex_email)
-    verify_fulltext: bool = True     # search_papers 探测每篇 OA PDF 文件头（不下载全文）
-    fulltext_verify_timeout_seconds: float = 180.0  # 全文探测总时限（超时余下=unknown）
+    search_deadline_seconds: float = 30.0            # 多源检索总时限，超时返回部分结果
+    per_source_timeout_seconds: float = 12.0         # 单条渠道查询时限
+    verify_fulltext: bool = True                     # search_papers 探测 OA PDF 文件头
+    fulltext_verify_timeout_seconds: float = 30.0    # 全文探测总时限（超时余下=unknown）
     fulltext_status_ttl_days: int = 30               # 已验证状态的可复用天数
     sources: dict = field(default_factory=lambda: {
         "openalex": True,
@@ -132,6 +134,10 @@ def load_settings() -> Settings:
         core_api_key=os.getenv("CORE_API_KEY", ""),
         openalex_email=os.getenv("OPENALEX_EMAIL", ""),
         crossref_email=os.getenv("CROSSREF_EMAIL", ""),
+        search_deadline_seconds=search_raw.get(
+            "search_deadline_seconds", s.search.search_deadline_seconds),
+        per_source_timeout_seconds=search_raw.get(
+            "per_source_timeout_seconds", s.search.per_source_timeout_seconds),
         verify_fulltext=search_raw.get("verify_fulltext", s.search.verify_fulltext),
         fulltext_verify_timeout_seconds=search_raw.get(
             "fulltext_verify_timeout_seconds", s.search.fulltext_verify_timeout_seconds),

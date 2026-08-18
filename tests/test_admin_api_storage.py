@@ -11,6 +11,7 @@ from pydantic import ValidationError
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
+import core.auth_settings_store as auth_settings_store
 import core.user_store as user_store
 from app.api.v1 import admin as admin_api
 from app.core.config import settings
@@ -19,6 +20,8 @@ from app.core.config import settings
 @pytest.fixture
 def admin_env(tmp_path, monkeypatch):
     monkeypatch.setattr(user_store, "_DB_PATH", tmp_path / "users.db")
+    monkeypatch.setattr(auth_settings_store, "_DB_PATH", tmp_path / "users.db")
+    auth_settings_store.reset_cache()
     monkeypatch.setenv("OPENAI_API_STORAGE_ROOT", str(tmp_path / "openai-api"))
     monkeypatch.setattr(settings, "auth_required", True)
     monkeypatch.setattr(settings, "guest_access", False)

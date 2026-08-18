@@ -35,6 +35,7 @@ import asyncio
 import hmac
 import inspect
 import json
+import logging
 import os
 import sys
 import time
@@ -57,6 +58,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 router = APIRouter(prefix="/v1", tags=["openai-compat"])
+logger = logging.getLogger(__name__)
 
 _TOOL_PROGRESS_TEXT = {
     "search_papers": "🔎 正在检索文献…",
@@ -100,7 +102,11 @@ def _tool_progress_text(name: str, args: dict) -> str:
 # Tools whose success produces a downloadable report artifact.
 _ARTIFACT_TOOLS = {"research_map", "write_review"}
 
-_HEARTBEAT_SECONDS = 15.0
+_HEARTBEAT_SECONDS = 10.0
+_API_SOFT_DEADLINE_SECONDS = 95.0
+_API_HARD_DEADLINE_SECONDS = 105.0
+_SSE_COALESCE_SECONDS = 0.05
+_SSE_COALESCE_CHARS = 256
 
 
 def _check_auth(authorization: str | None):
@@ -168,7 +174,7 @@ async def list_models(authorization: str | None = Header(None)):
 
 
 
-_ALLOWED_ROLES = {"system", "user", "assistant"}
+_ALLOWED_ROLES = {"system", "user", "assistant", "tool"}
 _ALLOWED_PART_TYPES = {"text", "image_url", "input_audio", "file"}
 
 
@@ -182,7 +188,7 @@ class ChatMessageRequest(BaseModel):
     @classmethod
     def validate_role(cls, value: str) -> str:
         if value not in _ALLOWED_ROLES:
-            raise ValueError("role must be system, user, or assistant")
+            raise ValueError("role must be system, user, assistant, or tool")
         return value
 
     @field_validator("content")
@@ -226,6 +232,7 @@ class ChatCompletionRequest(BaseModel):
     model: str | None = None
     max_tokens: int | None = Field(default=None, gt=0)
     user: str | None = Field(default=None, max_length=128)
+    sessionId: str | None = Field(default=None, max_length=128)
 
     @field_validator("model")
     @classmethod
@@ -253,9 +260,17 @@ async def _prepare_turn(body: dict, principal):
     last_user = next((m for m in reversed(messages_in) if m.get("role") == "user"), None)
     text, media = extract_user_content(last_user or {})
     openai_user = str(body.get("user") or "").strip()[:128]
+    session_id = str(body.get("sessionId") or "").strip()[:128]
+    checkpoint_scope = f"session:{session_id}" if session_id else openai_user
+    caller_system = "\n\n".join(
+        str(m.get("content") or "").strip()
+        for m in messages_in
+        if m.get("role") == "system" and isinstance(m.get("content"), str)
+        and str(m.get("content") or "").strip()
+    )[:8000]
 
     checkpoint_store = get_api_checkpoint_store()
-    loaded = checkpoint_store.get_or_create(principal, openai_user, messages_in)
+    loaded = checkpoint_store.get_or_create(principal, checkpoint_scope, messages_in)
     session = loaded.session
     if loaded.created:
         # The request itself is the only temporary source for text history on a
@@ -286,10 +301,13 @@ async def _prepare_turn(body: dict, principal):
     if notes:
         user_message += "\n" + "\n".join(notes)
 
-    return user_message, session, attachments, checkpoint_store, messages_in, openai_user
+    return (user_message, session, attachments, checkpoint_store,
+            messages_in, checkpoint_scope, caller_system)
 
 
-def _chat_turn_stream(chat_turn, user_message, session, attachments, checkpoint_cb):
+def _chat_turn_stream(chat_turn, user_message, session, attachments, checkpoint_cb,
+                      *, progress_cb=None, execution_context=None,
+                      system_instructions: str = ""):
     """Keep test/third-party legacy ``chat_turn`` callables compatible."""
     kwargs = {"attachments": attachments or None}
     try:
@@ -298,11 +316,15 @@ def _chat_turn_stream(chat_turn, user_message, session, attachments, checkpoint_
             p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()
         ):
             kwargs["checkpoint_cb"] = checkpoint_cb
+        if "execution_context" in signature.parameters:
+            kwargs["execution_context"] = execution_context
+        if "system_instructions" in signature.parameters:
+            kwargs["system_instructions"] = system_instructions
     except (TypeError, ValueError):
         # The real orchestrator has an inspectable Python signature.  If a
         # wrapper does not, use its compatibility-safe historical call shape.
         pass
-    return chat_turn(user_message, session, None, **kwargs)
+    return chat_turn(user_message, session, progress_cb, **kwargs)
 
 
 def _base_file_url(request: Request) -> str:
@@ -559,6 +581,7 @@ def _extra_attachments(request: Request, session, tool_results: list[dict]) -> l
 
 @router.post("/chat/completions")
 async def chat_completions(request: Request, authorization: str | None = Header(None)):
+    request_started = time.monotonic()
     principal = _check_auth(authorization)
     try:
         raw_body = await request.json()
@@ -569,175 +592,266 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     try:
         parsed = ChatCompletionRequest.model_validate(raw_body)
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors(include_url=False, include_context=False)) from exc
+        raise HTTPException(
+            status_code=422,
+            detail=exc.errors(include_url=False, include_context=False),
+        ) from exc
+
     body = parsed.model_dump(exclude_none=False)
     stream = parsed.stream
     max_tokens = parsed.max_tokens
-
-    from agents.orchestrator import chat_turn
-
-    user_message, session, attachments, checkpoint_store, request_messages, openai_user = await _prepare_turn(body, principal)
-    if session.storage_context is not None:
-        from core.storage_pressure import StoragePressureGuard
-        StoragePressureGuard(session.storage_context).ensure_allowed("text_chat")
-
-    async def checkpoint_cb(active_session, *, final=False, final_answer=None):
-        await checkpoint_store.checkpoint_callback(
-            active_session, final=final, final_answer=final_answer
-        )
-
-    async def finalize_checkpoint(final_answer: str) -> None:
-        await checkpoint_store.finalize_turn(
-            session,
-            principal=principal,
-            openai_user=openai_user,
-            messages=request_messages,
-            final_answer=final_answer,
-        )
-
     cid = f"chatcmpl-{int(time.time() * 1000)}"
     created = int(time.time())
-    # ~4 chars per token as a soft cap on completion content.
     content_budget = max_tokens * 4 if max_tokens else None
-    # chars/4 token estimate (provider returns no stream usage).
     est_prompt = sum(
         len(str(m.get("content", ""))) for m in (body.get("messages") or [])
     ) // 4
 
+    from agents.orchestrator import chat_turn
+    from core.turn_execution import TurnExecutionContext
     from tools.export.cards import (
-        resolve_full_card_tools,
         render_skill_card,
         render_tool_card,
+        resolve_full_card_tools,
         skill_display_title,
     )
 
-    policy = _load_display_policy(session)
-    full_cards = resolve_full_card_tools(policy.preset, policy.enabled_tools)
-    # Cards are decoration: below a small budget they would crowd out the
-    # answer, and a hard 60% share keeps them from ever starving it.
-    cards_allowed = policy.preset != "off" and (
-        content_budget is None or content_budget >= 2000)
+    async def prepare():
+        prepared = await _prepare_turn(body, principal)
+        (user_message, session, attachments, checkpoint_store,
+         request_messages, checkpoint_scope, caller_system) = prepared
+        if session.storage_context is not None:
+            from core.storage_pressure import StoragePressureGuard
+            StoragePressureGuard(session.storage_context).ensure_allowed("text_chat")
+        policy = _load_display_policy(session)
+        full_cards = resolve_full_card_tools(policy.preset, policy.enabled_tools)
+        cards_allowed = policy.preset != "off" and (
+            content_budget is None or content_budget >= 2000
+        )
+
+        async def checkpoint_cb(active_session, *, final=False, final_answer=None):
+            await checkpoint_store.checkpoint_callback(
+                active_session, final=final, final_answer=final_answer
+            )
+
+        async def finalize_checkpoint(final_answer: str) -> None:
+            await checkpoint_store.finalize_turn(
+                session,
+                principal=principal,
+                openai_user=checkpoint_scope,
+                messages=request_messages,
+                final_answer=final_answer,
+            )
+
+        return {
+            "user_message": user_message,
+            "session": session,
+            "attachments": attachments,
+            "caller_system": caller_system,
+            "policy": policy,
+            "full_cards": full_cards,
+            "cards_allowed": cards_allowed,
+            "checkpoint_cb": checkpoint_cb,
+            "finalize_checkpoint": finalize_checkpoint,
+        }
 
     if not stream:
-        # ---- non-streaming: run to completion, return one JSON ----
-        thinking_parts: list[str] = []
-        answer_parts: list[str] = []
-        block_parts: list[str] = []  # skill lines + markdown cards, in order
-        artifact_kinds: set[str] = set()
-        result_files: list[dict] = []
-        tool_results: list[dict] = []
-        done_event: dict | None = None
-        error_msg: str | None = None
-        truncated = False
-
-        async for ev in _chat_turn_stream(
-            chat_turn, user_message, session, attachments, checkpoint_cb
-        ):
-            etype = ev.get("type")
-            if etype == "thinking" and ev.get("is_delta"):
-                thinking_parts.append(ev.get("content", ""))
-            elif etype == "answer" and ev.get("is_delta"):
-                answer_parts.append(ev.get("content", ""))
-            elif etype == "skill_loaded" and policy.skill_card_enabled:
-                block_parts.append(
-                    render_skill_card(skill_display_title(str(ev.get("name") or ""))))
-            elif etype == "tool_result":
-                result = ev.get("result") or {}
-                tool = result.get("tool", "")
-                if tool == "use_skill":
-                    continue
-                tool_results.append(result)
-                if tool in _ARTIFACT_TOOLS and result.get("status") == "success":
-                    artifact_kinds.add(tool)
-                elif result.get("status") == "success":
-                    result_files.extend(_tool_result_files(request, result))
-                if cards_allowed:
-                    card = render_tool_card(tool, result, full_cards)
-                    if card:
-                        block_parts.append(card)
-            elif etype == "done":
-                done_event = ev
-            elif etype == "error":
-                error_msg = ev.get("message", "unknown error")
-
-        answer = "".join(answer_parts).strip()
-        thinking = "".join(thinking_parts).strip()
-        if not answer and error_msg:
-            return JSONResponse(
-                status_code=500,
-                content={"error": {"type": "upstream_error", "message": error_msg}},
-            )
-        if not answer:
-            answer = thinking or "(no response)"
-        prefix = ""
-        if block_parts:
-            card_share = content_budget * 0.6 if content_budget is not None else None
-            while block_parts and card_share is not None and \
-                    sum(len(b) for b in block_parts) + 8 > card_share:
-                block_parts.pop()  # drop newest blocks first; the answer wins
-            if block_parts:
-                prefix = "\n\n".join(block_parts) + "\n\n"
-        content = prefix + answer
-        if content_budget is not None and len(content) > content_budget:
-            content = content[:content_budget]
-            truncated = True
-        if done_event is not None and error_msg is None:
-            await finalize_checkpoint(content)
-
-        resp = {
-            "id": cid,
-            "object": "chat.completion",
-            "created": created,
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "length" if truncated else "stop",
-            }],
-            "usage": _usage_of(done_event, est_prompt,
-                               (len(content) + len(thinking)) // 4),
-        }
-        attachments_out = _dedupe_attachments(
-            _reports_for(request, session, artifact_kinds)
-            + result_files
-            + _extra_attachments(request, session, tool_results))
-        if attachments_out:
-            resp["x_soda"] = {"attachments": attachments_out}
-        return JSONResponse(resp)
-
-    # ---- streaming: open immediately; all post-validation failures use an
-    # in-band stop/error frame followed by [DONE]. ----
-    queue: asyncio.Queue = asyncio.Queue()
-
-    async def produce():
+        execution = TurnExecutionContext.openai_api(
+            soft_timeout_seconds=_API_SOFT_DEADLINE_SECONDS,
+            hard_timeout_seconds=_API_HARD_DEADLINE_SECONDS,
+        )
         try:
-            async for ev in _chat_turn_stream(
-                chat_turn, user_message, session, attachments, checkpoint_cb
-            ):
-                await queue.put(ev)
-        except Exception as exc:  # noqa: BLE001
-            await queue.put({"type": "error", "message": str(exc)})
-        finally:
-            await queue.put(None)
+            async with asyncio.timeout(_API_HARD_DEADLINE_SECONDS):
+                prepared = await prepare()
+                session = prepared["session"]
+                policy = prepared["policy"]
+                thinking_parts: list[str] = []
+                answer_parts: list[str] = []
+                block_parts: list[str] = []
+                artifact_kinds: set[str] = set()
+                result_files: list[dict] = []
+                tool_results: list[dict] = []
+                done_event: dict | None = None
+                error_msg: str | None = None
+                truncated = False
 
-    task = asyncio.create_task(produce())
+                async for ev in _chat_turn_stream(
+                    chat_turn,
+                    prepared["user_message"],
+                    session,
+                    prepared["attachments"],
+                    prepared["checkpoint_cb"],
+                    execution_context=execution,
+                    system_instructions=prepared["caller_system"],
+                ):
+                    etype = ev.get("type")
+                    if etype == "thinking" and ev.get("is_delta"):
+                        thinking_parts.append(ev.get("content", ""))
+                    elif etype == "answer" and ev.get("is_delta"):
+                        answer_parts.append(ev.get("content", ""))
+                    elif etype == "skill_loaded" and policy.skill_card_enabled:
+                        block_parts.append(render_skill_card(
+                            skill_display_title(str(ev.get("name") or ""))))
+                    elif etype == "tool_result":
+                        result = ev.get("result") or {}
+                        tool = result.get("tool", "")
+                        if tool == "use_skill":
+                            continue
+                        tool_results.append(result)
+                        if tool in _ARTIFACT_TOOLS and result.get("status") == "success":
+                            artifact_kinds.add(tool)
+                        elif result.get("status") == "success":
+                            result_files.extend(_tool_result_files(request, result))
+                        if prepared["cards_allowed"]:
+                            card = render_tool_card(tool, result, prepared["full_cards"])
+                            if card:
+                                block_parts.append(card)
+                    elif etype == "done":
+                        done_event = ev
+                    elif etype == "error":
+                        error_msg = ev.get("message", "unknown error")
+
+                answer = "".join(answer_parts).strip()
+                thinking = "".join(thinking_parts).strip()
+                if not answer and error_msg:
+                    return JSONResponse(
+                        status_code=500,
+                        content={"error": {"type": "upstream_error", "message": error_msg}},
+                    )
+                if not answer:
+                    answer = thinking or "(no response)"
+                prefix = ""
+                if block_parts:
+                    card_share = content_budget * 0.6 if content_budget is not None else None
+                    while block_parts and card_share is not None and \
+                            sum(len(b) for b in block_parts) + 8 > card_share:
+                        block_parts.pop()
+                    if block_parts:
+                        prefix = "\n\n".join(block_parts) + "\n\n"
+                content = prefix + answer
+                if content_budget is not None and len(content) > content_budget:
+                    content = content[:content_budget]
+                    truncated = True
+                if done_event is not None and error_msg is None and \
+                        not done_event.get("deadline_exceeded"):
+                    await prepared["finalize_checkpoint"](content)
+
+                resp = {
+                    "id": cid,
+                    "object": "chat.completion",
+                    "created": created,
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "length" if truncated else "stop",
+                    }],
+                    "usage": _usage_of(
+                        done_event, est_prompt, (len(content) + len(thinking)) // 4
+                    ),
+                }
+                attachments_out = _dedupe_attachments(
+                    _reports_for(request, session, artifact_kinds)
+                    + result_files
+                    + _extra_attachments(request, session, tool_results)
+                )
+                if attachments_out:
+                    resp["x_soda"] = {"attachments": attachments_out}
+                return JSONResponse(resp)
+        except TimeoutError:
+            execution.cancel()
+            return JSONResponse(
+                status_code=504,
+                content={"error": {
+                    "type": "deadline_exceeded",
+                    "message": "The agent turn exceeded the 105 second interactive deadline.",
+                }},
+            )
+
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    execution: TurnExecutionContext
+
+    def progress_cb(message: str) -> None:
+        event = {"type": "tool_progress", "message": str(message or "")[:500]}
+        try:
+            if asyncio.get_running_loop() is loop:
+                queue.put_nowait(event)
+            else:
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+        except RuntimeError:
+            # Called from a worker thread or after the request loop closed.
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+            except RuntimeError:
+                pass
+
+    execution = TurnExecutionContext.openai_api(
+        progress_cb=progress_cb,
+        soft_timeout_seconds=_API_SOFT_DEADLINE_SECONDS,
+        hard_timeout_seconds=_API_HARD_DEADLINE_SECONDS,
+    )
 
     async def frame_stream():
+        frame_count = 0
+        frame_bytes = 0
+        last_frame_at: float | None = None
+        max_idle_gap = 0.0
+
         def frame(delta: dict, finish: str | None = None,
                   usage: dict | None = None, x_soda: dict | None = None,
                   error: dict | None = None) -> str:
+            nonlocal frame_count, frame_bytes, last_frame_at, max_idle_gap
             choice = {"index": 0, "delta": delta, "finish_reason": finish}
-            chunk = {"id": cid, "object": "chat.completion.chunk",
-                     "created": created, "choices": [choice]}
+            chunk = {
+                "id": cid,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "choices": [choice],
+            }
             if usage:
                 chunk["usage"] = usage
             if x_soda:
                 chunk["x_soda"] = x_soda
             if error:
                 chunk["error"] = error
-            return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            rendered = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            now = time.monotonic()
+            if last_frame_at is not None:
+                max_idle_gap = max(max_idle_gap, now - last_frame_at)
+            last_frame_at = now
+            frame_count += 1
+            frame_bytes += len(rendered.encode("utf-8"))
+            return rendered
 
-        yield frame({"role": "assistant"})  # role frame, exactly once, first
+        # The first protocol frame is emitted before checkpoint restoration,
+        # media fetching or any agent/tool work.
+        yield frame({"role": "assistant"})
 
+        state: dict = {}
+
+        async def produce() -> None:
+            try:
+                prepared = await prepare()
+                state.update(prepared)
+                async for ev in _chat_turn_stream(
+                    chat_turn,
+                    prepared["user_message"],
+                    prepared["session"],
+                    prepared["attachments"],
+                    prepared["checkpoint_cb"],
+                    progress_cb=progress_cb,
+                    execution_context=execution,
+                    system_instructions=prepared["caller_system"],
+                ):
+                    await queue.put(ev)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                await queue.put({"type": "error", "message": str(exc)})
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(produce())
         artifact_kinds: set[str] = set()
         result_files: list[dict] = []
         tool_results: list[dict] = []
@@ -748,15 +862,11 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         blocks_emitted = False
         truncated = False
         finished = False
-        terminal_emitted = False  # an error frame already IS the stop frame
-        # Same 60% decoration share as the non-streaming path.
-        card_budget = None if content_budget is None else int(content_budget * 0.6)
+        terminal_emitted = False
+        deadline_hit = False
+        pending: list[dict | None] = []
 
         def emit_content(piece: str) -> str:
-            """Send one content delta under the shared budget (returns '' when
-            nothing fits). Cards and the answer both pass through here so
-            content_parts stays byte-identical to what the host echoes back —
-            the next-turn alias chain depends on that."""
             nonlocal content_sent, truncated
             if truncated or not piece:
                 return ""
@@ -770,11 +880,10 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             return frame({"content": piece})
 
         def emit_block(text: str) -> str:
-            """Emit one card/skill block; first block bare, later ones after a
-            markdown separator, mimicking the web layout of stacked cards."""
             nonlocal card_spent, blocks_emitted
             if not text:
                 return ""
+            card_budget = None if content_budget is None else int(content_budget * 0.6)
             if card_budget is not None and card_spent + len(text) > card_budget:
                 return ""
             card_spent += len(text)
@@ -783,18 +892,20 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             return emit_content(separator + text + "\n\n")
 
         def handle(ev: dict) -> str | None:
-            """Map one agent event to SSE frames (None = no frame; the string
-            may concatenate several frames)."""
             nonlocal done_event, finished, terminal_emitted
             etype = ev.get("type")
             if etype == "thinking" and ev.get("is_delta"):
                 return frame({"reasoning": ev.get("content", "")})
             if etype == "answer" and ev.get("is_delta"):
                 return emit_content(ev.get("content", "")) or None
+            if etype == "tool_progress":
+                text = str(ev.get("message") or "").strip()
+                return frame({"reasoning": text}) if text else None
             if etype == "skill_loaded":
                 title = skill_display_title(str(ev.get("name") or ""))
                 out = frame({"reasoning": f"📘 已加载技能《{title}》，按其工作流执行…"})
-                if policy.skill_card_enabled:
+                policy = state.get("policy")
+                if policy is not None and policy.skill_card_enabled:
                     out += emit_block(render_skill_card(title))
                 return out or None
             if etype == "tool_start":
@@ -814,8 +925,8 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                     artifact_kinds.add(tool)
                 elif result.get("status") == "success":
                     result_files.extend(_tool_result_files(request, result))
-                if cards_allowed:
-                    card = render_tool_card(tool, result, full_cards)
+                if state.get("cards_allowed"):
+                    card = render_tool_card(tool, result, state.get("full_cards") or frozenset())
                     if card:
                         return emit_block(card) or None
                 return None
@@ -826,48 +937,139 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             if etype == "error":
                 finished = True
                 terminal_emitted = True
-                return frame({}, finish="stop",
-                             usage=_usage_of(done_event, est_prompt,
-                                             content_sent // 4),
-                             error={"type": "upstream_error",
-                                    "message": ev.get("message", "unknown error")})
+                return frame(
+                    {}, finish="stop",
+                    usage=_usage_of(done_event, est_prompt, content_sent // 4),
+                    error={
+                        "type": "upstream_error",
+                        "message": ev.get("message", "unknown error"),
+                    },
+                )
             return None
 
-        # Replay buffered events, then consume the queue live (with heartbeats
-        # during long tool runs so the gateway never sees a dead stream).
-        streams: list[dict] = []
-        while True:
-            if streams:
-                ev = streams.pop(0)
-            else:
+        async def next_event() -> dict | None:
+            if pending:
+                return pending.pop(0)
+            remaining = execution.remaining_soft()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError
+            timeout = min(_HEARTBEAT_SECONDS, remaining) if remaining is not None \
+                else _HEARTBEAT_SECONDS
+            return await asyncio.wait_for(queue.get(), timeout=timeout)
+
+        async def coalesce(ev: dict) -> dict:
+            etype = ev.get("type")
+            if etype not in {"thinking", "answer"} or not ev.get("is_delta"):
+                return ev
+            text = str(ev.get("content") or "")
+            deadline = loop.time() + _SSE_COALESCE_SECONDS
+            while len(text) < _SSE_COALESCE_CHARS:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
                 try:
-                    ev = await asyncio.wait_for(queue.get(), timeout=_HEARTBEAT_SECONDS)
+                    nxt = await asyncio.wait_for(queue.get(), timeout=remaining)
                 except asyncio.TimeoutError:
+                    break
+                if nxt is None:
+                    pending.append(None)
+                    break
+                if nxt.get("type") == etype and nxt.get("is_delta"):
+                    text += str(nxt.get("content") or "")
+                    continue
+                pending.append(nxt)
+                break
+            return {**ev, "content": text}
+
+        try:
+            while True:
+                try:
+                    ev = await next_event()
+                except asyncio.TimeoutError:
+                    if execution.soft_expired():
+                        deadline_hit = True
+                        execution.cancel()
+                        if not task.done():
+                            task.cancel()
+                        summaries = [
+                            str(r.get("summary") or "").strip()[:180]
+                            for r in tool_results
+                            if r.get("status") in {"success", "partial"}
+                            and str(r.get("summary") or "").strip()
+                        ]
+                        deadline_text = (
+                            "本轮已达到平台交互时限，已保留完成的结果："
+                            + "；".join(summaries[:3])
+                            + "。其余增强步骤已停止，您可以在下一轮继续。"
+                            if summaries else
+                            "本轮已达到平台交互时限，耗时步骤已安全停止。"
+                            "请缩小任务范围或在下一轮继续。"
+                        )
+                        yield frame({"reasoning": "已到达本轮时间预算，正在安全收尾…"})
+                        out = emit_content(deadline_text)
+                        if out:
+                            yield out
+                        done_event = {"deadline_exceeded": True, "usage": {}}
+                        break
+                    if await request.is_disconnected():
+                        execution.cancel()
+                        break
                     yield frame({"reasoning": "仍在处理中，请稍候…"})
                     continue
                 if ev is None:
                     break
-            out = handle(ev)
-            if out is not None:
-                yield out
-            if finished:
-                break
+                ev = await coalesce(ev)
+                out = handle(ev)
+                if out is not None:
+                    yield out
+                if finished:
+                    break
 
-        attachments_out = _dedupe_attachments(
-            _reports_for(request, session, artifact_kinds)
-            + result_files
-            + _extra_attachments(request, session, tool_results))
-        if not terminal_emitted and done_event is not None:
-            await finalize_checkpoint("".join(content_parts))
-        if not terminal_emitted:
-            x_soda = {"attachments": attachments_out} if attachments_out else None
-            yield frame({}, finish="length" if truncated else "stop",
-                        usage=_usage_of(done_event, est_prompt,
-                                        content_sent // 4), x_soda=x_soda)
-        yield "data: [DONE]\n\n"
-
-        if not task.done():
-            task.cancel()
+            session = state.get("session")
+            attachments_out: list[dict] = []
+            if session is not None and not deadline_hit:
+                attachments_out = _dedupe_attachments(
+                    _reports_for(request, session, artifact_kinds)
+                    + result_files
+                    + _extra_attachments(request, session, tool_results)
+                )
+            if not terminal_emitted and done_event is not None and \
+                    not done_event.get("deadline_exceeded") and \
+                    state.get("finalize_checkpoint") is not None:
+                try:
+                    await asyncio.wait_for(
+                        state["finalize_checkpoint"]("".join(content_parts)),
+                        timeout=3.0,
+                    )
+                except (asyncio.TimeoutError, Exception):
+                    pass
+            if not terminal_emitted:
+                x_soda = {"attachments": attachments_out} if attachments_out else None
+                yield frame(
+                    {}, finish="length" if truncated else "stop",
+                    usage=_usage_of(done_event, est_prompt, content_sent // 4),
+                    x_soda=x_soda,
+                )
+            yield "data: [DONE]\n\n"
+        finally:
+            execution.cancel()
+            if not task.done():
+                task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+            logger.info(
+                "openai_stream_complete id=%s elapsed_ms=%d frames=%d bytes=%d "
+                "max_idle_ms=%d deadline=%s cancelled=%s",
+                cid,
+                round((time.monotonic() - request_started) * 1000),
+                frame_count,
+                frame_bytes,
+                round(max_idle_gap * 1000),
+                deadline_hit,
+                execution.cancelled(),
+            )
 
     return StreamingResponse(
         frame_stream(),

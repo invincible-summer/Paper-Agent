@@ -9,7 +9,7 @@
 对话（`/chat`，唯一入口）中自然语言驱动全部能力，Agent 自主调度 13 个原子工具 + 技能层：
 
 - **search_papers** — 意图理解 → 研究方向拆解 → 多源检索（OpenAlex / Semantic Scholar / arXiv / Crossref / Europe PMC / DOAJ / HAL / OpenAIRE / CORE，全部免费合法官方 API）→ 本地嵌入语义重排 → 自适应分层（核心集 / 候选集，无需手动设置数量）。**检索完成前对每篇论文轻量探测 OA PDF 是否可访问**（只读取响应头/PDF 文件头，不下载全文；`fulltext_status`: available / unavailable / unknown；源 API 的 `pdf_url` 绝不直接当作“可获取全文”，付费墙落地页会被判为仅摘要），前端检索卡片逐篇显示「全文可获取 / 仅摘要 / 待验证」。探测完成后执行 **best-effort 核心层全文保障**：若核心层已验证可读论文不足 5 篇，就按相关性将候选层中已验证 `available` 的论文提升进核心层，目标为 `min(5, 本次全部可读论文数)`；原核心论文保留、核心可扩容、候选删除提升项但不补位。会话已有论文时，用户点名其中某篇（DOI/标题）不会重复检索，而是直接走 deep_read / ask_papers
-- **deep_read** — 结构化深读（`core/reading_policy.py`）：**默认对所选网络论文逐篇尝试全文级深读**，全文只走合法 OA 渠道；取不到 OA 全文的论文自动回退摘要级，并在工具结果中明确列出「未取得全文」清单，绝不把摘要冒充全文。核心集与候选集 id 均可直接传入；用户点名某篇（DOI/标题）时直接深读，不会重新检索。focus 作为上传附件按需理解的裁剪依据；网络论文无论是否传 focus 都会尝试全文。上传的 PDF / DOCX / PNG / JPG / WebP 也可深读，布局、OCR 与视觉理解只在需要时启动并复用 fingerprint / 图像哈希缓存；无 VLM 时优雅降级为文本与 caption。深读结果额外保存轻量 `section_outline` 与 `document_info`（下载、解析器、页数、字符数、章节数、扫描/OCR、图表理解计数），前端不会展示或复制完整正文
+- **deep_read** — 结构化深读（`core/reading_policy.py`）：网络论文只走合法 OA 渠道，并遵守管理员的四档全文拉取策略（完全开启 / 仅明确深读时拉取 / 仅探测不下载 / 完全关闭远程全文）；本地缓存始终可复用。没有真实全文时只按摘要级处理，绝不把摘要冒充全文。核心集与候选集 id 均可直接传入；上传的 PDF / DOCX / PNG / JPG / WebP 不受网络论文拉取开关影响，布局、OCR 与视觉理解按需启动并复用缓存。
 - **ask_papers** — 会话级 RAG 问答：章节目录/“有哪些部分”问题会注入受保护的完整 `section_outline` 证据，不会被普通 top-k 精排淘汰；其他问题继续走查询改写 → 向量 + BM25 混合检索（RRF 融合）→ 本地 cross-encoder 精排 → 父子扩展；答案带引用来源并经防幻觉校验。上传文档与图片留在当前会话附件域，图/表/公式问题会按需补充多模态理解，不会伪装成网络论文
 - **research_map** — 研究地图：主题聚类 + 领域脉络 + 时间脉络 + **论文谱系图**（真实引用边来自 OpenAlex；固定画布确定性布局、节点详情面板、思想源流高亮、「深问这篇」直达问答）。谱系图节点的「全文可获取」标记沿用 search_papers / deep_read 的**已验证状态**，节点悬停与详情面板均显示；不再按元数据 `pdf_url` 猜测
 - **reading_path** — 推荐阅读路径（奠基 → 桥梁 → 前沿，每篇附理由）
@@ -54,8 +54,10 @@
 ## OpenAI 兼容端点（清小搭接入）
 
 - `GET /v1/models`、`POST /v1/chat/completions`（真流式 SSE + 非流式 JSON），严格实现 `openai-compatible-agent-integration-guide.md`；`stream` 只接受 JSON 布尔，支持缺失/空/null `model` 与 `max_tokens:1`
+- `/v1` 流式请求采用请求级 95 秒软时限 / 105 秒硬时限：验证后先发送 role 首帧，工具期间持续发送 reasoning 进度，超时或客户端中断都会安全取消并闭合为 stop + `[DONE]`；微小 token 会按时间/字数合帧，避免逐字符 SSE 产生数十倍协议开销。服务器侧诊断可运行 `scripts/diagnose_openai_agent_stream.py`
 - Bearer 鉴权支持管理员创建的长期 Agent API Key（`pa_live_...`，数据库仅存 SHA-256，完整值仅创建时显示一次，可撤销）；`AGENT_API_KEY` 保留为迁移/应急凭证。生产无任何密钥返回 503，错误或已撤销密钥返回 401
 - 多轮对话：credential/user/message-chain HMAC alias + 7 天结构化 Checkpoint；重启恢复论文、摘要与 RAG，完整 messages/reasoning 不落盘
+- 多轮对话：优先使用清小搭传入的 `sessionId`，缺失时回退到 credential/user/message-chain HMAC alias；调用方 `system` 指令会在服务端安全规则之后受限加入上下文，外部 `tool` 历史可安全忽略
 - 多模态输入：支持 OpenAI content 数组——`file` 与 `image_url`（URL 或 data URI）统一注册为会话附件，上传阶段只做快速提取，后续问答/深读按需调用视觉理解并缓存；URL 下载保留 SSRF 防护与 50MB 上限。`input_audio` 当前明确降级为不支持音频解析
 - 文件产物输出：研究地图 / 综述可生成为 markdown；`export_manuscript` 可导出 md / docx / tex，下载路由同时支持 `.txt` 文本产物。所有文件均由 `GET /files/{name}` 下载，长中文文件名受 basename 与后缀白名单保护并可正常获取
 - 富展示（按接口文档能力实现）：工具完成时正文插入 Markdown 卡片仿真（默认 8 个核心工具完整卡片，其余一行摘要）；技能加载触发思考折叠提示 + 正文技能行；`explain_element` 图表裁剪图、`citation_export` 的 .bib、`field_census` 趋势图 SVG 作为当轮附件卡片下发（image 类附件自动带 `previewUrl`）。卡片策略由管理员在 `/admin/display-policy` 页面配置（`api_display_policy` 单行表，schema v5，乐观锁），存于 `data/openai_api/state.db`
@@ -63,8 +65,9 @@
 
 ## 多用户账号（自有前端公开部署时开启）
 
-- `.env` 设 `AUTH_REQUIRED=true` 后启用账号体系；`GUEST_ACCESS=true` 时未登录浏览器按 `X-Guest-Id` 隔离，生产推荐 `GUEST_ACCESS=false` 强制登录。登录账号、游客和不同浏览器数据互不可见
-- 历史记录按账号隔离（跨账号访问一律 404）；`REGISTRATION_OPEN=false` 可关闭公开注册；密码 PBKDF2 60 万次加盐哈希，浏览器令牌只存 SHA-256（SQLite `data/users.db`）
+- `.env` 中的 `AUTH_REQUIRED` / `REGISTRATION_OPEN` / `GUEST_ACCESS` / `EMAIL_REQUIREMENT` 只在首次运行时写入运行时设置行（`data/users.db`），之后由管理员在 `/admin/auth-settings`（访问控制）页面随时修改，保存后立即生效、重启不回退；`.env` 仅为初始种子。`GUEST_ACCESS=true` 时未登录浏览器按 `X-Guest-Id` 隔离。登录账号、游客和不同浏览器数据互不可见
+- 关闭账号登录（高危，需输入「确认」二次确认）会让所有未登录访问立即变为本地用户并穿透数据隔离；误关后用 `scripts/enable_auth_required.py` 恢复（约 5 秒生效，无需重启）
+- 历史记录按账号隔离（跨账号访问一律 404）；注册邮箱要求三档可选：不要求 / 仅填写 / 邮箱 + 6 位验证码（需在 `.env` 配置 `SMTP_*`，管理页可发测试邮件验证；验证码 10 分钟有效、60 秒重发冷却、同邮箱唯一绑定）。管理员账号豁免：邮箱可留空、无需验证。密码 PBKDF2 60 万次加盐哈希，浏览器令牌只存 SHA-256（SQLite `data/users.db`）
 - `scripts/bootstrap_administrator.py` 交互式幂等初始化管理员；管理员页面 `/admin/agent-keys` 可管理清小搭长期密钥和修改密码（改密后撤销全部浏览器令牌）
 - 默认关闭 = 本地单用户模式，`start.sh` 本地开发零配置；清小搭渠道（`/v1`）使用独立 Agent API Key，不使用浏览器登录令牌
 
@@ -125,6 +128,11 @@ cd frontend && pnpm build                     # 前端类型检查 + 构建
 
 `/v1/models` 与 `/v1/chat/completions` 使用独立 `data/openai_api/` 根目录，不会改变自制前端的历史、上传、论文、附件、图谱和长期保留。默认策略：7 天结构化 Checkpoint/私有上传、24 小时导出、3 天公共 PDF、90 天语义/视觉缓存、API Trace 关闭。公共 PDF 过期即由计划清理删除，后续需要时 deep_read 会自动重新下载并提取。完整 messages、reasoning/思维链、API Key、raw bytes 和完整 PDF 正文不会写入 Checkpoint。
 
+管理员页面：`/admin/auth-settings`（访问控制）。运行时开关账号登录、游客访问、开放注册，三档选择注册邮箱要求（不要求 / 仅填写 / 邮箱 + 验证码），显示 SMTP 配置状态并支持发送测试邮件；带版本乐观锁，关账号登录需输入「确认」二次确认。各开关的说明都收在问号帮助弹窗里。
+
+
+管理员页面：`/admin/paper-search`（论文检索）。可逐项启用/关闭 OpenAlex、Semantic Scholar、arXiv、Crossref、Europe PMC、DOAJ、HAL、OpenAIRE、CORE；设置单渠道/检索总时限和搜索期 OA 探测预算；选择四档远程全文拉取策略以及“受影响时提示/静默降级”。持续 429、超时或 5xx 的渠道连续 3 次失败后熔断 300 秒并自动半开恢复。页面还提供与用户路径分离的真实检索连通性检测，以及最多读取 1 MiB、单项 20 秒的管理员 PDF 下载测速；不接受任意 URL、不保存测速 PDF、不显示密钥或完整配置邮箱。默认运行时预算为单源 12 秒、检索总计 30 秒、全文探测 30 秒，达到时限即返回已有部分结果。
+
 管理员页面：`/admin/api-storage`。可查看分类容量、磁盘状态、清理记录，选择 privacy/balanced/performance、自定义 TTL、95% pause/emergency 和 off/metadata/full Trace；每项都有隐私、磁盘、延迟、费用、连续性、重下载/OCR/VLM、生效与恢复默认说明。缩短 TTL、Full Trace、紧急删除、立即清理和遗留扫描必须预览并二次确认。
 
 管理员页面：`/admin/accounts-data`。统一列出各 web 账号和 Agent API Key 的历史会话、上传文件、Trace、会话向量、API 私有文件占用；管理员可**彻底删除**某个账号的全部数据（文件先覆写再删除、SQLite secure_delete + VACUUM，无法恢复），也可一键清理共享的论文 PDF/元素资产缓存。
@@ -150,7 +158,7 @@ cd frontend && pnpm build                     # 前端类型检查 + 构建
    - `AUTH_REQUIRED=true`、`REGISTRATION_OPEN=false`、`GUEST_ACCESS=false` — 正式自有前端策略
    - `APP_HOST` / `APP_PORT` — 后端绑定地址与端口
 2. **反向代理**（nginx / caddy）：终结 HTTPS；代理 `/api`、`/v1`、`/files` 到后端；SSE 需要 `proxy_buffering off` 和 `proxy_read_timeout ≥ 300s`。
-3. **单进程约束**：会话内存、熔断器、限流信号量均为进程内状态，uvicorn 必须 `--workers 1`（`start.sh prod` 已内置）。`/v1` 与网页 `/api/v1` 共用事件循环；Docling、本地嵌入、CrossEncoder、Chroma 和附件提取统一进入进程内单槽后台 worker，避免清小搭重任务阻塞网页首屏与健康检查。
+3. **单进程约束**：会话内存、熔断器、限流信号量均为进程内状态，uvicorn 必须 `--workers 1`（`start.sh prod` 已内置）。`/v1` 与网页 `/api/v1` 共用事件循环；Docling、本地嵌入、CrossEncoder、Chroma 和附件提取进入单槽 ML worker，SQLite Checkpoint 与轻量文件 I/O 使用独立受限 I/O worker，避免重任务阻塞 SSE、网页首屏与健康检查。
 4. **本地模型**：嵌入模型 ~120MB + 精排模型 ~1.1GB 首次加载需联网下载；可预置 `HF_ENDPOINT` 或提前下载到 `~/.cache` 打包；精排不可用只影响排序质量，不阻塞服务。前端 `/auth/config` 启动探测有 8 秒上限，后端异常时不会无限停留在加载动画；服务端鉴权仍是最终边界。
 5. **数据持久化**：`data/`（SQLite / Chroma / 上传原件与 `.txt` sidecar / 上传元素裁图 / 产物）与 `history_record/` 挂卷或定期备份。
 6. **进程管理**：systemd 两个 unit（uvicorn + next start），`restart=always`。

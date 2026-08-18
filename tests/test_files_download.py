@@ -13,12 +13,18 @@ from app.main import create_app
 
 @pytest.fixture
 def export_dir(tmp_path, monkeypatch):
-    import app.api.v1.auth as auth_api
+    import core.auth_settings_store as auth_settings_store
     import app.api.v1.files as files_api
 
     # These unit tests call the route function directly; force the documented
     # local-development identity instead of depending on a developer's .env.
-    monkeypatch.setattr(auth_api.settings, "auth_required", False)
+    monkeypatch.setattr(auth_settings_store, "_DB_PATH", tmp_path / "auth.db")
+    auth_settings_store.reset_cache()
+    current = auth_settings_store.get_auth_settings()
+    if current.auth_required:
+        auth_settings_store.update_auth_settings(
+            {"auth_required": False},
+            expected_version=current.version, updated_by="test")
     monkeypatch.setattr(files_api, "_EXPORT_DIR", tmp_path)
     return tmp_path
 

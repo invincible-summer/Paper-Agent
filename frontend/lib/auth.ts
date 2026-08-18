@@ -62,10 +62,13 @@ export function authHeaders(): Record<string, string> {
   return gid ? { "X-Guest-Id": gid } : {};
 }
 
+export type EmailRequirement = "none" | "collect" | "verify";
+
 export interface AuthConfig {
   auth_required: boolean;
   registration_open: boolean;
   guest_access: boolean;
+  email_requirement: EmailRequirement;
 }
 
 const AUTH_CONFIG_TIMEOUT_MS = 8_000;
@@ -99,8 +102,27 @@ async function authCall(path: string, body: Record<string, string>): Promise<Aut
 export const apiLogin = (username: string, password: string) =>
   authCall("login", { username, password });
 
-export const apiRegister = (username: string, password: string, displayName: string) =>
-  authCall("register", { username, password, display_name: displayName });
+export const apiRegister = (
+  username: string,
+  password: string,
+  displayName: string,
+  email = "",
+  verificationCode = "",
+) => authCall("register", {
+  username, password, display_name: displayName, email, verification_code: verificationCode,
+});
+
+/** Request a 6-digit registration code; only valid in verify mode. */
+export async function apiSendEmailCode(email: string): Promise<{ expires_in: number }> {
+  const res = await fetch(`${BASE}/auth/email/send-code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.detail || `验证码发送失败（${res.status}）`);
+  return { expires_in: Number(data?.expires_in || 600) };
+}
 
 export async function apiLogout(): Promise<void> {
   try {

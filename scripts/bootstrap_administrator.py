@@ -19,7 +19,7 @@ def main() -> int:
         description="交互式初始化 Paper Agent 管理员（密码不会显示或写入日志）"
     )
     parser.add_argument("--username", default="administrator")
-    parser.add_argument("--email", default="administrator@administrator")
+    parser.add_argument("--email", default="")
     parser.add_argument("--display-name", default="系统管理员")
     args = parser.parse_args()
 

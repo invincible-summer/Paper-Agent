@@ -9,6 +9,7 @@ LLM budget: research_map = 2 calls, reading_path = 1 call.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -16,6 +17,7 @@ import re
 from langchain_core.messages import HumanMessage
 
 from core.embeddings import embed_texts
+from core.blocking import run_cpu_bound
 from core.llm import ainvoke_utility, get_llm
 from core.models import Paper
 from core.prompts.map_path import (
@@ -153,7 +155,8 @@ async def _label_clusters(clusters: list[dict], papers_by_id: dict[str, Paper],
     )
     try:
         llm = get_llm("light")
-        resp = await ainvoke_utility(llm, [HumanMessage(content=prompt)])
+        async with asyncio.timeout(12.0):
+            resp = await ainvoke_utility(llm, [HumanMessage(content=prompt)])
         data = _parse_json_obj(resp.content if hasattr(resp, "content") else str(resp))
     except Exception as e:  # noqa: BLE001
         logger.warning("cluster labeling failed: %s", e)
@@ -199,7 +202,8 @@ async def _landscape(clusters: list[dict], papers_by_id: dict[str, Paper],
     )
     try:
         llm = get_llm("light")
-        resp = await ainvoke_utility(llm, [HumanMessage(content=prompt)])
+        async with asyncio.timeout(12.0):
+            resp = await ainvoke_utility(llm, [HumanMessage(content=prompt)])
         return (resp.content if hasattr(resp, "content") else str(resp)).strip()
     except Exception as e:  # noqa: BLE001
         logger.warning("landscape generation failed: %s", e)
@@ -218,7 +222,7 @@ async def build_research_map(papers: list[Paper], candidates: list[Paper],
 
     all_papers = list(papers) + list(candidates)
     report("语义聚类主题簇...")
-    cluster_of = cluster_papers(all_papers, sub_directions)
+    cluster_of = await run_cpu_bound(cluster_papers, all_papers, sub_directions)
 
     papers_by_id = {p.id: p for p in all_papers}
     groups: dict[int, list[str]] = {}
@@ -248,6 +252,7 @@ async def build_research_map(papers: list[Paper], candidates: list[Paper],
 
     report("构建论文谱系图数据...")
     graph = await build_genealogy(all_papers, cluster_of)
+    report("论文谱系图数据已生成")
 
     return {
         "clusters": clusters,

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 API_URL = "https://api.core.ac.uk/v3/search/works"
 
-_limiter = RateLimiter(max_concurrent=3, min_interval=0.5)
+_limiter = RateLimiter(max_concurrent=3, min_interval=0.5, source_name="core", fast_fail_429=True)
 _warned_no_key = False
 
 
@@ -77,6 +77,16 @@ class CoreBackend(SearchBackend):
                 if resp.status_code != 200:
                     return []
                 data = resp.json()
+        except httpx.TimeoutException:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "timeout")
+            return []
+        except httpx.RequestError:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "connection_error")
+            return []
         except Exception:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "invalid_response")
             return []
         return parse_results(data)

@@ -11,7 +11,7 @@ from tools.search.base import SearchBackend, generate_paper_id, shorten_chinese_
 
 API_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
-_limiter = RateLimiter(max_concurrent=3, min_interval=0.5)
+_limiter = RateLimiter(max_concurrent=3, min_interval=0.5, source_name="europepmc", fast_fail_429=True)
 
 
 class EuropePmcBackend(SearchBackend):
@@ -33,7 +33,17 @@ class EuropePmcBackend(SearchBackend):
                 if resp.status_code != 200:
                     return []
                 data = resp.json()
+        except httpx.TimeoutException:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "timeout")
+            return []
+        except httpx.RequestError:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "connection_error")
+            return []
         except Exception:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "invalid_response")
             return []
 
         papers: list[Paper] = []

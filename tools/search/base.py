@@ -77,11 +77,14 @@ class RateLimiter:
             resp = await limiter.fetch(client, method, url, **kwargs)
     """
 
-    def __init__(self, max_concurrent: int = 5, min_interval: float = 0.5):
+    def __init__(self, max_concurrent: int = 5, min_interval: float = 0.5,
+                 *, source_name: str | None = None, fast_fail_429: bool = False):
         self._semaphore = __import__("asyncio").Semaphore(max_concurrent)
         self._min_interval = min_interval
         self._last_request = 0.0
         self._lock = __import__("asyncio").Lock()
+        self._source_name = source_name
+        self._fast_fail_429 = fast_fail_429
 
     async def __aenter__(self):
         await self._semaphore.acquire()
@@ -98,23 +101,43 @@ class RateLimiter:
         self._semaphore.release()
 
     async def fetch(self, client, method: str, url: str, max_retries: int = 3, **kwargs):
-        """Fetch with automatic 429 retry + exponential backoff + Retry-After header."""
+        """Fetch with bounded 429 retry and process-local source telemetry.
+
+        Main paper-search backends opt into ``fast_fail_429``: at most one
+        retry and two seconds of waiting, so a cloud-IP 429 cannot consume the
+        whole chat turn. Other utility callers retain the legacy budget.
+        """
         import asyncio
         import time
 
-        for attempt in range(max_retries):
-            resp = await client.request(method, url, **kwargs)
-            if resp.status_code == 429:
-                # Honor Retry-After header if present, else exponential backoff
-                retry_after = resp.headers.get("Retry-After")
-                if retry_after:
+        attempts = min(max_retries, 2) if self._fast_fail_429 else max_retries
+        wait_cap = 2.0 if self._fast_fail_429 else 30.0
+        started = time.monotonic()
+        resp = None
+        try:
+            for attempt in range(attempts):
+                resp = await client.request(method, url, **kwargs)
+                if resp.status_code == 429 and attempt + 1 < attempts:
+                    retry_after = resp.headers.get("Retry-After")
                     try:
-                        wait = float(retry_after)
+                        wait = float(retry_after) if retry_after else 2 ** attempt
                     except ValueError:
                         wait = 2 ** attempt
-                else:
-                    wait = 2 ** attempt
-                await asyncio.sleep(min(wait, 30))  # cap at 30s
-                continue
-            return resp
-        return resp  # return last response after retries exhausted
+                    await asyncio.sleep(min(wait, wait_cap))
+                    continue
+                break
+        except Exception:
+            # The backend classifies timeout/request/parse failures so a single
+            # network exception is counted exactly once by the source breaker.
+            raise
+        if self._source_name and resp is not None:
+            from core.search_source_health import get_search_health_registry
+            status = int(resp.status_code)
+            code = ("rate_limited" if status == 429 else
+                    "server_error" if status >= 500 else None)
+            get_search_health_registry().note(
+                self._source_name, status=status,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                error_code=code,
+            )
+        return resp

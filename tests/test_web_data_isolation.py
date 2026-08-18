@@ -50,10 +50,16 @@ def test_web_file_routes_do_not_cross_user_boundaries(isolated_web_storage, monk
     import app.api.v1.auth as auth_api
     import app.api.v1.chat as chat_api
     import app.api.v1.files as files_api
+    import core.auth_settings_store as auth_settings_store
     from core.web_artifact_store import register_web_artifact
     from tools.ingest.attachments import save_attachment
 
-    monkeypatch.setattr(auth_api.settings, "auth_required", True)
+    monkeypatch.setattr(auth_settings_store, "_DB_PATH", isolated_web_storage / "auth.db")
+    auth_settings_store.reset_cache()
+    current_flags = auth_settings_store.get_auth_settings()
+    auth_settings_store.update_auth_settings(
+        {"auth_required": True},
+        expected_version=current_flags.version, updated_by="test")
     monkeypatch.setattr(auth_api, "current_user", lambda *_args: {"id": "user-a"})
     monkeypatch.setattr(chat_api, "current_user", lambda *_args: {"id": "user-a"})
     aid = "b" * 32

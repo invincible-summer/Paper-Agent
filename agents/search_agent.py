@@ -323,12 +323,22 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
 
     # ② Multi-source retrieval + dedup
     s = get_settings()
+    from core.paper_search_settings_store import get_paper_search_policy
+    policy = get_paper_search_policy()
     storage_context = state.get("storage_context")
-    enabled = [k for k, v in s.search.sources.items() if v]
-    manager = SearchManager(
-        enabled_sources=enabled,
-        results_per_source=s.search.results_per_source,
-    )
+    enabled = [k for k, v in policy.sources.items() if v]
+    try:
+        manager = SearchManager(
+            enabled_sources=enabled,
+            results_per_source=s.search.results_per_source,
+            search_deadline_seconds=policy.search_deadline_seconds,
+            per_source_timeout_seconds=policy.per_source_timeout_seconds,
+        )
+    except TypeError:
+        # Compatibility for injected test/extension managers that implement the
+        # pre-runtime-policy constructor. The production manager accepts budgets.
+        manager = SearchManager(
+            enabled_sources=enabled, results_per_source=s.search.results_per_source)
     report(f"在 {len(enabled)} 个数据源中检索...")
     all_papers = await manager.search_all(plan["queries"], progress_callback=report)
     report(f"去重后共 {len(all_papers)} 篇")
@@ -350,7 +360,8 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
     state["papers"] = core
     state["candidates"] = candidates
     fulltext_statuses: dict[str, str] = {}
-    if getattr(s.search, "verify_fulltext", True) and (core or candidates):
+    if (policy.verify_fulltext and policy.fulltext_verify_timeout_seconds > 0
+            and policy.paper_fetch_mode != "disabled" and (core or candidates)):
         from tools.pdf.availability import verify_papers_fulltext
 
         report("探测各论文 OA 全文可获取性（只读取 PDF 文件头，不下载全文）...")
@@ -359,6 +370,7 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
                 core + candidates,
                 storage_context=storage_context,
                 progress_callback=report,
+                timeout_seconds=policy.fulltext_verify_timeout_seconds,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("fulltext verification degraded to unknown: %s", e)

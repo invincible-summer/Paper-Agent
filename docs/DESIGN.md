@@ -160,19 +160,26 @@ Paper_Agent/
 
 `GET /files/{filename}`：下载 `data/exports/` 下生成的 `.md/.txt/.docx/.tex` 产物。端点执行 basename 与后缀白名单校验、`is_file()` 检查，并由 `FileResponse` 设置对应 MIME 与 RFC 兼容的 `Content-Disposition`；长中文 DOCX 文件名可直接下载。供 `x_soda.attachments` 与前端文件卡片使用。
 
-### 3.4 账号鉴权端点（`/api/v1/auth`，`backend/app/api/v1/auth.py` + `core/user_store.py`）
+### 3.4 账号鉴权端点（`/api/v1/auth`，`backend/app/api/v1/auth.py` + `core/user_store.py` + `core/auth_settings_store.py`）
 
-仅服务自有前端渠道；清小搭渠道（`/v1`）走独立 Agent API Key，与浏览器登录令牌无关。`AUTH_REQUIRED=false`（默认）时 `/auth/config` 报告本地模式，行为同旧版。开启后：Bearer 令牌解析账号；`GUEST_ACCESS=true` 才允许持浏览器随机 `X-Guest-Id` 的 `guest:<id>` 隔离身份；`GUEST_ACCESS=false` 时无账号令牌一律 401，前端跳转 `/login`。生产推荐 `AUTH_REQUIRED=true + REGISTRATION_OPEN=false + GUEST_ACCESS=false`。开启多用户前可用 `scripts/reown_local_history.py <username>` 将旧 `local` 历史重新归属。
+仅服务自有前端渠道；清小搭渠道（`/v1`）走独立 Agent API Key，与浏览器登录令牌无关。四个认证开关（`auth_required` / `registration_open` / `guest_access` / `email_requirement`）以 `data/users.db` 中的单行运行时设置表 `web_auth_settings`（乐观锁 `version`，进程内 5s TTL 读缓存、写入即刷新）为唯一事实来源：`.env` 中的 `AUTH_REQUIRED` / `REGISTRATION_OPEN` / `GUEST_ACCESS` / `EMAIL_REQUIREMENT` 只在首次读取时 seed 初始行，之后改 `.env` 不影响线上值。管理员在 `/admin/auth-settings` 页面（见 3.5）运行时修改，保存后立即生效。`auth_required=false`（本地模式）时 `/auth/config` 报告本地模式，行为同旧版。开启后：Bearer 令牌解析账号；`guest_access=true` 才允许持浏览器随机 `X-Guest-Id` 的 `guest:<id>` 隔离身份；`guest_access=false` 时无账号令牌一律 401，前端跳转 `/login`。误关账号登录后用 `scripts/enable_auth_required.py` 恢复（写库后约 5 秒生效，无需重启）。开启多用户前可用 `scripts/reown_local_history.py <username>` 将旧 `local` 历史重新归属。
 
-`users` 表向后兼容迁移 `email/role/disabled` 字段。`scripts/bootstrap_administrator.py` 以隐藏输入幂等创建 administrator，绝不重置已有管理员密码或自动提升同名普通账号。`POST /auth/change-password` 校验当前密码并撤销该用户全部浏览器令牌。`agent_api_keys` 表只保存长期密钥 SHA-256、前后缀和使用/撤销元数据；完整 `pa_live_...` 仅创建响应显示一次。管理员 API 为 `GET/POST /admin/agent-keys` 和 `DELETE /admin/agent-keys/{id}`，普通用户 403。
+**注册邮箱要求**（`email_requirement` 三态）：`none` = 仅用户名密码（默认）；`collect` = 必填邮箱但不验证；`verify` = 必填邮箱 + 6 位数字验证码（仅此模式可用 `POST /auth/email/send-code`）。验证码经 `core/email_sender.py`（纯标准库 smtplib，SSL/STARTTLS，凭据只读 `.env` 的 `SMTP_*`，绝不入库/入日志）发送，库中 `email_codes` 表只存 SHA-256：10 分钟有效、60 秒重发冷却（429）、最多 5 次尝试、成功或耗尽即删除；`verify` 模式需 SMTP 已配置（PUT 守卫 422）。邮箱统一小写归一，非空邮箱在 `users` 表上有部分唯一索引（`WHERE email <> ''`，存量重复时静默跳过），同一邮箱只能绑定一个账号，注册即 `email_verified=1`；`collect` 存 `email_verified=0`。管理员账号完全豁免：bootstrap 可空邮箱、无需验证。
+
+`users` 表向后兼容迁移 `email/role/disabled/email_verified` 字段。`scripts/bootstrap_administrator.py` 以隐藏输入幂等创建 administrator（邮箱默认留空），绝不重置已有管理员密码或自动提升同名普通账号。`POST /auth/change-password` 校验当前密码并撤销该用户全部浏览器令牌。`agent_api_keys` 表只保存长期密钥 SHA-256、前后缀和使用/撤销元数据；完整 `pa_live_...` 仅创建响应显示一次。管理员 API 为 `GET/POST /admin/agent-keys` 和 `DELETE /admin/agent-keys/{id}`，普通用户 403。
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/auth/config` | GET | 公开：`{auth_required, registration_open}`，前端据此决定是否进登录页 |
-| `/auth/register` | POST | 注册（201）；`REGISTRATION_OPEN=false` 时关闭 |
+| `/auth/config` | GET | 公开：`{auth_required, registration_open, guest_access, email_requirement}`，前端据此决定登录页形态与注册字段 |
+| `/auth/register` | POST | 注册（201）；`registration_open=false` 时 403；邮箱模式见上（缺邮箱/验证码 422，码错/过期/邮箱被绑定 400） |
+| `/auth/email/send-code` | POST | 发送注册验证码（仅 verify 模式且开放注册）；冷却中 429，发信失败 502 且不留码 |
 | `/auth/login` | POST | 登录 → `{token, user}`；错误口令 401；用户不存在也跑同等 KDF（防用户名探测时序） |
 | `/auth/me` | GET | 令牌 → 用户信息 |
 | `/auth/logout` | POST | 吊销令牌 |
+
+### 3.5 管理员访问控制端点（`/api/v1/admin/auth-settings`）
+
+`GET` 返回设置行 + SMTP 非机密状态（`{configured, sender, from_name}`）；`PUT`（strict body + `expected_version` 乐观锁，冲突 409）修改四个开关，守卫：`email_requirement=verify` 且 SMTP 未配置 → 422；把 `auth_required` 关为 false 必须携带 `confirm_disable_auth=true`（防误关——关闭后所有未登录访问立即变为 local 用户，穿透数据隔离，且管理页随之不可用）→ 否则 422。`POST /auth-settings/test-email` 向指定邮箱发测试邮件验证 SMTP 连通性。前端页面 `/admin/auth-settings`（访问控制）：开关行 = 标签 + 问号帮助 + 共享 `AdminToggle`，说明文字全部收进 HelpModal；保存走 draft/diff/sticky 保存栏；关账号登录需在 ConfirmModal 中输入「确认」，关游客访问有危险确认弹窗；本地模式下游客/注册/邮箱开关禁用并显示横幅。
 
 - **口令**：PBKDF2-HMAC-SHA256 60 万次迭代 + 16B 盐（OWASP 基线，stdlib 零新依赖），格式 `pbkdf2$iter$salt$hash`，常量时间比较。
 - **令牌**：32B 随机不透明串，库中只存 SHA-256（库泄露不等于令牌泄露）；30 天过期；SQLite `data/users.db`（WAL，全参数化）。
@@ -518,7 +525,7 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 ### 部署单 worker 与事件循环隔离
 
-`/v1`、网页 `/api/v1` 和健康检查共享同一个 Uvicorn 事件循环；会话内存、熔断器、LLM 限流信号量也都是进程内状态，因此仍必须 `--workers 1`。同步的 Docling/PyMuPDF 结构解析、SentenceTransformer/CrossEncoder 推理、Chroma 向量读写、附件快速提取和 API Checkpoint 落盘不得直接运行在 async 请求链：统一经 `core.blocking.run_cpu_bound` 投递到一个进程级 daemon worker 串行执行。这样本地重计算可以继续，但网页鉴权启动、`/health`、SSE 心跳和其他网络协程仍能被调度；串行单槽同时限制 4C16G 上的本地 ML 内存峰值。原生调用被取消时无法强杀，后台 worker 会完成当前调用再处理下一项。扩多 worker/多机前仍须外置共享会话、任务队列、熔断和限流状态，不能直接增加 Uvicorn worker。
+`/v1`、网页 `/api/v1` 和健康检查共享同一个 Uvicorn 事件循环；会话内存、熔断器、LLM 限流信号量也都是进程内状态，因此仍必须 `--workers 1`。同步的 Docling/PyMuPDF 结构解析、SentenceTransformer/CrossEncoder 推理、Chroma 向量读写和附件快速提取不得直接运行在 async 请求链：统一经 `core.blocking.run_cpu_bound` 投递到一个进程级 daemon ML worker 串行执行。SQLite Checkpoint、轻量文件写入等 I/O 经 `core.blocking.run_io_bound` 投递到独立的两个受限 I/O worker，避免 ML 队列形成跨请求队头阻塞。OpenAI-compatible 流式链路验证后先发 role 首帧；工具进度经 reasoning 输出，95 秒软时限停止启动新工作，105 秒硬时限前闭合 stop + `[DONE]`，客户端断开会取消并回收 producer。原生 ML 调用被取消时无法强杀，但已取消的等待任务不再写入请求状态。扩多 worker/多机前仍须外置共享会话、任务队列、熔断和限流状态，不能直接增加 Uvicorn worker。
 
 前端 `fetchAuthConfig` 使用 8 秒超时；超时只结束首屏无限 spinner，并保留本地已有登录信息。所有 `/api/v1` 权限仍由后端逐请求校验，前端降级不构成授权。
 
@@ -529,3 +536,30 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 - `config/settings.yaml`：llm（base_url/model_light/model_reasoning/temperature/timeout，.env `DEEPSEEK_*` 覆盖）、search（每源结果数/源开关）、reader（pdf_dir/parser/read_chunk_chars）、storage（sqlite/chroma/embedding_model）。
 - 环境变量：`DEEPSEEK_*`、`MULTIMODAL_*`、`S2_API_KEY`、`OPENALEX_EMAIL`、`CROSSREF_EMAIL`、迁移/应急 `AGENT_API_KEY`、`PUBLIC_BASE_URL`、`AUTH_REQUIRED/REGISTRATION_OPEN/GUEST_ACCESS`、`FRONTEND_ORIGIN/CORS_ORIGINS`、`APP_HOST/APP_PORT`、`BACKEND_URL/NEXT_PUBLIC_BACKEND_URL`、`HF_ENDPOINT/HF_HUB_OFFLINE/XDG_CACHE_HOME`。
 - 测试：`./.env_conda/bin/python -m pytest tests/ -q` 默认运行非 slow 回归，普通测试须 stub 外部 LLM/VLM/Docling，不依赖凭据、网络或模型下载；slow 用例通过 `-m slow` 单独运行。`tests/eval/` 提供检索质量黄金集（offline fixture / online 双模式）；前端以 `pnpm build` 作为类型与生产构建闸。真实 API + 浏览器端到端验证属于发布前手动验收，不进入普通 CI。
+
+## 运行时论文渠道与远程全文策略
+
+论文检索的实时策略存放在 `data/users.db` 的 `paper_search_policy` 单行表中；`config/settings.yaml` 只负责首次种子。管理员通过独立页面 `/admin/paper-search` 修改后，约 5 秒缓存立即失效，下一次检索生效。策略使用版本乐观锁，不包含 API key、Authorization 或完整配置邮箱。
+
+### 快速部分结果与按源熔断
+
+`SearchManager` 只调度管理员启用的 9 个元数据源，并同时执行单条渠道时限（默认 12 秒）和全局检索时限（默认 30 秒）。总时限到达后取消并 drain 未完成任务，保留已返回论文继续去重和重排。主检索后端遇到 429 最多短重试一次，等待上限 2 秒，不再让云数据中心 IP 的持续限流占满整个 turn。
+
+每源维护单 worker 进程内健康状态：连续 3 次 429、超时、连接错误、5xx 或非法响应后熔断 300 秒；冷却后只放行一条 half-open 查询，成功关闭熔断，失败重新打开。HTTP 200 合法空结果、管理员关闭和缺少可选 key 不计入故障。管理员开关优先于熔断，熔断不会永久改写配置。
+
+### 四档远程全文访问
+
+`paper_fetch_mode` 的判定顺序为：管理员全文策略 → 来源开关 → 来源熔断 → 本地缓存 → 调用来源。
+
+- `enabled`：允许 OA 候选解析、文件头探测、自动 `_ensure_fulltext` 和直接 `deep_read` 下载。
+- `explicit_only`：允许候选解析和文件头探测；直接 `deep_read` 可下载，自动全文升级不得下载。
+- `probe_only`：允许候选解析和轻量探测；所有普通用户路径禁止完整 PDF 下载。
+- `disabled`：禁止远程候选解析、Unpaywall/doi.org 全文解析、探测和下载。
+
+所有模式都优先复用已通过 `%PDF-` 校验的本地 PDF、已持久化结构和元素理解，策略切换不删除数据。来源开关关闭后不使用该来源的直接 PDF URL；Unpaywall/doi.org 作为独立 OA 辅助边界保留，除非全文总策略为 `disabled`。
+
+`fetch_policy_disclosure=affected_only` 只在当前请求确实被限制时生成管理员策略提示；`silent` 不向 web 进度、`/v1` reasoning、工具卡或正文注入策略原因，但仍向模型提供真实证据层级，禁止把摘要冒充全文。原始 provider thinking 继续按既有不变量透传，不增加事后过滤器。
+
+### 管理员诊断
+
+管理员接口位于 `/api/v1/admin/paper-search/*`。连通性检测使用固定查询，报告 HTTP 总延迟、真实结果数和可选 PDF 文件头探测，不伪造 DNS/TCP/TLS 分段。下载测速与连接检测分开，管理员可显式测试已关闭渠道或全文关闭状态；目标来自固定登记或经过 SSRF 校验的诊断候选，不接受任意 URL。测速优先 Range，最多读取 1 MiB、单项最多 20 秒、校验 `%PDF-`，不写生产 PDF 目录。数据库只保留最近一次完整连接/测速结果和最多 20 条摘要，不保存响应正文、完整 PDF 或秘密。

@@ -14,7 +14,7 @@ from tools.search.base import SearchBackend, generate_paper_id, shorten_chinese_
 API_URL = "https://doaj.org/api/search/articles"
 
 # DOAJ is small infra: 2 concurrent, 1.0s between requests
-_limiter = RateLimiter(max_concurrent=2, min_interval=1.0)
+_limiter = RateLimiter(max_concurrent=2, min_interval=1.0, source_name="doaj", fast_fail_429=True)
 
 
 class DoajBackend(SearchBackend):
@@ -32,7 +32,17 @@ class DoajBackend(SearchBackend):
                 if resp.status_code != 200:
                     return []
                 data = resp.json()
+        except httpx.TimeoutException:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "timeout")
+            return []
+        except httpx.RequestError:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "connection_error")
+            return []
         except Exception:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "invalid_response")
             return []
 
         papers: list[Paper] = []

@@ -1,6 +1,7 @@
 """OpenAlex citation reference enrichment (Phase 1). Real directed citation edges."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import httpx
 from core.config import get_settings
@@ -11,8 +12,12 @@ logger = logging.getLogger(__name__)
 
 API_URL = "https://api.openalex.org/works"
 
-# 5 concurrent, 0.5s min interval (same policy as openalex.py search backend).
-_limiter = RateLimiter(max_concurrent=5, min_interval=0.5)
+# Citation enrichment is non-critical: share the OpenAlex breaker and use the
+# same short 429 retry policy as the primary search backend.
+_limiter = RateLimiter(
+    max_concurrent=5, min_interval=0.5,
+    source_name="openalex", fast_fail_429=True,
+)
 
 
 def _mailto() -> dict:
@@ -34,10 +39,10 @@ async def fetch_referenced_works(dois: list[str]) -> dict[str, list[str]]:
     if not dois:
         return out
     async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-        for doi in dois:
+        async def fetch_one(doi: str) -> None:
             ndoi = _norm_doi(doi)
             if not ndoi:
-                continue
+                return
             url = f"{API_URL}/doi:{ndoi}"
             params = {"select": "id,referenced_works", **_mailto()}
             try:
@@ -45,10 +50,11 @@ async def fetch_referenced_works(dois: list[str]) -> dict[str, list[str]]:
                     resp = await _limiter.fetch(client, "GET", url, params=params)
                 if resp.status_code != 200:
                     logger.debug("OpenAlex refs lookup %s -> %s", ndoi, resp.status_code)
-                    continue
+                    return
                 out[ndoi] = list(resp.json().get("referenced_works") or [])
             except Exception as e:
                 logger.warning("OpenAlex refs lookup failed for %s: %s", ndoi, e)
+        await asyncio.gather(*(fetch_one(doi) for doi in dict.fromkeys(dois)))
     return out
 
 
@@ -58,21 +64,22 @@ async def resolve_openalex_ids(dois: list[str]) -> dict[str, str]:
     if not dois:
         return out
     async with httpx.AsyncClient(timeout=30, proxy=None, trust_env=False) as client:
-        for doi in dois:
+        async def fetch_one(doi: str) -> None:
             ndoi = _norm_doi(doi)
             if not ndoi:
-                continue
+                return
             params = {"filter": f"doi:{ndoi}", "select": "id,doi", "per-page": 1, **_mailto()}
             try:
                 async with _limiter:
                     resp = await _limiter.fetch(client, "GET", API_URL, params=params)
                 if resp.status_code != 200:
-                    continue
+                    return
                 results = resp.json().get("results") or []
                 if results:
                     out[ndoi] = results[0].get("id", "")
             except Exception as e:
                 logger.debug("OpenAlex id resolve failed for %s: %s", ndoi, e)
+        await asyncio.gather(*(fetch_one(doi) for doi in dict.fromkeys(dois)))
     return out
 
 

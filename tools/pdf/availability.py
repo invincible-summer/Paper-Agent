@@ -34,7 +34,7 @@ from tools.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
-_PROBE_TIMEOUT_SECONDS = 20.0
+_PROBE_TIMEOUT_SECONDS = 8.0
 _DEFAULT_TOTAL_TIMEOUT_SECONDS = 180.0
 _DEFAULT_TTL_DAYS = 30
 
@@ -206,6 +206,13 @@ async def verify_papers_fulltext(
 
         if not to_check:
             report("全文可获取性探测：全部复用已核实缓存")
+            return statuses
+
+        from core.paper_search_settings_store import remote_probe_allowed
+        if not remote_probe_allowed():
+            for paper in to_check:
+                paper.fulltext_status = FULLTEXT_STATUS_UNKNOWN
+                statuses[paper.id] = FULLTEXT_STATUS_UNKNOWN
             return statuses
 
         report(f"全文可获取性探测 0/{len(to_check)}（只读取 PDF 文件头，不下载全文）")

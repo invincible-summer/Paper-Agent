@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 
 class SearchPapersArgs(BaseModel):
-    """多源检索学术论文（OpenAlex/arXiv/Crossref/Europe PMC/DOAJ），语义重排后自适应分出核心集与候选集。检索完成前会逐篇探测 OA PDF 是否可访问（只读文件头，不下载全文），并给每篇标注 fulltext_status: available/unavailable/unknown；用户问“哪些能看全文”时直接使用这些标记回答，不要为清点全文状态调用 deep_read。会话已有论文而用户只是点名其中某篇（给了 DOI/标题/“这篇”）时不要调用，直接用 deep_read/ask_papers。"""
+    """从管理员启用的多源渠道检索学术论文，语义重排后自适应分出核心集与候选集。检索按运行时单源/总时限返回部分结果；管理员可关闭渠道或全文探测。启用探测时只读 OA PDF 文件头并标注 fulltext_status: available/unavailable/unknown，不下载全文。用户问“哪些能看全文”时使用最近标记，不要为清点状态调用 deep_read。会话已有论文而用户只是点名其中某篇时不要重复检索。"""
     topic: str = Field(description="研究主题或问题。必填。")
     conception: str = Field(default="",
         description="可选：用户的研究构想/角度/预期贡献，用于引导查询拆解。")
@@ -29,7 +29,7 @@ class SearchPapersArgs(BaseModel):
 
 
 class DeepReadArgs(BaseModel):
-    """对核心集论文或用户上传的 PDF/DOCX/图片做结构化深读。网络论文默认对每篇都尝试获取合法 OA 全文并做全文级深读；取不到全文的自动回退摘要级并在结果中明确列出，绝不把摘要冒充全文。上传附件按需启动布局/OCR/VLM，多次读取复用缓存。"""
+    """对核心集论文或用户上传的 PDF/DOCX/图片做结构化深读。网络论文遵守管理员全文拉取策略：可完全开启、仅显式深读下载、仅探测不下载或完全关闭；不能取得全文时使用本地缓存/摘要并保持证据边界，绝不把摘要冒充全文。上传附件不受网络论文拉取开关影响，按需启动布局/OCR/VLM并复用缓存。"""
     paper_ids: list[str] = Field(default_factory=list,
         description="可选：只读指定 paper_id 的论文（核心集或候选集均可）；空列表 = 整个核心集。用户直接给出 DOI 时原样传入，不要先 search_papers 定位。")
     attachment_ids: list[str] = Field(default_factory=list,

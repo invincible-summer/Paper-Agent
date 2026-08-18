@@ -1,6 +1,7 @@
 """Backend configuration loaded from project-root .env."""
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -39,9 +40,23 @@ class Settings(BaseSettings):
 
     # Multi-user auth (frontend channel only; /v1 uses AGENT_API_KEY instead).
     # Off by default so local dev via start.sh keeps working with zero setup.
+    # These three plus email_requirement only SEED the runtime settings row in
+    # data/users.db; afterwards /admin/auth-settings owns the live values.
     auth_required: bool = False
     registration_open: bool = True
     guest_access: bool = True
+    # Registration email policy seed: none=不要求邮箱; collect=仅收集不验证;
+    # verify=必须输入邮箱验证码（需要下方 SMTP 配置）。
+    email_requirement: Literal["none", "collect", "verify"] = "none"
+
+    # SMTP 发信（注册邮箱验证码）。凭据只存在于 .env，绝不入库/入日志。
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_security: Literal["ssl", "starttls"] = "ssl"
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_sender: str = ""
+    smtp_from_name: str = "Paper Agent"
 
     @property
     def allowed_origins(self) -> list[str]:

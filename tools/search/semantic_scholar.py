@@ -16,7 +16,7 @@ FIELDS = (
 )
 
 # S2 has strict rate limits: 3 concurrent, 1.5s min interval
-_limiter = RateLimiter(max_concurrent=3, min_interval=1.5)
+_limiter = RateLimiter(max_concurrent=3, min_interval=1.5, source_name="semantic_scholar", fast_fail_429=True)
 
 
 class SemanticScholarBackend(SearchBackend):
@@ -47,7 +47,17 @@ class SemanticScholarBackend(SearchBackend):
                 if resp.status_code != 200:
                     return []
                 data = resp.json()
+        except httpx.TimeoutException:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "timeout")
+            return []
+        except httpx.RequestError:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "connection_error")
+            return []
         except Exception:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "invalid_response")
             return []
 
         papers: list[Paper] = []

@@ -64,6 +64,16 @@ def _connect() -> sqlite3.Connection:
         conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
     if "disabled" not in columns:
         conn.execute("ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0")
+    if "email_verified" not in columns:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0")
+    # 注册邮箱绑定唯一性：空邮箱（未绑定）不受约束；存量重复时跳过索引而不是启动失败。
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email "
+            "ON users(email) WHERE email <> ''")
+    except sqlite3.DatabaseError:
+        pass
     conn.execute(
         """CREATE TABLE IF NOT EXISTS tokens (
                token_hash TEXT PRIMARY KEY,
@@ -150,7 +160,8 @@ def _validate_email(email: str) -> str:
 
 
 def create_user(username: str, password: str, display_name: str = "",
-                *, email: str = "", role: str = "user") -> dict:
+                *, email: str = "", role: str = "user",
+                email_verified: bool = False) -> dict:
     username, password = validate_credentials(username, password)
     email = _validate_email(email)
     if role not in {"user", "administrator"}:
@@ -159,15 +170,25 @@ def create_user(username: str, password: str, display_name: str = "",
     shown_name = (display_name or username).strip()[:40]
     conn = _connect()
     try:
+        if email:
+            duplicate = conn.execute(
+                "SELECT 1 FROM users WHERE email = ? AND email <> ''", (email,)
+            ).fetchone()
+            if duplicate is not None:
+                raise UserStoreError("该邮箱已被绑定")
         conn.execute(
             "INSERT INTO users "
-            "(id, username, password_hash, display_name, created_at, email, role, disabled) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+            "(id, username, password_hash, display_name, created_at, email, role, "
+            " disabled, email_verified) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
             (uid, username, _hash_password(password), shown_name,
-             time.time(), email, role),
+             time.time(), email, role, int(bool(email_verified))),
         )
         conn.commit()
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as exc:
+        # 用户名唯一索引与邮箱部分索引都会走到这里；按约束名区分提示。
+        if "email" in str(exc).lower():
+            raise UserStoreError("该邮箱已被绑定") from None
         raise UserStoreError("用户名已被占用") from None
     finally:
         conn.close()
@@ -177,7 +198,10 @@ def create_user(username: str, password: str, display_name: str = "",
 
 def bootstrap_administrator(username: str, email: str, password: str,
                             display_name: str = "系统管理员") -> tuple[dict, bool]:
-    """Create the first administrator once; never resets an existing password."""
+    """Create the first administrator once; never resets an existing password.
+
+    管理员账号对邮箱完全豁免：可留空，填了也不需要验证（email_verified=1）。
+    """
     username, password = validate_credentials(username, password)
     email = _validate_email(email)
     conn = _connect()
@@ -193,7 +217,7 @@ def bootstrap_administrator(username: str, email: str, password: str,
     finally:
         conn.close()
     return create_user(username, password, display_name,
-                       email=email, role="administrator"), True
+                       email=email, role="administrator", email_verified=True), True
 
 
 def authenticate(username: str, password: str) -> dict | None:

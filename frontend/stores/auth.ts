@@ -2,7 +2,7 @@
 import { create } from "zustand";
 import {
   readAuth, writeAuth, clearAuth, fetchAuthConfig,
-  type AuthUser,
+  type AuthUser, type EmailRequirement,
 } from "@/lib/auth";
 
 interface AuthStoreState {
@@ -11,6 +11,7 @@ interface AuthStoreState {
   authRequired: boolean;
   registrationOpen: boolean;
   guestAccess: boolean;
+  emailRequirement: EmailRequirement;
   token: string;
   user: AuthUser | null;
   hydrate: () => Promise<void>;
@@ -23,6 +24,7 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
   authRequired: false,
   registrationOpen: false,
   guestAccess: true,
+  emailRequirement: "none",
   token: "",
   user: null,
 
@@ -35,6 +37,7 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
       auth_required: Boolean(saved.token),
       registration_open: false,
       guest_access: !saved.token,
+      email_requirement: "none" as EmailRequirement,
     };
     try {
       cfg = await fetchAuthConfig();
@@ -44,6 +47,7 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
       authRequired: cfg.auth_required,
       registrationOpen: cfg.registration_open,
       guestAccess: cfg.guest_access,
+      emailRequirement: cfg.email_requirement ?? "none",
       token: cfg.auth_required ? saved.token : "",
       user: cfg.auth_required ? saved.user : null,
     });

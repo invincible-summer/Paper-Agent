@@ -12,7 +12,7 @@ API_URL = "https://export.arxiv.org/api/query"
 
 # arXiv ToU hard limit (https://info.arxiv.org/help/api/tou.html):
 # no more than one request every 3 seconds, single connection.
-_limiter = RateLimiter(max_concurrent=1, min_interval=3.0)
+_limiter = RateLimiter(max_concurrent=1, min_interval=3.0, source_name="arxiv", fast_fail_429=True)
 
 
 class ArxivBackend(SearchBackend):
@@ -44,7 +44,17 @@ class ArxivBackend(SearchBackend):
                 if resp.status_code != 200:
                     return []
                 xml = resp.text
+        except httpx.TimeoutException:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "timeout")
+            return []
+        except httpx.RequestError:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "connection_error")
+            return []
         except Exception:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "invalid_response")
             return []
 
         feed = feedparser.parse(xml)

@@ -11,7 +11,7 @@ from tools.search.base import SearchBackend, generate_paper_id, shorten_chinese_
 
 API_URL = "https://api.openaire.eu/search/publications"
 
-_limiter = RateLimiter(max_concurrent=3, min_interval=0.5)
+_limiter = RateLimiter(max_concurrent=3, min_interval=0.5, source_name="openaire", fast_fail_429=True)
 
 
 def _val(node) -> str:
@@ -108,6 +108,16 @@ class OpenAireBackend(SearchBackend):
                 if resp.status_code != 200:
                     return []
                 data = resp.json()
+        except httpx.TimeoutException:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "timeout")
+            return []
+        except httpx.RequestError:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "connection_error")
+            return []
         except Exception:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "invalid_response")
             return []
         return parse_results(data)

@@ -8,6 +8,7 @@ to do next directly from the tool result.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, Callable
@@ -22,8 +23,20 @@ from core.circuit_breaker import get_breaker
 from core.llm import ainvoke_utility, get_llm
 from core.models import Paper
 from core.tool_protocol import ErrorCode, ToolResult, err, ok, partial_result
+from core.turn_execution import TurnExecutionContext
 
 logger = logging.getLogger(__name__)
+
+
+_API_TOOL_TIMEOUTS: dict[str, float] = {
+    "search_papers": 45.0,
+    "research_map": 55.0,
+    "deep_read": 75.0,
+    "reading_path": 20.0,
+    "write_review": 60.0,
+    "field_census": 35.0,
+    "integrity_sweep": 35.0,
+}
 
 
 def _select_session_papers(session: ChatSession, paper_ids) -> list[Paper] | None:
@@ -103,6 +116,7 @@ async def execute_tool(
     tool_call: dict,
     session: ChatSession,
     progress_cb: Callable[[str], Any] | None = None,
+    execution_context: TurnExecutionContext | None = None,
 ) -> ToolResult:
     """Validate args, check the circuit breaker, dispatch to the implementation."""
     name = tool_call.get("name", "")
@@ -118,7 +132,7 @@ async def execute_tool(
     impl = _IMPLS.get(name)
     if impl is None:
         return err(name, ErrorCode.NO_TOOL, f"未知工具：{name}")
-    try:
+    async def invoke_impl() -> ToolResult:
         operation = {
             "deep_read": "deep_read", "exhibit_index": "deep_read",
             "explain_element": "deep_read", "export_report": "export",
@@ -130,16 +144,31 @@ async def execute_tool(
             if guard is not None:
                 try:
                     async with guard.protect(operation, session.session_id):
-                        result = await impl(args, session, progress_cb)
+                        return await impl(args, session, progress_cb)
                 except StoragePressureError as exc:
                     return err(
                         name, ErrorCode.STORAGE_PRESSURE,
                         f"API 存储空间已达到 {exc.threshold}% 保护阈值，当前暂停文件型重任务；普通文字问答仍可继续。",
                     )
             else:
-                result = await impl(args, session, progress_cb)
-        else:
-            result = await impl(args, session, progress_cb)
+                return await impl(args, session, progress_cb)
+        return await impl(args, session, progress_cb)
+
+    try:
+        timeout = None
+        if execution_context is not None:
+            timeout = execution_context.bounded_timeout(
+                _API_TOOL_TIMEOUTS.get(name, 30.0), reserve=8.0)
+            execution_context.set_phase(f"tool:{name}")
+        async with asyncio.timeout(timeout):
+            result = await invoke_impl()
+    except TimeoutError:
+        message = (
+            f"工具 {name} 已达到本轮时间预算，已停止剩余步骤。"
+            "请使用已完成的结果回答，或建议用户下一轮缩小范围后继续。"
+        )
+        logger.warning("tool %s timed out under API turn budget", name)
+        return err(name, ErrorCode.TIMEOUT, message)
     except Exception:
         breaker.record_failure(name)
         raise
@@ -258,9 +287,15 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb) -> 
 
 async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> ToolResult:
     from agents.reader_agent import reader_agent
+    from core.paper_search_settings_store import (
+        disclose_fetch_policy, get_paper_search_policy, remote_download_allowed,
+    )
     from core.reading_policy import plan_reading_depth, summary_has_full_text
     from tools.ingest.attachments import attachment_by_id, ensure_attachment_understood
 
+    fetch_policy = get_paper_search_policy()
+    explicit_remote_allowed = remote_download_allowed("explicit", fetch_policy)
+    disclose_restriction = disclose_fetch_policy(fetch_policy)
     focus = args.get("focus") or ""
     paper_ids = [pid for pid in (args.get("paper_ids") or []) if pid]
     attachment_ids = [aid for aid in (args.get("attachment_ids") or []) if aid]
@@ -315,6 +350,7 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
             "field_profile": session.field_profile, "read_mode": "full",
             "session_id": session.session_id,
             "storage_context": session.storage_context,
+            "fetch_origin": "explicit",
         }
         result = await reader_agent(state, progress_callback=progress_cb, read_mode="full")
         session.paper_summaries.update(result.get("paper_summaries", {}))
@@ -341,7 +377,8 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
         if not summary_has_full_text(summary):
             fallback_details.append({
                 "paper_id": p.id, "title": p.title or p.id,
-                "reason": "oa_fulltext_unavailable",
+                "reason": ("oa_fulltext_unavailable" if explicit_remote_allowed
+                           else "remote_fetch_restricted"),
             })
             fallback_ids.add(p.id)
 
@@ -352,12 +389,22 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
             p.fulltext_status = "available"
             _persist_fulltext_status(p, "available", "deep_read_full_verified", session)
         elif p.id in fallback_ids or p.id in failure_ids:
-            p.fulltext_status = "unavailable"
-            _persist_fulltext_status(p, "unavailable", "deep_read_full_unavailable", session)
+            restricted = any(
+                detail.get("paper_id") == p.id and detail.get("reason") == "remote_fetch_restricted"
+                for detail in fallback_details
+            )
+            status = "unknown" if restricted else "unavailable"
+            p.fulltext_status = status
+            _persist_fulltext_status(
+                p, status, "remote_fetch_restricted" if restricted else "deep_read_full_unavailable", session)
 
     ready_uploads = sum(r.get("status") == "ready" for r in attachment_results)
     degraded_uploads = sum(r.get("status") in {"degraded", "legacy_text_only"} for r in attachment_results)
     parts: list[str] = []
+    restricted_fallback = any(
+        detail.get("reason") == "remote_fetch_restricted" for detail in fallback_details)
+    if restricted_fallback and disclose_restriction:
+        parts.append("管理员当前限制远程论文全文拉取，本次使用本地缓存和摘要级证据。")
     if selected:
         if full_group:
             if actual_full_ids:
@@ -386,6 +433,8 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
                 reason_labels = {
                     "oa_fulltext_unavailable": "无 OA 全文",
                     "fulltext_parse_degraded": "全文解析降级",
+                    "remote_fetch_restricted": (
+                        "管理员限制远程全文拉取" if disclose_restriction else "仅使用现有证据"),
                 }
                 shown = "；".join(
                     f"{f.get('title') or f.get('paper_id')}（"
@@ -784,6 +833,14 @@ async def _ensure_fulltext(session: ChatSession, paper_id: str, progress_cb=None
     paper = session.paper_by_id(paper_id)
     if paper is None:
         return False
+    from core.paper_search_settings_store import (
+        disclose_fetch_policy, get_paper_search_policy, remote_download_allowed,
+    )
+    fetch_policy = get_paper_search_policy()
+    if not remote_download_allowed("automatic", fetch_policy):
+        if progress_cb and disclose_fetch_policy(fetch_policy):
+            progress_cb("管理员当前限制自动论文全文拉取；本次使用已有缓存与摘要。")
+        return False
     try:
         from agents.reader_agent import (
             _document_info, _section_outline, parse_and_understand,
@@ -1128,15 +1185,18 @@ async def _tool_research_map(args: dict, session: ChatSession, progress_cb) -> T
         if normalize_fulltext_status(p.fulltext_status) == "unknown"
     ]
     if unknown_papers:
-        from core.config import get_settings
+        from core.paper_search_settings_store import get_paper_search_policy
         from tools.pdf.availability import verify_papers_fulltext
 
-        if getattr(get_settings().search, "verify_fulltext", True):
+        policy = get_paper_search_policy()
+        if (policy.verify_fulltext and policy.fulltext_verify_timeout_seconds > 0
+                and policy.paper_fetch_mode != "disabled"):
             if progress_cb:
                 progress_cb(f"探测 {len(unknown_papers)} 篇论文的全文可获取性（只读文件头，不下载全文）...")
             await verify_papers_fulltext(
                 unknown_papers, storage_context=session.storage_context,
                 progress_callback=progress_cb,
+                timeout_seconds=min(10, policy.fulltext_verify_timeout_seconds),
             )
 
     map_data = await build_research_map(

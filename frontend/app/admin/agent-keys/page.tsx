@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 
 import {
-  AdminHeader, AdminSection, HelpModal, InfoButton, type HelpEntry,
+  AdminHeader, AdminSection, ConfirmModal, HelpModal, InfoButton, type HelpEntry,
 } from "@/components/admin/AdminUI";
 import {
   AdminApiError,
@@ -82,6 +82,7 @@ export default function AgentKeysAdminPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [changingPassword, setChangingPassword] = useState(false);
   const [helpItem, setHelpItem] = useState<HelpEntry | null>(null);
+  const [confirmRevoke, setConfirmRevoke] = useState<AgentApiKeyItem | null>(null);
 
   useEffect(() => {
     void useAuthStore.getState().hydrate();
@@ -146,7 +147,6 @@ export default function AgentKeysAdminPage() {
   };
 
   const revokeKey = async (item: AgentApiKeyItem) => {
-    if (!window.confirm(`确认撤销“${item.name}”？撤销后清小搭将立即无法使用该密钥。`)) return;
     setError("");
     try {
       await revokeAgentApiKey(item.id);
@@ -251,7 +251,7 @@ export default function AgentKeysAdminPage() {
                     <p className="mt-1 text-[11px] text-muted">创建：{formatTime(item.created_at)} · 最近使用：{formatTime(item.last_used_at)}</p>
                   </div>
                   {!item.revoked_at && (
-                    <button onClick={() => void revokeKey(item)} className="flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-warning/30 px-3 text-xs text-fg-secondary hover:bg-warning/10">
+                    <button onClick={() => setConfirmRevoke(item)} className="flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-warning/30 px-3 text-xs text-fg-secondary hover:bg-warning/10">
                       <Trash2 className="h-3.5 w-3.5" /> 撤销
                     </button>
                   )}
@@ -274,6 +274,12 @@ export default function AgentKeysAdminPage() {
           </form>
         </AdminSection>
       </div>
+      {confirmRevoke && (
+        <ConfirmModal title={`撤销「${confirmRevoke.name}」`} danger confirmLabel="确认撤销"
+          body="撤销后不可恢复：使用该密钥的清小搭接入会立刻开始收到 401，需要创建新密钥并到清小搭后台更新。"
+          onConfirm={() => { const item = confirmRevoke; setConfirmRevoke(null); void revokeKey(item); }}
+          onClose={() => setConfirmRevoke(null)} />
+      )}
       <HelpModal item={helpItem} onClose={() => setHelpItem(null)} />
     </main>
   );

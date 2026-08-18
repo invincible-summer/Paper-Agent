@@ -6,14 +6,30 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from app.core.config import settings  # noqa: E402
+import core.auth_settings_store as ass  # noqa: E402
+import core.user_store as us  # noqa: E402
 from app.api.v1.auth import current_user  # noqa: E402
 
 
+def _set_flags(tmp_path, monkeypatch, **flags):
+    """Isolated runtime settings row; the dev .env must not leak in."""
+    monkeypatch.setattr(ass, "_DB_PATH", tmp_path / "users.db")
+    monkeypatch.setattr(us, "_DB_PATH", tmp_path / "users.db")
+    ass.reset_cache()
+    current = ass.get_auth_settings()
+    merged = {
+        "auth_required": current.auth_required,
+        "guest_access": current.guest_access,
+        "registration_open": current.registration_open,
+        "email_requirement": current.email_requirement,
+    }
+    merged.update(flags)
+    ass.update_auth_settings(merged, expected_version=current.version, updated_by="test")
+
+
 @pytest.fixture()
-def auth_on(monkeypatch):
-    monkeypatch.setattr(settings, "auth_required", True)
-    return settings
+def auth_on(tmp_path, monkeypatch):
+    _set_flags(tmp_path, monkeypatch, auth_required=True, guest_access=True)
 
 
 def test_guest_id_grants_isolated_identity(auth_on):
@@ -45,7 +61,15 @@ def test_invalid_token_rejected_even_with_guest(auth_on):
         current_user("Bearer not-a-real-token", "browser-abc-123")
 
 
-def test_local_mode_ignores_everything(monkeypatch):
-    monkeypatch.setattr(settings, "auth_required", False)
+def test_guest_off_rejects_guest_ids(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+    _set_flags(tmp_path, monkeypatch, auth_required=True, guest_access=False)
+    with pytest.raises(HTTPException) as e:
+        current_user(None, "browser-abc-123")
+    assert e.value.status_code == 401
+
+
+def test_local_mode_ignores_everything(tmp_path, monkeypatch):
+    _set_flags(tmp_path, monkeypatch, auth_required=False)
     assert current_user(None, None)["id"] == "local"
     assert current_user("Bearer garbage", None)["id"] == "local"

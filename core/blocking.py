@@ -26,6 +26,7 @@ _T = TypeVar("_T")
 class _Job(Generic[_T]):
     call: Callable[[], _T]
     done: threading.Event = field(default_factory=threading.Event)
+    cancelled: threading.Event = field(default_factory=threading.Event)
     result: _T | None = None
     error: BaseException | None = None
 
@@ -33,6 +34,9 @@ class _Job(Generic[_T]):
 _JOBS: queue.Queue[_Job[Any]] = queue.Queue()
 _WORKER: threading.Thread | None = None
 _WORKER_LOCK = threading.Lock()
+_IO_JOBS: queue.Queue[_Job[Any]] = queue.Queue()
+_IO_WORKERS: list[threading.Thread] = []
+_IO_WORKERS_LOCK = threading.Lock()
 
 
 def _worker_main() -> None:
@@ -50,7 +54,8 @@ def _worker_main() -> None:
                     _WORKER = None
                     return
         try:
-            job.result = job.call()
+            if not job.cancelled.is_set():
+                job.result = job.call()
         except BaseException as exc:  # propagate to the awaiting coroutine
             job.error = exc
         finally:
@@ -70,6 +75,33 @@ def _ensure_worker() -> None:
             _WORKER.start()
 
 
+def _io_worker_main() -> None:
+    while True:
+        job = _IO_JOBS.get()
+        try:
+            if not job.cancelled.is_set():
+                job.result = job.call()
+        except BaseException as exc:
+            job.error = exc
+        finally:
+            job.done.set()
+            _IO_JOBS.task_done()
+
+
+def _ensure_io_workers() -> None:
+    with _IO_WORKERS_LOCK:
+        if _IO_WORKERS:
+            return
+        for index in range(2):
+            worker = threading.Thread(
+                target=_io_worker_main,
+                name=f"paper-agent-io-{index + 1}",
+                daemon=True,
+            )
+            worker.start()
+            _IO_WORKERS.append(worker)
+
+
 async def run_cpu_bound(
     func: Callable[..., _T], /, *args: Any, **kwargs: Any
 ) -> _T:
@@ -84,8 +116,39 @@ async def run_cpu_bound(
     job: _Job[_T] = _Job(call=functools.partial(context.run, call))
     _JOBS.put(job)
     _ensure_worker()
-    while not job.done.is_set():
-        await asyncio.sleep(0.01)
+    try:
+        while not job.done.is_set():
+            await asyncio.sleep(0.01)
+    except asyncio.CancelledError:
+        # If native execution has not started, the worker will skip this job.
+        # If it has started, Python cannot safely stop the native call, but the
+        # cancelled coroutine no longer waits for it or mutates request state.
+        job.cancelled.set()
+        raise
+    if job.error is not None:
+        raise job.error
+    return cast(_T, job.result)
+
+
+async def run_io_bound(
+    func: Callable[..., _T], /, *args: Any, **kwargs: Any
+) -> _T:
+    """Run lightweight blocking filesystem/SQLite work off the event loop.
+
+    This executor is intentionally separate from the single local-ML worker:
+    a long Docling/embedding call must not queue a tiny checkpoint write behind
+    it.  Per-session/database locking remains the caller's responsibility.
+    """
+    call = functools.partial(func, *args, **kwargs)
+    job: _Job[_T] = _Job(call=call)
+    _IO_JOBS.put(job)
+    _ensure_io_workers()
+    try:
+        while not job.done.is_set():
+            await asyncio.sleep(0.01)
+    except asyncio.CancelledError:
+        job.cancelled.set()
+        raise
     if job.error is not None:
         raise job.error
     return cast(_T, job.result)

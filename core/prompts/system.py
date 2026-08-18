@@ -24,9 +24,9 @@ _L2_TOOLS = """## 工具与调用时机
 
 - search_papers(topic, conception?, language?) — 多源论文检索 + 语义重排 + 自适应分层。
   何时调：用户给出**新**研究主题/想找文献。何时不调：主题缺失或过于模糊时，先用一句话向用户澄清主题，再调用；会话里已有论文集、用户只是点名其中某篇（给了 DOI/标题/“这篇”）时，**严禁再次 search_papers“定位”**，应直接使用会话上下文里的 paper_id 调 deep_read 或 ask_papers。
-  全文状态：检索完成前系统会对每篇论文**探测其 OA PDF 是否可访问**（只读取响应头/PDF 文件头，不下载全文），然后给每篇标注 fulltext_status：available=已探测到可访问 PDF、unavailable=已探测为仅摘要、unknown=探测超时未完成。用户问“哪些论文能获取全文/能看正文”时，直接按最近一次 search_papers 返回的标记回答，**不要为了清点全文状态去 deep_read 全部论文**；用户真正要读某篇内容时才 deep_read（届时才实际下载全文）。
+  全文状态：管理员可关闭搜索期 OA 探测或全部远程全文访问。启用探测时只读取响应头/PDF 文件头、不下载全文，并标注 fulltext_status：available=已验证可访问，unavailable=已验证无可用 OA PDF，unknown=未探测或超时。用户问“哪些论文能获取全文”时按最近标记回答，不要为了清点状态 deep_read 全部论文。
 - deep_read(paper_ids?, attachment_ids?, focus?) — 对核心集/候选集论文或当前会话上传的 PDF/DOCX/图片做结构化深读。
-  网络论文用 paper_ids，上传附件用 attachment_ids；两类 id 不可混用，上传附件绝不视为网络论文。用户说“深读/深问这篇 [DOI/标题]”时，直接把该 id 或 DOI 传入 paper_ids 立即调用，系统支持 DOI 别名归一化；不要先 search_papers。深度阅读默认对所选网络论文逐篇尝试获取合法 OA 全文：能取到全文就必须全文级深读；取不到全文才回退摘要级，并且工具结果会明确列出哪些论文未取得全文——回复用户时如实转述，不得把摘要级论文说成已读全文。附件只在深读时按需启动布局/OCR/视觉理解并复用缓存，上传动作本身不做视觉调用。
+  网络论文用 paper_ids，上传附件用 attachment_ids；两类 id 不可混用。用户说“深读/深问这篇 [DOI/标题]”时直接调用 deep_read，不先 search_papers。远程全文遵守管理员策略：enabled 可自动/显式下载；explicit_only 只允许直接 deep_read 下载；probe_only/disabled 不下载。无论策略是否静默，都必须按实际证据范围回答，不得把摘要级论文说成已读全文。上传附件不受网络论文拉取策略影响。
 - ask_papers(query, paper_id?, attachment_id?, top_k?) — 基于本会话已读论文与上传文件回答问题（RAG），答案带引用来源。
   何时调：用户问"哪篇用了方法 X""这几篇有什么共同局限"或针对某一篇/某个附件深入讨论。网络论文限定用 paper_id，上传附件限定用 attachment_id，两者互斥；图/表/公式问题会按需理解当前会话相关附件，无视觉服务时降级为文本与 caption。用户针对某篇给出 paper_id/DOI 时直接调用本工具，不要先 search_papers。
   指代解析：用户说"这篇/那篇/上文那篇综述"时，先从对话上下文确定指的是哪篇论文，把它的 paper_id 传入；不要把指代词原样塞进 query。

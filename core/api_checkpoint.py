@@ -24,7 +24,7 @@ from typing import Any, Mapping, Sequence
 
 from agents.session import ChatSession
 from core.api_storage_store import ApiStorageStore
-from core.blocking import run_cpu_bound
+from core.blocking import run_io_bound
 from core.models import Paper, summaries_from_dicts
 from core.storage_context import StorageContext, StoragePathError
 
@@ -528,7 +528,7 @@ class ApiCheckpointStore:
         del final, final_answer
         lock = await self._lock_for(session.session_id)
         async with lock:
-            await run_cpu_bound(self.save_checkpoint_sync, session)
+            await run_io_bound(self.save_checkpoint_sync, session)
 
     async def finalize_turn(
         self,
@@ -542,10 +542,10 @@ class ApiCheckpointStore:
         """Commit the final Checkpoint and only then establish the next-turn alias."""
         lock = await self._lock_for(session.session_id)
         async with lock:
-            await run_cpu_bound(self.save_checkpoint_sync, session, final=True)
+            await run_io_bound(self.save_checkpoint_sync, session, final=True)
             final_messages = list(messages or [])
             final_messages.append({"role": "assistant", "content": _normal_text(final_answer)})
-            await run_cpu_bound(
+            await run_io_bound(
                 self.add_alias_sync, session.session_id, principal, openai_user,
                 final_messages,
             )

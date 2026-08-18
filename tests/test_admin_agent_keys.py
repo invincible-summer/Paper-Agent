@@ -11,6 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
+import core.auth_settings_store as ass
 import core.user_store as us
 from app.core.config import settings
 from app.main import create_app
@@ -19,6 +20,8 @@ from app.main import create_app
 @pytest.fixture()
 def isolated_store(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "_DB_PATH", tmp_path / "users.db")
+    monkeypatch.setattr(ass, "_DB_PATH", tmp_path / "users.db")
+    ass.reset_cache()
     return us
 
 

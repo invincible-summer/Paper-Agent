@@ -158,7 +158,7 @@ async def test_stream_frame_sequence(client, monkeypatch):
     assert any(r and "正在检索：gnn" in r for r in reasonings)
     # 3) content frames
     contents = [f["choices"][0]["delta"].get("content") for f in frames]
-    assert "结果" in contents and "如下" in contents
+    assert "".join(c or "" for c in contents) == "结果如下"
     # 4) final stop frame with usage, whitelist finish_reason
     stop = frames[-1]["choices"][0]
     assert stop["finish_reason"] in ("stop", "length", "tool_calls",
@@ -228,9 +228,115 @@ async def test_request_validation_and_nullable_model(client, monkeypatch):
                                     "messages": [{"role": "user", "content": "hi"}]})
         assert resp.status_code == 200
     assert (await _post(client, {"messages": []})).status_code == 422
-    assert (await _post(client, {"messages": [{"role": "tool", "content": "x"}]})).status_code == 422
+    tool_history = await _post(client, {"messages": [
+        {"role": "tool", "content": "ignored external tool history"},
+        {"role": "user", "content": "x"},
+    ]})
+    assert tool_history.status_code == 200
     assert (await _post(client, {"max_tokens": "1",
                                 "messages": [{"role": "user", "content": "x"}]})).status_code == 422
+
+
+@pytest.mark.anyio
+async def test_stream_bridges_internal_progress(client, monkeypatch):
+    async def fake(user_message, session, progress_cb, attachments=None,
+                   regenerate=False, checkpoint_cb=None,
+                   execution_context=None, system_instructions=""):
+        progress_cb("正在执行谱系语义聚类...")
+        yield {"type": "answer", "content": "完成", "is_delta": True}
+        yield {"type": "done", "thinking": "", "answer": "完成",
+               "tool_calls": [], "trace_id": "p",
+               "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                         "total_tokens": 2}}
+
+    monkeypatch.setattr(orch, "chat_turn", fake)
+    resp = await _post(client, {"stream": True,
+                                "messages": [{"role": "user", "content": "map"}]})
+    reasonings = [
+        f["choices"][0]["delta"].get("reasoning")
+        for f in _parse_sse(resp.text)
+    ]
+    assert "正在执行谱系语义聚类..." in reasonings
+
+
+@pytest.mark.anyio
+async def test_stream_deadline_closes_protocol_and_cancels_producer(
+        client, monkeypatch):
+    import app.api.v1.openai_compat as compat
+
+    cancelled = asyncio.Event()
+
+    async def slow(user_message, session, progress_cb, attachments=None,
+                   regenerate=False, **kwargs):
+        try:
+            await asyncio.sleep(10)
+            yield {"type": "answer", "content": "late", "is_delta": True}
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(orch, "chat_turn", slow)
+    monkeypatch.setattr(compat, "_API_SOFT_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(compat, "_API_HARD_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr(compat, "_HEARTBEAT_SECONDS", 0.02)
+    resp = await _post(client, {"stream": True,
+                                "messages": [{"role": "user", "content": "slow"}]})
+    assert resp.status_code == 200
+    assert "平台交互时限" in resp.text
+    assert resp.text.rstrip().endswith("data: [DONE]")
+    frames = _parse_sse(resp.text)
+    assert frames[-1]["choices"][0]["finish_reason"] == "stop"
+    assert cancelled.is_set()
+
+
+@pytest.mark.anyio
+async def test_stream_coalesces_tiny_provider_deltas(client, monkeypatch):
+    events = [
+        {"type": "answer", "content": "中", "is_delta": True}
+        for _ in range(1500)
+    ] + [{
+        "type": "done", "thinking": "", "answer": "中" * 1500,
+        "tool_calls": [], "trace_id": "batch",
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1500,
+                  "total_tokens": 1501},
+    }]
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(events))
+    resp = await _post(client, {"stream": True,
+                                "messages": [{"role": "user", "content": "go"}]})
+    frames = _parse_sse(resp.text)
+    content_frames = [
+        f["choices"][0]["delta"].get("content")
+        for f in frames if f["choices"][0]["delta"].get("content")
+    ]
+    assert "".join(content_frames) == "中" * 1500
+    assert len(content_frames) <= 10
+    assert len(resp.content) < 25_000
+
+
+@pytest.mark.anyio
+async def test_system_instructions_and_session_id_are_supported(client, monkeypatch):
+    captured = {}
+
+    async def fake(user_message, session, progress_cb, attachments=None,
+                   regenerate=False, checkpoint_cb=None,
+                   execution_context=None, system_instructions=""):
+        captured["system"] = system_instructions
+        yield {"type": "answer", "content": "ok", "is_delta": True}
+        yield {"type": "done", "thinking": "", "answer": "ok",
+               "tool_calls": [], "trace_id": "sys",
+               "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                         "total_tokens": 2}}
+
+    monkeypatch.setattr(orch, "chat_turn", fake)
+    resp = await _post(client, {
+        "stream": True,
+        "sessionId": "qing-session-1",
+        "messages": [
+            {"role": "system", "content": "请使用简洁中文"},
+            {"role": "user", "content": "hi"},
+        ],
+    })
+    assert resp.status_code == 200
+    assert captured["system"] == "请使用简洁中文"
 
 
 @pytest.mark.anyio
@@ -684,3 +790,67 @@ async def test_element_crop_attachment_scope_guard(client, monkeypatch, tmp_path
     assert "x_soda" not in frames[-1] or not [
         a for a in frames[-1].get("x_soda", {}).get("attachments", [])
         if a["mimeType"] == "image/png"]
+
+
+@pytest.mark.anyio
+async def test_stream_role_frame_precedes_slow_turn_preparation(monkeypatch):
+    import app.api.v1.openai_compat as compat
+
+    preparation_started = asyncio.Event()
+    preparation_cancelled = asyncio.Event()
+
+    async def slow_prepare(body, principal):
+        preparation_started.set()
+        try:
+            await asyncio.sleep(10)
+        finally:
+            preparation_cancelled.set()
+
+    monkeypatch.setattr(compat, "_prepare_turn", slow_prepare)
+    monkeypatch.setenv("AGENT_API_KEY", "")
+    app = create_app()
+    request_body = json.dumps({
+        "stream": True,
+        "messages": [{"role": "user", "content": "hi"}],
+    }).encode()
+    sent: asyncio.Queue = asyncio.Queue()
+    received = False
+
+    async def receive():
+        nonlocal received
+        if not received:
+            received = True
+            return {"type": "http.request", "body": request_body, "more_body": False}
+        await asyncio.sleep(3600)
+
+    async def send(message):
+        await sent.put(message)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"},
+        "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": "/v1/chat/completions",
+        "raw_path": b"/v1/chat/completions", "query_string": b"",
+        "headers": [
+            (b"authorization", b"Bearer sk-test"),
+            (b"content-type", b"application/json"),
+            (b"host", b"testserver"),
+        ],
+        "client": ("127.0.0.1", 1), "server": ("testserver", 80),
+    }
+    task = asyncio.create_task(app(scope, receive, send))
+    try:
+        start = await asyncio.wait_for(sent.get(), timeout=0.2)
+        first_body = await asyncio.wait_for(sent.get(), timeout=0.2)
+        assert start["type"] == "http.response.start"
+        assert first_body["type"] == "http.response.body"
+        assert b'"role": "assistant"' in first_body["body"]
+        assert first_body.get("more_body") is True
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    assert preparation_started.is_set()
+    assert preparation_cancelled.is_set()

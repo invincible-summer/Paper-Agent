@@ -14,7 +14,7 @@ API_URL = "https://api.archives-ouvertes.fr/search/"
 _FIELDS = ("halId_s,title_s,abstract_s,authFullName_s,producedDateY_i,"
            "doiId_s,journalTitle_s,fileMain_s,keyword_s,docType_s")
 
-_limiter = RateLimiter(max_concurrent=3, min_interval=0.5)
+_limiter = RateLimiter(max_concurrent=3, min_interval=0.5, source_name="hal", fast_fail_429=True)
 
 
 def _first(value) -> str:
@@ -76,6 +76,16 @@ class HalBackend(SearchBackend):
                 if resp.status_code != 200:
                     return []
                 data = resp.json()
+        except httpx.TimeoutException:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "timeout")
+            return []
+        except httpx.RequestError:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "connection_error")
+            return []
         except Exception:
+            from core.search_source_health import get_search_health_registry
+            get_search_health_registry().record_failure(self.name, "invalid_response")
             return []
         return parse_docs(data)

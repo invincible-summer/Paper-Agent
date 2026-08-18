@@ -23,8 +23,10 @@ multimodal:
 search:
   results_per_source: 20
   dedup_similarity_threshold: 0.95
-  verify_fulltext: true            # 检索时只探测每篇 OA PDF 文件头（不下载全文；深读时才实际下载）
-  fulltext_verify_timeout_seconds: 180
+  search_deadline_seconds: 30       # 多源检索总时限；到期返回已完成的部分结果
+  per_source_timeout_seconds: 12    # 单条渠道查询时限
+  verify_fulltext: true             # 检索时只探测 OA PDF 文件头（不下载全文）
+  fulltext_verify_timeout_seconds: 30
   fulltext_status_ttl_days: 30
   sources:
     openalex: true

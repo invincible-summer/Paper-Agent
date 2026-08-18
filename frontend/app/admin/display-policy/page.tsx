@@ -6,7 +6,7 @@ import {
   BookMarked, Check, LayoutGrid, Loader2, RotateCcw, Save,
 } from "lucide-react";
 import {
-  AdminHeader, AdminSection, HelpModal, InfoButton, type HelpEntry,
+  AdminHeader, AdminSection, AdminToggle, HelpModal, InfoButton, type HelpEntry,
 } from "@/components/admin/AdminUI";
 import {
   AdminApiError, getDisplayPolicy, updateDisplayPolicy,
@@ -149,7 +149,7 @@ export default function DisplayPolicyAdminPage() {
 
   if (!checked || loading) return <div className="flex min-h-screen items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>;
   if (!user || user.role !== "administrator") return <div className="p-8 text-center text-muted">仅管理员可访问。</div>;
-  if (!draft || !policy) return <div className="p-8 text-center text-red-500">{error || "策略加载失败"}</div>;
+  if (!draft || !policy) return <div className="p-8 text-center text-error">{error || "策略加载失败"}</div>;
 
   return <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-8">
     <div className="mx-auto max-w-4xl space-y-6 pb-24">
@@ -157,8 +157,8 @@ export default function DisplayPolicyAdminPage() {
         subtitle="控制 /v1 通道在清小搭上的 Markdown 卡片与技能提示；不影响自制前端。"
         current="/admin/display-policy" onRefresh={() => void refresh()} refreshing={loading} />
 
-      {error && <div className="rounded-lg border border-red-400/40 bg-red-500/10 p-3 text-sm text-red-500">{error}</div>}
-      {saved && !dirty && <div className="rounded-lg border border-emerald-400/40 bg-emerald-500/10 p-3 text-sm text-emerald-600">策略已保存，下一条 /v1 消息立即生效。</div>}
+      {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
+      {saved && !dirty && <div className="rounded-lg border border-success/40 bg-success/10 p-3 text-sm text-success">策略已保存，下一条 /v1 消息立即生效。</div>}
 
       <AdminSection title="卡片预设" info={<InfoButton onClick={() => setHelpItem(HELP.presets)} label="四种预设的区别" />}>
         <div className="grid gap-3 sm:grid-cols-2">
@@ -223,14 +223,8 @@ export default function DisplayPolicyAdminPage() {
           <p className="text-sm text-muted">
             技能加载时在回复正文顶部显示「━━ 📘 技能 · 名称 ━━」提示行；思考折叠中的提示始终保留。
           </p>
-          <button type="button" role="switch" aria-checked={draft.skill_card_enabled}
-            aria-label="正文技能提示行"
-            onClick={() => setDraft({ ...draft, skill_card_enabled: !draft.skill_card_enabled })}
-            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
-              draft.skill_card_enabled ? "bg-accent" : "border border-border-light bg-surface-hover"}`}>
-            <span className={`absolute top-0.5 h-5 w-5 rounded-full shadow transition-all ${
-              draft.skill_card_enabled ? "left-[22px]" : "left-0.5 bg-muted/60"}`} />
-          </button>
+          <AdminToggle checked={draft.skill_card_enabled} label="正文技能提示行"
+            onChange={(next) => setDraft({ ...draft, skill_card_enabled: next })} />
         </div>
       </AdminSection>
     </div>

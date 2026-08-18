@@ -285,6 +285,95 @@ def post_paper_cache_cleanup(authorization: str | None = Header(None)) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Runtime web-auth settings (访问控制：账号登录/游客/注册/邮箱验证)
+# ---------------------------------------------------------------------------
+
+
+class AuthSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_version: int = Field(gt=0)
+    confirm_disable_auth: bool = False
+    auth_required: bool | None = None
+    guest_access: bool | None = None
+    registration_open: bool | None = None
+    email_requirement: Literal["none", "collect", "verify"] | None = None
+
+    def changes(self) -> dict:
+        return self.model_dump(
+            exclude={"expected_version", "confirm_disable_auth"}, exclude_none=True)
+
+    @model_validator(mode="after")
+    def has_changes(self):
+        if not self.changes():
+            raise ValueError("至少提供一个设置修改字段")
+        return self
+
+
+class AuthTestEmailRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    to: str = Field(min_length=3, max_length=254)
+
+
+@router.get("/auth-settings")
+def get_auth_settings(authorization: str | None = Header(None)) -> dict:
+    _administrator(authorization)
+    from dataclasses import asdict
+
+    from core.auth_settings_store import get_auth_settings as load
+    from core.email_sender import smtp_status
+    return {"settings": asdict(load()), "smtp": smtp_status()}
+
+
+@router.put("/auth-settings")
+def put_auth_settings(body: AuthSettingsUpdate,
+                      authorization: str | None = Header(None)) -> dict:
+    admin = _administrator(authorization)
+    from dataclasses import asdict
+
+    from core.auth_settings_store import (
+        AuthSettingsVersionConflict, get_auth_settings, update_auth_settings,
+    )
+    from core.email_sender import smtp_configured
+
+    changes = body.changes()
+    current = get_auth_settings()
+    if current.auth_required and changes.get("auth_required") is False \
+            and not body.confirm_disable_auth:
+        raise HTTPException(
+            422, "关闭账号登录会让所有未登录访问立即变为本地用户并穿透数据隔离，"
+                 "必须经二次确认（confirm_disable_auth=true）")
+    if changes.get("email_requirement") == "verify" and not smtp_configured():
+        raise HTTPException(
+            422, "尚未配置 SMTP 发信（.env 中的 SMTP_* 项），无法启用强制邮箱验证")
+    try:
+        updated = update_auth_settings(
+            changes, expected_version=body.expected_version, updated_by=admin["id"])
+    except AuthSettingsVersionConflict as exc:
+        raise HTTPException(409, "设置已被其他管理员修改，请刷新后重试") from None
+    return {"settings": asdict(updated)}
+
+
+@router.post("/auth-settings/test-email")
+def post_auth_settings_test_email(body: AuthTestEmailRequest,
+                                  authorization: str | None = Header(None)) -> dict:
+    _administrator(authorization)
+    from core.auth_settings_store import AuthSettingsError, normalize_email
+    from core.email_sender import EmailSendError, send_test_email, smtp_configured
+
+    if not smtp_configured():
+        raise HTTPException(400, "尚未配置 SMTP 发信（.env 中的 SMTP_* 项）")
+    try:
+        to = normalize_email(body.to)
+    except AuthSettingsError as exc:
+        raise HTTPException(422, str(exc)) from None
+    try:
+        send_test_email(to)
+    except EmailSendError as exc:
+        raise HTTPException(502, str(exc)) from None
+    return {"status": "sent"}
+
+
+# ---------------------------------------------------------------------------
 # OpenAI-compatible /v1 markdown-card display policy (清小搭 卡片展示策略)
 # ---------------------------------------------------------------------------
 
@@ -359,3 +448,180 @@ async def put_display_policy(body: DisplayPolicyUpdate,
         return {"policy": asdict(updated)}
 
     return await run_cpu_bound(_update)
+
+# ---------------------------------------------------------------------------
+# Runtime paper-search / remote-fulltext administration
+# ---------------------------------------------------------------------------
+
+
+class PaperSearchPolicyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_version: int = Field(gt=0)
+    sources: dict[str, bool] | None = None
+    search_deadline_seconds: int | None = Field(default=None, ge=10, le=120)
+    per_source_timeout_seconds: int | None = Field(default=None, ge=3, le=30)
+    verify_fulltext: bool | None = None
+    fulltext_verify_timeout_seconds: int | None = Field(default=None, ge=0, le=120)
+    paper_fetch_mode: Literal["enabled", "explicit_only", "probe_only", "disabled"] | None = None
+    fetch_policy_disclosure: Literal["affected_only", "silent"] | None = None
+
+    def changes(self) -> dict:
+        return self.model_dump(exclude={"expected_version"}, exclude_none=True)
+
+    @model_validator(mode="after")
+    def has_changes(self):
+        if not self.changes():
+            raise ValueError("至少提供一个论文检索策略修改字段")
+        return self
+
+
+class PaperSearchDiagnosticRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    sources: list[str] | None = None
+
+
+_PAPER_DIAGNOSTIC_SEMAPHORE = __import__("asyncio").Semaphore(1)
+
+
+def _paper_policy_payload() -> dict:
+    from dataclasses import asdict
+
+    from core.config import get_settings
+    from core.paper_search_settings_store import SOURCE_IDS, get_paper_search_policy
+    from core.search_source_health import get_search_health_registry
+    from tools.search.diagnostics import source_catalog
+
+    policy = get_paper_search_policy()
+    static = get_settings().search
+    defaults = {
+        "sources": {name: bool(static.sources.get(name, True)) for name in SOURCE_IDS},
+        "search_deadline_seconds": 30,
+        "per_source_timeout_seconds": 12,
+        "verify_fulltext": True,
+        "fulltext_verify_timeout_seconds": 30,
+        "paper_fetch_mode": "enabled",
+        "fetch_policy_disclosure": "affected_only",
+    }
+    quick_sources = dict(policy.sources)
+    quick_sources.update({"openalex": False, "semantic_scholar": False, "core": False})
+    return {
+        "policy": asdict(policy),
+        "defaults": defaults,
+        "quick_preset": {
+            "sources": quick_sources,
+            "search_deadline_seconds": 30,
+            "per_source_timeout_seconds": 12,
+            "verify_fulltext": True,
+            "fulltext_verify_timeout_seconds": 30,
+        },
+        "source_catalog": source_catalog(),
+        "runtime_status": [get_search_health_registry().get(name) for name in SOURCE_IDS],
+        "breaker": {"threshold": 3, "cooldown_seconds": 300},
+    }
+
+
+@router.get("/paper-search/policy")
+async def get_admin_paper_search_policy(
+    authorization: str | None = Header(None),
+) -> dict:
+    _administrator(authorization)
+    return await run_cpu_bound(_paper_policy_payload)
+
+
+@router.put("/paper-search/policy")
+async def put_admin_paper_search_policy(
+    body: PaperSearchPolicyUpdate,
+    authorization: str | None = Header(None),
+) -> dict:
+    admin = _administrator(authorization)
+    from dataclasses import asdict
+
+    from core.paper_search_settings_store import (
+        PaperSearchSettingsError, PaperSearchVersionConflict,
+        update_paper_search_policy,
+    )
+
+    def _update() -> dict:
+        try:
+            policy = update_paper_search_policy(
+                body.changes(), expected_version=body.expected_version,
+                updated_by=admin["id"],
+            )
+        except PaperSearchVersionConflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        except PaperSearchSettingsError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return {"policy": asdict(policy)}
+
+    return await run_cpu_bound(_update)
+
+
+async def _save_paper_diagnostic(kind: str, started_at: float,
+                                 items: list[dict]) -> dict:
+    from dataclasses import asdict
+    import time
+
+    from core.paper_search_settings_store import save_diagnostic_run
+
+    finished_at = time.time()
+    counts: dict[str, int] = {}
+    for item in items:
+        status = str(item.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    run = await run_cpu_bound(
+        save_diagnostic_run, kind, started_at, finished_at,
+        {"count": len(items), "statuses": counts}, items,
+    )
+    return asdict(run)
+
+
+@router.post("/paper-search/diagnostics/connectivity")
+async def post_paper_search_connectivity(
+    body: PaperSearchDiagnosticRequest,
+    authorization: str | None = Header(None),
+) -> dict:
+    _administrator(authorization)
+    import time
+
+    from tools.search.diagnostics import run_connectivity
+
+    if _PAPER_DIAGNOSTIC_SEMAPHORE.locked():
+        raise HTTPException(409, "已有论文平台检测正在运行，请稍后重试")
+    async with _PAPER_DIAGNOSTIC_SEMAPHORE:
+        started_at = time.time()
+        try:
+            items = await run_connectivity(body.sources)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return await _save_paper_diagnostic("connectivity", started_at, items)
+
+
+@router.post("/paper-search/diagnostics/download")
+async def post_paper_search_download_test(
+    body: PaperSearchDiagnosticRequest,
+    authorization: str | None = Header(None),
+) -> dict:
+    _administrator(authorization)
+    import time
+
+    from tools.search.diagnostics import run_download_speed
+
+    if _PAPER_DIAGNOSTIC_SEMAPHORE.locked():
+        raise HTTPException(409, "已有论文平台检测正在运行，请稍后重试")
+    async with _PAPER_DIAGNOSTIC_SEMAPHORE:
+        started_at = time.time()
+        try:
+            items = await run_download_speed(body.sources)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return await _save_paper_diagnostic("download", started_at, items)
+
+
+@router.get("/paper-search/diagnostics/latest")
+async def get_paper_search_diagnostics_latest(
+    authorization: str | None = Header(None),
+) -> dict:
+    _administrator(authorization)
+    from core.paper_search_settings_store import get_latest_diagnostics
+
+    return await run_cpu_bound(get_latest_diagnostics)

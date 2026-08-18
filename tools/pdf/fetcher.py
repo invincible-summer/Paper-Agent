@@ -170,8 +170,11 @@ async def probe_pdf_url(
 
 class PDFFetcher:
     def __init__(self, pdf_dir: str = "data/pdfs",
-                 storage_context: StorageContext | None = None):
+                 storage_context: StorageContext | None = None, *,
+                 fetch_origin: str = "automatic", admin_override: bool = False):
         self.storage_context = storage_context
+        self.fetch_origin = fetch_origin
+        self.admin_override = admin_override
         self._artifact_store = None
         if storage_context is not None and storage_context.channel == "openai_api":
             from core.api_artifact_store import ApiArtifactStore
@@ -185,9 +188,17 @@ class PDFFetcher:
         self._client = httpx.AsyncClient(timeout=60, follow_redirects=True, trust_env=False)
 
     async def candidate_urls(self, paper: Paper) -> list[str]:
-        """OA PDF candidates in fetch order (no download, Unpaywall included)."""
+        """OA candidates allowed by the administrator's runtime policy."""
+        from core.paper_search_settings_store import (
+            get_paper_search_policy, remote_probe_allowed, source_enabled,
+        )
+
+        policy = get_paper_search_policy()
+        override = bool(getattr(self, "admin_override", False))
+        if not override and not remote_probe_allowed(policy):
+            return []
         urls: list[str] = []
-        if paper.pdf_url:
+        if paper.pdf_url and (override or source_enabled(paper.source, policy)):
             urls.append(paper.pdf_url)
         oa_url = await self._unpaywall_pdf_url(paper.doi) if paper.doi else None
         if oa_url and oa_url not in urls:
@@ -195,16 +206,10 @@ class PDFFetcher:
         return urls
 
     async def fetch(self, paper: Paper) -> str | None:
-        """Download an OA PDF for a paper. Returns local path or None.
-
-        Tries the source-API pdf_url first, then Unpaywall's best OA location
-        (DOI lookup). Every candidate passes the SSRF guard and the PDF
-        content check, so a paywalled landing page never gets saved.
-        """
-        urls = await self.candidate_urls(paper)
-        if not urls:
-            logger.debug("No OA pdf candidate for paper: %s", paper.id)
-            return None
+        """Return a verified local PDF, downloading only when policy permits."""
+        from core.paper_search_settings_store import (
+            get_paper_search_policy, remote_download_allowed,
+        )
 
         logical_name = f"{_sanitize_filename_component(paper.id)}.pdf"
         if getattr(self, "_artifact_store", None) is not None:
@@ -215,9 +220,22 @@ class PDFFetcher:
                 return str(existing.path)
         local_path = self.pdf_dir / logical_name
         if local_path.exists():
-            logger.debug("PDF already cached: %s", local_path)
-            return str(local_path)
+            try:
+                with local_path.open("rb") as stream:
+                    if stream.read(5) == b"%PDF-":
+                        return str(local_path)
+            except OSError:
+                pass
 
+        override = bool(getattr(self, "admin_override", False))
+        origin = str(getattr(self, "fetch_origin", "automatic"))
+        if not override and not remote_download_allowed(origin, get_paper_search_policy()):
+            return None
+
+        urls = await self.candidate_urls(paper)
+        if not urls:
+            logger.debug("No OA pdf candidate for paper: %s", paper.id)
+            return None
         for url in urls:
             path = await self._download(url, local_path, paper.title)
             if path:
