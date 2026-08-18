@@ -72,6 +72,7 @@ class ApiStoragePolicyUpdate(BaseModel):
     preset: Literal["privacy", "balanced", "performance", "custom"] | None = None
     session_ttl_seconds: int | None = Field(default=None, ge=3600, le=365 * 86400)
     upload_ttl_seconds: int | None = Field(default=None, ge=3600, le=365 * 86400)
+    max_upload_bytes: int | None = Field(default=None, ge=1 * 1024 * 1024, le=200 * 1024 * 1024)
     export_ttl_seconds: int | None = Field(default=None, ge=3600, le=30 * 86400)
     public_pdf_ttl_seconds: int | None = Field(default=None, ge=3600, le=365 * 86400)
     cache_ttl_seconds: int | None = Field(default=None, ge=3600, le=365 * 86400)
@@ -113,12 +114,13 @@ class AccountCleanupRequest(BaseModel):
 
 
 _API_STORAGE_HELP = {
-    "version": 2,
+    "version": 3,
     "items": {
         "preset.privacy": {"title": "隐私优先", "does": "会话和上传保留 2 小时，导出 2 小时，公共 PDF 3 天，语义/视觉缓存 30 天，Trace 关闭。", "affected": "API 会话、私有上传、导出、公共论文缓存和模型结果缓存。", "benefits": "磁盘和隐私暴露窗口最小。", "drawbacks": "跨日继续研究能力弱，重复下载、OCR、VLM 和模型费用更高。", "privacy": "最高", "disk": "最低", "latency_cost": "更常重新下载和理解文件", "continuity": "短", "effective": "新 TTL 立即用于后续访问；缩短 TTL 需要预览确认。", "fallback": "98% 保护仍强制生效。", "restore": "选择 balanced。"},
         "preset.balanced": {"title": "均衡（默认）", "does": "会话/上传 7 天、导出 24 小时、公共 PDF 3 天、缓存 90 天、Trace 关闭。", "affected": "全部 API 侧临时研究数据。", "benefits": "兼顾连续性、费用和磁盘。", "drawbacks": "比隐私优先保留更多数据。", "privacy": "中", "disk": "中", "latency_cost": "通常无需频繁重算", "continuity": "7 天", "effective": "保存后立即生效。", "fallback": "磁盘阈值仍优先。", "restore": "点击恢复默认。"},
         "preset.performance": {"title": "性能优先", "does": "会话/上传 30 天、导出 7 天、公共 PDF 3 天、缓存 180 天，metadata Trace 7 天。", "affected": "API 研究状态和可重建缓存。", "benefits": "最低重复下载/OCR/VLM 延迟和费用。", "drawbacks": "磁盘占用和保留窗口最大。", "privacy": "较低", "disk": "高", "latency_cost": "最低", "continuity": "30 天", "effective": "保存后立即生效。", "fallback": "85/95/98 阈值会覆盖保留期。", "restore": "选择 balanced。"},
         "ttl": {"title": "数据保留时间", "does": "分别控制 Checkpoint、上传、导出、公共 PDF、缓存和 Trace 的过期时间。公共 PDF 默认 3 天：过期后由计划清理删除，后续需要时 deep_read 会自动重新下载并提取。", "affected": "仅 /v1 API 数据，不影响自制前端。", "benefits": "可按隐私和复用需求取舍。", "drawbacks": "过短会导致重新下载、OCR、VLM 和上下文中断。", "privacy": "越短越高", "disk": "越短越低", "latency_cost": "越短重复成本越高", "continuity": "由 Session TTL 决定", "effective": "新写入立即采用；清理器处理旧数据。", "fallback": "磁盘压力可提前清理可重建数据。", "restore": "恢复 balanced。"},
+        "max_upload_bytes": {"title": "API 远程文件上限（默认 200 MiB）", "does": "控制清小搭 /v1 的 file.url 远程下载和 API 私有附件保存大小；可下调但不能超过 200 MiB。", "affected": "仅 OpenAI-compatible API 文件输入，不影响 Web /chat/upload 的 20 MiB 限制。", "benefits": "与清小搭文件协议上限一致，并可按磁盘容量收紧。", "drawbacks": "过低时较大的 PDF、DOCX 或延期格式会被拒绝。", "privacy": "不改变", "disk": "限制单文件增长", "latency_cost": "大文件仍可能需要更长下载时间", "continuity": "修改立即影响后续请求；已保存文件不删除、不重新处理。", "effective": "保存后对下一次 API 下载/保存立即生效。", "fallback": "最小 1 MiB、最大 200 MiB；超限请求返回可读错误并清理临时文件。", "restore": "设为 200 MiB。"},
         "thresholds": {"title": "75 / 85 / 95 / 98 磁盘阈值", "does": "75% 告警并清过期；85% 连续清理可重建数据；95% 按策略暂停或紧急清理；98% 强制暂停文件重任务。", "affected": "API 上传、下载、深读、OCR、VLM、导出与缓存。", "benefits": "避免磁盘写满导致数据库和服务损坏。", "drawbacks": "压力时可能需要重下文件或重传私有上传。", "privacy": "无额外读取", "disk": "核心保护", "latency_cost": "清理后可能重算", "continuity": "文字问答始终保留", "effective": "下一次守卫/清理立即生效。", "fallback": "98% 不可关闭。", "restore": "75/85/95/98。"},
         "critical.pause_heavy": {"title": "95% 暂停文件重任务（默认）", "does": "暂停上传、下载、deep_read、OCR、VLM 和导出，普通文字问答继续。", "affected": "文件写入型 API 操作。", "benefits": "不提前删除未过期私有上传。", "drawbacks": "需扩容或清理后才能继续深读。", "privacy": "不增加删除", "disk": "停止增长", "latency_cost": "重任务暂不可用", "continuity": "文字聊天继续", "effective": "立即", "fallback": "98% 同样强制暂停。", "restore": "磁盘恢复后自动解除。"},
         "critical.emergency_evict": {"title": "95% 紧急清理", "does": "先删除公共缓存和生成物，再删除 24 小时未访问且非 in-flight 的最旧私有上传。", "affected": "可能影响仍在 TTL 内的 API 文件。", "benefits": "在小磁盘上尽量维持文件服务。", "drawbacks": "私有文件可能要求用户重新上传，公共论文会重下。", "privacy": "更快删除", "disk": "释放最多", "latency_cost": "后续重算成本高", "continuity": "结构化 Checkpoint 尽量保留", "effective": "需预览和二次确认", "fallback": "in-flight/protected 数据不删；98% 仍暂停。", "restore": "切回 pause_heavy。"},

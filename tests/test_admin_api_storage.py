@@ -48,11 +48,30 @@ def test_policy_help_catalog_covers_every_required_option(admin_env):
         "preset.privacy", "preset.balanced", "preset.performance", "ttl",
         "thresholds", "critical.pause_heavy", "critical.emergency_evict",
         "trace.off", "trace.metadata", "trace.full", "cleanup",
+        "max_upload_bytes",
     } <= keys
     required = {"title", "does", "affected", "benefits", "drawbacks", "privacy",
                 "disk", "latency_cost", "continuity", "effective", "fallback", "restore"}
     assert all(required <= set(item) for item in response["help"]["items"].values())
     assert "openai-api" not in repr(response).lower()
+
+
+def test_api_upload_limit_defaults_updates_and_rejects_out_of_range(admin_env):
+    current = admin_api.get_api_storage_policy(admin_env["admin"])["policy"]
+    assert current["max_upload_bytes"] == 200 * 1024 * 1024
+    body = admin_api.ApiStoragePolicyUpdate(
+        expected_version=current["version"], max_upload_bytes=16 * 1024 * 1024,
+    )
+    updated = admin_api.put_api_storage_policy(body, admin_env["admin"])["policy"]
+    assert updated["max_upload_bytes"] == 16 * 1024 * 1024
+    with pytest.raises(ValidationError):
+        admin_api.ApiStoragePolicyUpdate(
+            expected_version=updated["version"], max_upload_bytes=1024 * 1024 - 1,
+        )
+    with pytest.raises(ValidationError):
+        admin_api.ApiStoragePolicyUpdate(
+            expected_version=updated["version"], max_upload_bytes=200 * 1024 * 1024 + 1,
+        )
 
 
 def test_safe_policy_update_and_optimistic_conflict(admin_env):

@@ -445,6 +445,15 @@ async def chat_turn(
                     "element_count": a.get("element_count", 0),
                     "preview_url": a.get("preview_url", ""),
                 }
+                # API-private artifact references are required for later
+                # deep-read/RAG access, but never enter per-message chips or
+                # add empty API-only fields to web history.
+                for key in (
+                    "artifact_id", "sidecar_artifact_id", "relative_path",
+                    "text_relative_path", "source_file_id",
+                ):
+                    if a.get(key):
+                        rec[key] = a[key]
                 session.attachments.append(rec)
                 new_attachments.append(rec)
                 existing.add(a["id"])

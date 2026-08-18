@@ -123,7 +123,71 @@ def test_exact_balanced_default_policy(tmp_path: Path):
         updated_by="bootstrap",
         updated_at=policy.updated_at,
     )
+    assert policy.max_upload_bytes == 200 * 1024 * 1024
     assert policy.updated_at > 0
+
+
+def test_schema_v5_migrates_max_upload_bytes_without_policy_version_bump(tmp_path: Path):
+    context = StorageContext.openai_api(root_dir=tmp_path / "api")
+    store = ApiStorageStore(context)
+    store.initialize()
+    before = store.get_policy()
+    with store.connect() as conn:
+        conn.execute("ALTER TABLE api_storage_policy RENAME TO api_storage_policy_v5")
+        conn.execute("""
+            CREATE TABLE api_storage_policy (
+                id INTEGER PRIMARY KEY CHECK (id = 1), preset TEXT NOT NULL,
+                session_ttl_seconds INTEGER NOT NULL, upload_ttl_seconds INTEGER NOT NULL,
+                export_ttl_seconds INTEGER NOT NULL, public_pdf_ttl_seconds INTEGER NOT NULL,
+                cache_ttl_seconds INTEGER NOT NULL, trace_ttl_seconds INTEGER NOT NULL,
+                cleanup_interval_minutes INTEGER NOT NULL,
+                observe_threshold_percent INTEGER NOT NULL,
+                pressure_threshold_percent INTEGER NOT NULL,
+                critical_threshold_percent INTEGER NOT NULL,
+                hard_stop_threshold_percent INTEGER NOT NULL,
+                pressure_strategy TEXT NOT NULL, critical_strategy TEXT NOT NULL,
+                trace_mode TEXT NOT NULL, version INTEGER NOT NULL,
+                updated_by TEXT NOT NULL, updated_at REAL NOT NULL
+            )
+        """)
+        old_columns = [
+            "id", "preset", "session_ttl_seconds", "upload_ttl_seconds",
+            "export_ttl_seconds", "public_pdf_ttl_seconds", "cache_ttl_seconds",
+            "trace_ttl_seconds", "cleanup_interval_minutes",
+            "observe_threshold_percent", "pressure_threshold_percent",
+            "critical_threshold_percent", "hard_stop_threshold_percent",
+            "pressure_strategy", "critical_strategy", "trace_mode", "version",
+            "updated_by", "updated_at",
+        ]
+        joined = ", ".join(old_columns)
+        conn.execute(f"INSERT INTO api_storage_policy({joined}) SELECT {joined} FROM api_storage_policy_v5")
+        conn.execute("DROP TABLE api_storage_policy_v5")
+        conn.execute("UPDATE api_schema_meta SET schema_version = 5 WHERE id = 1")
+        conn.commit()
+
+    store.initialize()
+    migrated = store.get_policy()
+    assert store.schema_version() == SCHEMA_VERSION
+    assert migrated.max_upload_bytes == 200 * 1024 * 1024
+    assert migrated.version == before.version
+
+
+def test_policy_upload_limit_validation(tmp_path: Path):
+    store = ApiStorageStore(StorageContext.openai_api(root_dir=tmp_path / "api"))
+    store.initialize()
+    current = store.get_policy()
+    updated = store.update_policy(
+        {"max_upload_bytes": 8 * 1024 * 1024},
+        expected_version=current.version,
+        updated_by="admin-test",
+    )
+    assert updated.max_upload_bytes == 8 * 1024 * 1024
+    with pytest.raises(ValueError, match="1 MiB and 200 MiB"):
+        store.update_policy(
+            {"max_upload_bytes": 200 * 1024 * 1024 + 1},
+            expected_version=updated.version,
+            updated_by="admin-test",
+        )
 
 
 def test_optimistic_policy_version_conflict(tmp_path: Path):

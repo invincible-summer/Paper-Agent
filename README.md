@@ -59,9 +59,9 @@
 - Bearer 鉴权支持管理员创建的长期 Agent API Key（`pa_live_...`，数据库仅存 SHA-256，完整值仅创建时显示一次，可撤销）；`AGENT_API_KEY` 保留为迁移/应急凭证。生产无任何密钥返回 503，错误或已撤销密钥返回 401
 - 多轮对话：credential/user/message-chain HMAC alias + 7 天结构化 Checkpoint；重启恢复论文、摘要与 RAG，完整 messages/reasoning 不落盘
 - 多轮对话：优先使用清小搭传入的 `sessionId`，缺失时回退到 credential/user/message-chain HMAC alias；调用方 `system` 指令会在服务端安全规则之后受限加入上下文，外部 `tool` 历史可安全忽略
-- 多模态输入：支持 OpenAI content 数组——`file` 与 `image_url`（URL 或 data URI）统一注册为会话附件，上传阶段只做快速提取，后续问答/深读按需调用视觉理解并缓存；URL 下载保留 SSRF 防护与 50MB 上限。`input_audio` 当前明确降级为不支持音频解析
+- 多模态输入：支持 OpenAI content 数组——`file.url` 存在时始终作为实际下载地址（与 `file_id` 同时存在也不例外），`file_id` 只保留为来源标识，绝不拼接成本地路径或猜测公网 URL；仅有 `file_id` 时不联网、不报 500，而是在本轮明确提示缺少可下载 URL。`file` 与 `image_url`（URL 或 data URI）统一注册为会话附件，HTTP(S) 下载逐跳执行 SSRF 公网校验。`/v1` 文件上限默认 200 MiB，可由管理员在 `/admin/api-storage` 下调但不能超过 200 MiB；Web `/chat/upload` 仍为 20 MiB。PDF/DOCX/TEX/TXT/MD/BIB/PNG/JPG/JPEG/WebP 按原能力处理；DOC/XLS/XLSX 可安全保存到 API 私有会话并生成空 sidecar，但标记为 `deferred`、当前不解析；PPT/PPTX 和其他未知格式继续拒绝。`input_audio` 当前明确降级为不支持音频解析
 - 文件产物输出：研究地图 / 综述可生成为 markdown；`export_manuscript` 可导出 md / docx / tex，下载路由同时支持 `.txt` 文本产物。所有文件均由 `GET /files/{name}` 下载，长中文文件名受 basename 与后缀白名单保护并可正常获取
-- 富展示（按接口文档能力实现）：工具完成时正文插入 Markdown 卡片仿真（默认 8 个核心工具完整卡片，其余一行摘要）；技能加载触发思考折叠提示 + 正文技能行；`explain_element` 图表裁剪图、`citation_export` 的 .bib、`field_census` 趋势图 SVG 作为当轮附件卡片下发（image 类附件自动带 `previewUrl`）。卡片策略由管理员在 `/admin/display-policy` 页面配置（`api_display_policy` 单行表，schema v5，乐观锁），存于 `data/openai_api/state.db`
+- 富展示（按接口文档能力实现）：工具完成时正文插入 Markdown 卡片仿真（默认 8 个核心工具完整卡片，其余一行摘要）；技能加载触发思考折叠提示 + 正文技能行；`explain_element` 图表裁剪图、`citation_export` 的 .bib、`field_census` 趋势图 SVG 作为当轮附件卡片下发（image 类附件自动带 `previewUrl`）。卡片策略由管理员在 `/admin/display-policy` 页面配置（`api_display_policy` 单行表，schema v6，乐观锁），存于 `data/openai_api/state.db`
 - 接入向导：`baseUrl = https://你的域名/v1`，`credential = 管理员创建的长期 Agent API Key`；附件 URL 由 `PUBLIC_BASE_URL` 生成
 
 ## 多用户账号（自有前端公开部署时开启）
@@ -127,14 +127,14 @@ cd frontend && pnpm build                     # 前端类型检查 + 构建
 
 ## 清小搭 / OpenAI API 独立存储
 
-`/v1/models` 与 `/v1/chat/completions` 使用独立 `data/openai_api/` 根目录，不会改变自制前端的历史、上传、论文、附件、图谱和长期保留。默认策略：7 天结构化 Checkpoint/私有上传、24 小时导出、3 天公共 PDF、90 天语义/视觉缓存、API Trace 关闭。公共 PDF 过期即由计划清理删除，后续需要时 deep_read 会自动重新下载并提取。完整 messages、reasoning/思维链、API Key、raw bytes 和完整 PDF 正文不会写入 Checkpoint。
+`/v1/models` 与 `/v1/chat/completions` 使用独立 `data/openai_api/` 根目录，不会改变自制前端的历史、上传、论文、附件、图谱和长期保留。默认策略：7 天结构化 Checkpoint/私有上传、24 小时导出、3 天公共 PDF、90 天语义/视觉缓存、API Trace 关闭，以及单文件 200 MiB 的远程下载/私有保存上限。公共 PDF 过期即由计划清理删除，后续需要时 deep_read 会自动重新下载并提取。完整 messages、reasoning/思维链、API Key、raw bytes 和完整 PDF 正文不会写入 Checkpoint。
 
 管理员页面：`/admin/auth-settings`（访问控制）。运行时开关账号登录、游客访问、开放注册，三档选择注册邮箱要求（不要求 / 仅填写 / 邮箱 + 验证码），显示 SMTP 配置状态并支持发送测试邮件；带版本乐观锁，关账号登录需输入「确认」二次确认。各开关的说明都收在问号帮助弹窗里。
 
 
 管理员页面：`/admin/paper-search`（论文检索）。可逐项启用/关闭 OpenAlex、Semantic Scholar、arXiv、Crossref、Europe PMC、DOAJ、HAL、OpenAIRE、CORE、bioRxiv、medRxiv、PubMed、DataCite、DBLP；默认智能路由按学科/意图选择最多 4 个主渠道，结果不足时最多 2 个兜底渠道，也可由管理员切换全启用模式。页面展示协议、许可门禁、配置、熔断、Rxiv 本地索引覆盖/日期与分页游标/同步错误，并提供真实检索连通性、arXiv 多查询负载和最多读取 1 MiB 的 PDF 下载测速；不接受任意 URL、不保存测速 PDF、不显示密钥或完整配置邮箱。默认单源预算 12 秒，检索总预算可在 10–30 秒调整且硬上限为 30 秒，全文探测默认 30 秒；达到时限返回部分结果。
 
-管理员页面：`/admin/api-storage`。可查看分类容量、磁盘状态、清理记录，选择 privacy/balanced/performance、自定义 TTL、95% pause/emergency 和 off/metadata/full Trace；每项都有隐私、磁盘、延迟、费用、连续性、重下载/OCR/VLM、生效与恢复默认说明。缩短 TTL、Full Trace、紧急删除、立即清理和遗留扫描必须预览并二次确认。
+管理员页面：`/admin/api-storage`。可查看分类容量、磁盘状态、清理记录，选择 privacy/balanced/performance、自定义 TTL、1–200 MiB 的 API 远程文件上限、95% pause/emergency 和 off/metadata/full Trace；文件上限只影响后续 `/v1` 下载/私有保存，不影响 Web 20 MiB 上传，修改不会删除或重处理已保存文件。每项都有隐私、磁盘、延迟、费用、连续性、重下载/OCR/VLM、生效与恢复默认说明。缩短 TTL、Full Trace、紧急删除、立即清理和遗留扫描必须预览并二次确认。
 
 管理员页面：`/admin/accounts-data`。统一列出各 web 账号和 Agent API Key 的历史会话、上传文件、Trace、会话向量、API 私有文件占用；管理员可**彻底删除**某个账号的全部数据（文件先覆写再删除、SQLite secure_delete + VACUUM，无法恢复），也可一键清理共享的论文 PDF/元素资产缓存。
 

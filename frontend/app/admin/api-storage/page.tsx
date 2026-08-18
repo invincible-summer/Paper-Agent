@@ -17,9 +17,9 @@ import {
 import { useAuthStore } from "@/stores/auth";
 
 const PRESETS: Record<string, Partial<ApiStoragePolicy>> = {
-  privacy: { preset: "privacy", session_ttl_seconds: 7200, upload_ttl_seconds: 7200, export_ttl_seconds: 7200, public_pdf_ttl_seconds: 259200, cache_ttl_seconds: 2592000, trace_mode: "off" },
-  balanced: { preset: "balanced", session_ttl_seconds: 604800, upload_ttl_seconds: 604800, export_ttl_seconds: 86400, public_pdf_ttl_seconds: 259200, cache_ttl_seconds: 7776000, trace_mode: "off" },
-  performance: { preset: "performance", session_ttl_seconds: 2592000, upload_ttl_seconds: 2592000, export_ttl_seconds: 604800, public_pdf_ttl_seconds: 259200, cache_ttl_seconds: 15552000, trace_mode: "metadata", trace_ttl_seconds: 604800 },
+  privacy: { preset: "privacy", session_ttl_seconds: 7200, upload_ttl_seconds: 7200, max_upload_bytes: 209715200, export_ttl_seconds: 7200, public_pdf_ttl_seconds: 259200, cache_ttl_seconds: 2592000, trace_mode: "off" },
+  balanced: { preset: "balanced", session_ttl_seconds: 604800, upload_ttl_seconds: 604800, max_upload_bytes: 209715200, export_ttl_seconds: 86400, public_pdf_ttl_seconds: 259200, cache_ttl_seconds: 7776000, trace_mode: "off" },
+  performance: { preset: "performance", session_ttl_seconds: 2592000, upload_ttl_seconds: 2592000, max_upload_bytes: 209715200, export_ttl_seconds: 604800, public_pdf_ttl_seconds: 259200, cache_ttl_seconds: 15552000, trace_mode: "metadata", trace_ttl_seconds: 604800 },
 };
 
 const PRESET_NAMES: Record<string, string> = {
@@ -213,6 +213,26 @@ export default function ApiStorageAdminPage() {
               </div>
             );
           })}
+        </div>
+      </AdminSection>
+
+      <AdminSection title="API 文件输入"
+        info={<InfoButton onClick={() => show("max_upload_bytes")} label="API 文件上限说明" />}>
+        <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+          <div>
+            <div className="font-medium">API 远程文件上限</div>
+            <div className="mt-1 max-w-2xl text-xs text-muted">
+              仅影响清小搭 /v1 的 file.url 下载和 API 私有附件保存；默认 200 MiB，最多 200 MiB。
+              不影响 Web /chat/upload 的 20 MiB 限制。DOC/XLS/XLSX 当前只保存、不解析。
+            </div>
+          </div>
+          <label className="flex items-center gap-1.5">
+            <input type="number" min={1} max={200} step={1}
+              value={Math.round(draft.max_upload_bytes / (1024 * 1024))}
+              onChange={(e) => setDraft({ ...draft, preset: "custom", max_upload_bytes: Number(e.target.value) * 1024 * 1024 })}
+              className={`${inputClass} tnum w-24 text-right`} />
+            <span className="w-10 text-xs text-muted">MiB</span>
+          </label>
         </div>
       </AdminSection>
 

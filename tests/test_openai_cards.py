@@ -316,12 +316,12 @@ def test_generated_svgs_are_valid_xml():
 
 
 def test_display_policy_store_roundtrip(tmp_path):
-    from core.api_storage_store import ApiStorageStore, PolicyVersionConflict
+    from core.api_storage_store import ApiStorageStore, PolicyVersionConflict, SCHEMA_VERSION
     from core.storage_context import StorageContext
 
     store = ApiStorageStore(StorageContext.openai_api(root_dir=tmp_path))
     store.initialize()
-    assert store.schema_version() == 5
+    assert store.schema_version() == SCHEMA_VERSION
     policy = store.get_display_policy()
     assert policy.preset == "core" and policy.skill_card_enabled
 

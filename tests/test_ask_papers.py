@@ -390,3 +390,30 @@ def test_structure_query_protects_complete_outline_from_rerank(monkeypatch):
                     "4 EXPERIMENTS", "4.1", "4.5", "5 CONCLUSION"]:
         assert heading in text
     assert result.data["sources"][0]["sections"][0] == "section_outline"
+
+
+def test_deferred_attachment_rag_returns_explicit_degradation(monkeypatch):
+    import tools.ingest.attachments as attachment_ingest
+
+    store = _FakeStore(chunks=[])
+    _patch(monkeypatch, store)
+
+    async def fake_understand(attachment, session, *, focus=""):
+        return {
+            "id": attachment["id"], "status": "deferred", "element_count": 0,
+            "reason": "该格式已安全保存，但当前版本尚未提供解析能力。",
+        }
+
+    monkeypatch.setattr(attachment_ingest, "ensure_attachment_understood", fake_understand)
+    session = _session()
+    session.attachments = [{
+        "id": "d" * 32, "filename": "sheet.xlsx", "ext": "xlsx",
+        "multimodal_status": "deferred",
+    }]
+    result = asyncio.run(ti._tool_ask_papers({
+        "query": "总结这个表格", "attachment_id": "d" * 32,
+    }, session, None))
+    assert not result.is_error
+    assert result.status == "partial"
+    assert "尚未提供 DOC/XLS/XLSX 解析能力" in result.text
+    assert result.data["attachments"][0]["status"] == "deferred"

@@ -369,3 +369,106 @@ async def test_api_pdf_lazy_read_uses_shared_chokepoint_and_context(monkeypatch,
     assert seen and Path(seen[0][0]).is_relative_to(context.root_dir)
     assert Path(seen[0][1]).is_relative_to(context.root_dir)
     assert seen[0][2] == context
+
+
+@pytest.mark.parametrize(
+    ("filename", "mime_type", "expected_ext"),
+    [
+        ("legacy.doc", "application/octet-stream", "doc"),
+        ("sheet.xls", "application/vnd.ms-excel", "xls"),
+        (
+            "workbook.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "xlsx",
+        ),
+    ],
+)
+def test_api_deferred_office_formats_are_saved_with_empty_sidecars(
+    tmp_path: Path, filename: str, mime_type: str, expected_ext: str,
+):
+    from tools.ingest.attachments import attachment_text_path, save_attachment
+
+    context = StorageContext.openai_api(root_dir=tmp_path / "openai-api")
+    artifact_store = ApiArtifactStore(ApiStorageStore(context))
+    _ensure_session(artifact_store, "session-deferred")
+    record = save_attachment(
+        b"opaque legacy office bytes",
+        filename,
+        content_type=mime_type,
+        storage_context=context,
+        session_id="session-deferred",
+        max_bytes=200 * 1024 * 1024,
+    )
+    assert record["ext"] == expected_ext
+    assert record["multimodal_status"] == "deferred"
+    assert record["char_count"] == 0
+    sidecar = attachment_text_path(
+        record,
+        ChatSession(
+            channel="openai_api", storage_context=context,
+            session_id="session-deferred", attachments=[record],
+        ),
+    )
+    assert sidecar is not None and sidecar.read_bytes() == b""
+
+
+def test_deferred_attachment_deep_read_returns_status_without_parser(tmp_path: Path, monkeypatch):
+    from tools.ingest.attachments import ensure_attachment_understood, save_attachment
+
+    context = StorageContext.openai_api(root_dir=tmp_path / "openai-api")
+    artifact_store = ApiArtifactStore(ApiStorageStore(context))
+    _ensure_session(artifact_store, "session-deferred-read")
+    record = save_attachment(
+        b"opaque workbook bytes", "sheet.xlsx",
+        storage_context=context, session_id="session-deferred-read",
+        max_bytes=200 * 1024 * 1024,
+    )
+    session = ChatSession(
+        channel="openai_api", storage_context=context,
+        session_id="session-deferred-read", attachments=[record],
+    )
+
+    async def unexpected(*args, **kwargs):
+        raise AssertionError("deferred formats must not enter PDF/DOCX/VLM parsing")
+
+    monkeypatch.setattr("agents.reader_agent.parse_and_understand", unexpected)
+    result = asyncio.run(ensure_attachment_understood(record, session, focus="读取表格"))
+    assert result["status"] == "deferred"
+    assert "尚未提供解析能力" in result["reason"]
+
+
+def test_deferred_formats_remain_api_only_and_ppt_is_rejected(tmp_path: Path):
+    from tools.ingest import attachments
+
+    with pytest.raises(attachments.AttachmentError):
+        attachments.save_attachment(b"legacy", "legacy.doc")
+
+    context = StorageContext.openai_api(root_dir=tmp_path / "openai-api")
+    artifact_store = ApiArtifactStore(ApiStorageStore(context))
+    _ensure_session(artifact_store, "session-reject")
+    for filename in ("slides.ppt", "slides.pptx", "payload.exe"):
+        with pytest.raises(attachments.AttachmentError):
+            attachments.save_attachment(
+                b"opaque", filename, content_type="application/msword",
+                storage_context=context, session_id="session-reject",
+                max_bytes=200 * 1024 * 1024,
+            )
+
+
+def test_api_attachment_save_reads_current_policy_limit(tmp_path: Path):
+    from tools.ingest import attachments
+
+    context = StorageContext.openai_api(root_dir=tmp_path / "openai-api")
+    artifact_store = ApiArtifactStore(ApiStorageStore(context))
+    _ensure_session(artifact_store, "session-limit")
+    current = artifact_store.storage.get_policy()
+    artifact_store.storage.update_policy(
+        {"max_upload_bytes": 1024 * 1024},
+        expected_version=current.version,
+        updated_by="test",
+    )
+    with pytest.raises(attachments.AttachmentError, match="1 MiB"):
+        attachments.save_attachment(
+            b"x" * (1024 * 1024 + 1), "large.txt",
+            storage_context=context, session_id="session-limit",
+        )

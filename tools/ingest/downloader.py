@@ -21,11 +21,17 @@ from tools.pdf.fetcher import _is_safe_url
 
 logger = logging.getLogger(__name__)
 
-MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB hard cap
+MAX_FILE_BYTES = 50 * 1024 * 1024  # non-API compatibility default
 
 
 class IngestError(ValueError):
     """Raised when a remote file cannot be downloaded or extracted."""
+
+
+def format_byte_limit(max_bytes: int) -> str:
+    """Human-readable configured limit without hard-coded 50 MB wording."""
+    mib = max_bytes / (1024 * 1024)
+    return f"{int(mib)} MiB" if mib.is_integer() else f"{mib:.1f} MiB"
 
 
 def _ext_of(url: str, filename: str, content_type: str) -> str:
@@ -73,7 +79,7 @@ async def download_to_temp(
                     content_type = resp.headers.get("content-type", "")
                     declared = resp.headers.get("content-length")
                     if declared and declared.isdigit() and int(declared) > max_bytes:
-                        raise IngestError("文件超过 50MB 上限")
+                        raise IngestError(f"文件超过 {format_byte_limit(max_bytes)} 上限")
                     total = 0
                     with target.open("xb") as output:
                         async for chunk in resp.aiter_bytes():
@@ -81,7 +87,7 @@ async def download_to_temp(
                                 continue
                             total += len(chunk)
                             if total > max_bytes:
-                                raise IngestError("文件超过 50MB 上限")
+                                raise IngestError(f"文件超过 {format_byte_limit(max_bytes)} 上限")
                             output.write(chunk)
                         output.flush()
                         os.fsync(output.fileno())

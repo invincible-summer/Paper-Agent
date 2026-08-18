@@ -209,3 +209,26 @@ def test_deep_read_payload_includes_title_and_document_metadata(monkeypatch):
     assert payload["title"] == "Readable Paper"
     assert payload["section_outline"][0]["title"] == "1 Introduction"
     assert payload["document_info"]["ocr_status"] == "not_needed"
+
+
+def test_tool_deep_read_reports_deferred_attachment(monkeypatch):
+    import tools.ingest.attachments as attachment_ingest
+
+    async def fake_understand(attachment, session, *, focus=""):
+        return {
+            "id": attachment["id"], "status": "deferred", "element_count": 0,
+            "reason": "该格式已安全保存，但当前版本尚未提供解析能力。",
+        }
+
+    monkeypatch.setattr(attachment_ingest, "ensure_attachment_understood", fake_understand)
+    session = ti.ChatSession()
+    session.attachments = [{
+        "id": "d" * 32, "filename": "sheet.xlsx", "ext": "xlsx",
+        "multimodal_status": "deferred",
+    }]
+    result = asyncio.run(ti._tool_deep_read(
+        {"attachment_ids": ["d" * 32]}, session, None,
+    ))
+    assert not result.is_error
+    assert "1 个格式已保存但解析延期" in result.text
+    assert result.data["attachments"][0]["status"] == "deferred"

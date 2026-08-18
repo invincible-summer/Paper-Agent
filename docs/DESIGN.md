@@ -399,7 +399,11 @@ API 物理根目录固定隔离为 `data/openai_api/{state.db,metadata.db,chroma
 
 ### 7.3 多模态输入（`backend/app/api/v1/multimodal.py`）
 
-content 数组解析：`text` 直取；`file` 与 `image_url` 统一经过 `save_attachment`，支持 PDF/DOCX/TEX/TXT/MD/BIB/PNG/JPG/JPEG/WebP。HTTP(S) URL 逐 redirect 做 SSRF/公网地址校验并流式写入 0600 temp，边写边执行 50 MiB 上限，成功原子转为当前 session 的 HMAC 内容寻址私有 artifact，失败/中断删 temp；也支持 `data:` URI。只把附件引用登记到当前 `/v1` Checkpoint 并建立 API 专属文本索引，**摄取阶段零 VLM**。公共 OA PDF 按 SHA-256 跨 API session 复用，私有上传绝不跨 session 自动共享。后续 `deep_read`、附件问答或图表请求才按需理解并复用缓存。`input_audio` 仍明确不支持并要求文字转写。
+content 数组解析：`text` 直取；`file.url` 存在时始终作为当前请求的实际下载地址，即使同时携带 `file_id` 也不会被后者阻断；`file_id` 仅作为清小搭来源标识写入轻量附件元数据，不参与路径拼接、本地查找或 URL 推导。仅有 `file_id` 时记录 `reason_code=missing_download_url` 的安全结构化日志（不记录完整请求、URL、文件内容或标识值），不发起网络请求，并把“缺少可下载 `file.url`”降级说明放入本轮上下文。缺失 `filename` 时仅从 URL path 的安全 basename 回退，URL query 不进入文件名或错误文本。
+
+`file` 与 `image_url` 统一经过 `save_attachment`。常规格式支持 PDF/DOCX/TEX/TXT/MD/BIB/PNG/JPG/JPEG/WebP；API 额外接收 DOC/XLS/XLSX，但只保存原件并创建空文本 sidecar，状态固定为 `deferred`，不会调用 PDF、Docling、DOCX 或 VLM 解析链，后续 `deep_read`/图表工具返回明确延期原因而不是把空文本冒充解析成功或抛出 500。PPT/PPTX 和未知后缀继续拒绝；显式 filename 后缀优先于不规范 MIME，避免把 `.ppt` 伪装成 Word/PDF。Web `/chat/upload` 的格式和 20 MiB 上限完全不变。
+
+HTTP(S) URL 逐 redirect 做 SSRF/公网地址校验并流式写入 0600 temp，`trust_env=False`；每次请求从 `api_storage_policy.max_upload_bytes` 读取动态上限（默认/最大 200 MiB、最小 1 MiB），下载流与私有附件保存执行同一限制，超限/中断删除 temp，错误显示实际配置值且不回显签名 query。成功后转为当前 session 的私有 artifact；也支持 `data:` URI。只把附件引用登记到当前 `/v1` Checkpoint 并建立 API 专属文本索引，**摄取阶段零 VLM**。公共 OA PDF 按 SHA-256 跨 API session 复用，私有上传绝不跨 session 自动共享。后续 `deep_read`、附件问答或图表请求才按需理解并复用缓存。`input_audio` 仍明确不支持并要求文字转写。
 
 ### 7.4 文件产物输出（`x_soda.attachments`）
 
@@ -411,11 +415,13 @@ content 数组解析：`text` 直取；`file` 与 `image_url` 统一经过 `save
 
 ### 7.5 生命周期、磁盘压力与 API Trace
 
-默认保留：session/upload 7 天、export 24 小时、public PDF 3 天（过期即清理，后续 deep_read 自动重新下载提取）、语义/视觉缓存 90 天、Trace off；hourly cleanup 只在 API 根目录内执行过期、孤立对账和压力清理。75% 清过期并告警；85% 连续清理公共/生成/向量/视觉等可重建数据，不提前删除未过期私有上传；95% 默认 `pause_heavy`（上传、下载、deep_read、OCR、VLM、导出暂停，文字聊天继续），管理员可经预览和二次确认改为 `emergency_evict`；98% 强制暂停文件重任务，不可关闭。in-flight、`protected_until` 和一小时内未完成登记文件受保护。
+默认保留：session/upload 7 天、export 24 小时、public PDF 3 天（过期即清理，后续 deep_read 自动重新下载提取）、语义/视觉缓存 90 天、Trace off；API 单文件上限默认 200 MiB。`api_storage_policy.max_upload_bytes` 使用同一乐观锁更新，管理员页面以 MiB 输入并由后端强制校验 1–200 MiB，保存后立即影响后续请求，不删除或重处理既有文件。`state.db` schema v6 在初始化时用受检 `ALTER TABLE` 为旧库补列和 200 MiB 默认值，不改变旧 policy 的版本号或冲突语义。
+
+hourly cleanup 只在 API 根目录内执行过期、孤立对账和压力清理。75% 清过期并告警；85% 连续清理公共/生成/向量/视觉等可重建数据，不提前删除未过期私有上传；95% 默认 `pause_heavy`（上传、下载、deep_read、OCR、VLM、导出暂停，文字聊天继续），管理员可经预览和二次确认改为 `emergency_evict`；98% 强制暂停文件重任务，不可关闭。in-flight、`protected_until` 和一小时内未完成登记文件受保护。
 
 - **账号数据清理**（`/admin/accounts-data` + `core/admin_accounts.py`）：管理员统一查看 web 账号与 Agent API Key 的数据占用（history_record / data/uploads / trace / API session+private blob），按账号彻底删除。文件删除前全量覆写 + fsync，API state.db 使用 `PRAGMA secure_delete` 并 `VACUUM` 回收空间；共享 PDF/assets 缓存单独一键清理，deep_read 需要时自动重下。
 
-API Trace 与 web Trace 独立：off 只写匿名请求/错误/Token/耗时聚合；metadata 仅 trace id、模型、工具名、状态、错误码、Token、耗时；full 仅供临时排障并脱敏 Key、bytes、完整正文和 URL query，最长 7 天。web Trace 仍按原路径和原始行为工作。管理员浏览器页面 `/admin/api-storage` 提供策略、容量、状态、清理记录、完整帮助 catalog 和危险操作确认；Agent Key 无管理权限。
+API Trace 与 web Trace 独立：off 只写匿名请求/错误/Token/耗时聚合；metadata 仅 trace id、模型、工具名、状态、错误码、Token、耗时；full 仅供临时排障并脱敏 Key、bytes、完整正文和 URL query，最长 7 天。web Trace 仍按原路径和原始行为工作。管理员浏览器页面 `/admin/api-storage` 提供策略、API 远程文件上限、容量、状态、清理记录、完整帮助 catalog 和危险操作确认；Agent Key 无管理权限。
 
 ### 7.6 Markdown 卡片仿真与展示策略（`/admin/display-policy`）
 
@@ -529,7 +535,7 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 - **SQLite**（`data/metadata.db`）：papers 元数据、summary_cache、全局 `paper_elements` 与 `vision_cache`——均是降本/重建缓存，不作为跨会话记忆授权。`doc_fingerprint` 防止 PDF 变化后复用陈旧元素。`data/users.db`：多用户账号与令牌（§3.4）。
 - **向量库**（`data/chroma/`）：L1/L2 会话隔离索引 + L3 全局 elements 缓存；L3 检索由调用方当前 paper/upload ID 集合强制收窄。
 - **上传/产物**：`data/uploads/` 同时保存用户原件 `<uuid>.<ext>` 与文本 sidecar `<uuid>.txt`；`data/assets/upload_*` 保存上传图片/DOCX media 等元素资产；`data/exports/` 保存 `.md/.txt/.docx/.tex` 产物。原始 bytes 从不写入历史 JSON。Web 上传与导出额外写入被 `.gitignore` 排除的 `data/web_artifacts.db` 所有者索引；原始文件、文本、图像资产和导出文件读取前按当前账号/游客身份校验。OpenAI API 私有文件不进入这些目录，而是按会话隔离在 `data/openai_api/`；API 公共别名保持短期可公开读取。
-- **安全**：SSRF 防护（URL 下载统一走公网校验）、50MB URL/20MB 网页直传上限、UUID/file_id/basename/后缀收敛、图片 raw endpoint 仅开放安全 raster MIME、CORS 显式白名单（永不 `*`）、/v1 Bearer 常量时间比较、Web 附件/导出/上传元素按所有者校验、错误不回显 OS 路径；口令 PBKDF2 加盐哈希、令牌只存哈希、历史按账号隔离（§3.4）。图表裁图与扫描页在按需理解时会发送到配置的第三方 VLM，未配置时优雅降级。
+- **安全**：SSRF 防护（URL 下载统一走公网校验）、API URL 下载/私有保存默认且最大 200 MiB（管理员可下调）/20 MiB 网页直传上限、UUID/file_id/basename/后缀收敛、图片 raw endpoint 仅开放安全 raster MIME、CORS 显式白名单（永不 `*`）、/v1 Bearer 常量时间比较、Web 附件/导出/上传元素按所有者校验、错误不回显 OS 路径；口令 PBKDF2 加盐哈希、令牌只存哈希、历史按账号隔离（§3.4）。图表裁图与扫描页在按需理解时会发送到配置的第三方 VLM，未配置时优雅降级。
 
 ### 部署单 worker 与事件循环隔离
 

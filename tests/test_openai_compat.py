@@ -498,13 +498,73 @@ def test_extract_user_content_preserves_bare_file_id_without_using_as_url():
 
 
 @pytest.mark.anyio
-async def test_process_media_parts_rejects_unresolvable_file_id():
+async def test_process_media_parts_degrades_unresolvable_file_id_without_network(monkeypatch):
+    import tools.ingest.downloader as downloader
     from app.api.v1.multimodal import MediaPart, process_media_parts
+
+    async def unexpected(*args, **kwargs):
+        raise AssertionError("bare file_id must not trigger a network request")
+
+    monkeypatch.setattr(downloader, "download_to_temp", unexpected)
+    monkeypatch.setattr(downloader, "download_bytes", unexpected)
     notes, attachments, errors = await process_media_parts([
         MediaPart(type="file", file_id="platform-id", filename="a.pdf")
     ])
-    assert notes == [] and attachments == []
-    assert errors and "file.url" in errors[0]
+    assert attachments == [] and errors == []
+    assert notes and "缺少可下载的 file.url" in notes[0]
+    assert "不会把 file_id 当作路径或网址" in notes[0]
+
+
+@pytest.mark.anyio
+async def test_process_media_parts_prefers_url_when_file_id_is_also_present(monkeypatch, tmp_path):
+    import time
+    import tools.ingest.downloader as downloader
+    from app.api.v1.multimodal import MediaPart, process_media_parts
+    from core.api_storage_store import ApiStorageStore
+    from core.storage_context import StorageContext
+
+    context = StorageContext.openai_api(root_dir=tmp_path / "openai-api")
+    store = ApiStorageStore(context)
+    store.initialize()
+    current = store.get_policy()
+    store.update_policy(
+        {"max_upload_bytes": 3 * 1024 * 1024},
+        expected_version=current.version,
+        updated_by="test",
+    )
+    now = time.time()
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO api_sessions(id, credential_id, rag_session_id, created_at, "
+            "updated_at, last_accessed_at, expires_at) VALUES (?, 'key', ?, ?, ?, ?, ?)",
+            ("session-url", "session-url", now, now, now, now + 3600),
+        )
+        conn.commit()
+
+    seen = {}
+    async def fake_download(url, *, temp_dir=None, max_bytes=None, max_redirects=5):
+        seen.update(url=url, max_bytes=max_bytes)
+        path = Path(temp_dir) / "download.tmp"
+        path.write_bytes(b"downloaded through url")
+        return path, "text/plain"
+
+    monkeypatch.setattr(downloader, "download_to_temp", fake_download)
+    notes, attachments, errors = await process_media_parts(
+        [MediaPart(
+            type="file", file_id="platform-id",
+            url="https://files.example/%E7%AC%94%E8%AE%B0.txt?signature=secret",
+        )],
+        storage_context=context,
+        session_id="session-url",
+    )
+    assert errors == [] and notes
+    assert seen == {
+        "url": "https://files.example/%E7%AC%94%E8%AE%B0.txt?signature=secret",
+        "max_bytes": 3 * 1024 * 1024,
+    }
+    assert attachments[0]["filename"] == "笔记.txt"
+    assert attachments[0]["source_file_id"] == "platform-id"
+    assert attachments[0]["char_count"] > 0
 
 
 @pytest.mark.anyio

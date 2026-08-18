@@ -233,6 +233,13 @@ class ChatMessageRequest(BaseModel):
                     raise ValueError("file part requires a file object")
                 url = file_data.get("url")
                 file_id = file_data.get("file_id")
+                filename = file_data.get("filename")
+                if url is not None and not isinstance(url, str):
+                    raise ValueError("file.url must be a string when provided")
+                if file_id is not None and not isinstance(file_id, str):
+                    raise ValueError("file.file_id must be a string when provided")
+                if filename is not None and not isinstance(filename, str):
+                    raise ValueError("file.filename must be a string when provided")
                 if not ((isinstance(url, str) and url.strip()) or
                         (isinstance(file_id, str) and file_id.strip())):
                     raise ValueError("file part requires file.url or file.file_id")

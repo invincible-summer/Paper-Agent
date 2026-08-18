@@ -428,6 +428,7 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
 
     ready_uploads = sum(r.get("status") == "ready" for r in attachment_results)
     degraded_uploads = sum(r.get("status") in {"degraded", "legacy_text_only"} for r in attachment_results)
+    deferred_uploads = sum(r.get("status") == "deferred" for r in attachment_results)
     parts: list[str] = []
     restricted_fallback = any(
         detail.get("reason") == "remote_fetch_restricted" for detail in fallback_details)
@@ -477,8 +478,11 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
         else:
             parts.append("所选论文没有可深读的网络论文")
     if attachment_results:
-        parts.append(f"上传附件按需理解完成：{ready_uploads} 个已解析" +
-                     (f"，{degraded_uploads} 个降级为文本" if degraded_uploads else ""))
+        parts.append(
+            f"上传附件按需理解完成：{ready_uploads} 个已解析"
+            + (f"，{degraded_uploads} 个降级为文本" if degraded_uploads else "")
+            + (f"，{deferred_uploads} 个格式已保存但解析延期" if deferred_uploads else "")
+        )
     if failures:
         parts.append(f"{len(failures)} 篇论文失败")
     selected_titles = {p.id: p.title for p in selected}
@@ -579,12 +583,20 @@ async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> Too
     )
     passages = _protect_passage(passages, protected_outline, top_k)
     if not passages:
+        deferred = [item for item in attachment_results if item.get("status") == "deferred"]
+        if deferred:
+            return partial_result(
+                "ask_papers",
+                "指定附件已安全保存，但当前版本尚未提供 DOC/XLS/XLSX 解析能力，"
+                "因此没有可用于 RAG 的文本段落；请转换为 DOCX、PDF、TXT 或 Markdown 后重试。",
+                answer="", sources=[], attachments=attachment_results,
+            )
         return partial_result(
             "ask_papers",
             "在本会话的论文与文件中没有检索到相关段落。可以换个包含论文关键词的问法重试，"
             "或带 paper_id 针对具体某篇问答（会尝试补读该篇 OA 全文；"
             "取不到全文时回退摘要级并明确说明）。",
-            answer="", sources=[],
+            answer="", sources=[], attachments=attachment_results,
         )
 
     answer = await _generate_grounded_answer(query, passages)

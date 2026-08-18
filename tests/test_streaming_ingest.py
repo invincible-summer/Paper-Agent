@@ -79,3 +79,15 @@ def test_interrupted_stream_removes_temp_file(monkeypatch, tmp_path: Path):
             "https://public.example/file", temp_dir=tmp_path
         ))
     assert list(tmp_path.iterdir()) == []
+
+
+def test_configured_limit_is_reported_and_partial_file_is_removed(monkeypatch, tmp_path: Path):
+    _Client.responses = [_Response(chunks=[b"a" * (4 * 1024 * 1024), b"b" * (3 * 1024 * 1024)])]
+    _Client.requested = []
+    monkeypatch.setattr(downloader.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(downloader, "_is_safe_url", lambda url: (True, ""))
+    with pytest.raises(downloader.IngestError, match="6.0 MiB"):
+        asyncio.run(downloader.download_to_temp(
+            "https://public.example/file", temp_dir=tmp_path,
+            max_bytes=6 * 1024 * 1024 + 1,
+        ))

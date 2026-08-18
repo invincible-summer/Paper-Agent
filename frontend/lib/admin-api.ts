@@ -61,6 +61,7 @@ export interface ApiStoragePolicy {
   preset: "privacy" | "balanced" | "performance" | "custom";
   session_ttl_seconds: number;
   upload_ttl_seconds: number;
+  max_upload_bytes: number;
   export_ttl_seconds: number;
   public_pdf_ttl_seconds: number;
   cache_ttl_seconds: number;

@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import unquote, urlsplit
 
 from core.blocking import run_cpu_bound
 
@@ -36,6 +37,32 @@ class MediaPart:
     filename: str = ""
     format: str = ""     # audio format: wav/mp3/m4a/webm
     file_id: str = ""    # cannot be resolved without a platform resolver API
+
+
+def _safe_part_label(part: MediaPart) -> str:
+    if part.filename:
+        return Path(part.filename).name or "该文件"
+    if part.url and not part.url.startswith("data:"):
+        return Path(unquote(urlsplit(part.url).path)).name or "该文件"
+    return "该文件" if part.type == "file" else "媒体文件"
+
+
+def _download_filename(part: MediaPart, content_type: str) -> str:
+    """Choose a basename without exposing URL queries or trusting paths."""
+    from tools.ingest.attachments import normalize_ext
+
+    candidate = Path(part.filename or "").name
+    if not candidate and part.url and not part.url.startswith("data:"):
+        candidate = Path(unquote(urlsplit(part.url).path)).name
+    if not candidate:
+        candidate = "image" if part.type == "image" else "upload"
+    if not Path(candidate).suffix:
+        ext = normalize_ext("", content_type)
+        if not ext and part.type == "image":
+            ext = "png"
+        if ext:
+            candidate = f"{candidate}.{ext}"
+    return candidate
 
 
 class MediaAdapter(Protocol):
@@ -173,9 +200,17 @@ async def process_media_parts(
         return notes, attachments, errors
 
     from tools.ingest.attachments import (
+        MAX_FILE_BYTES as DEFAULT_ATTACHMENT_MAX_BYTES,
         AttachmentError, save_attachment, save_attachment_from_path,
     )
     from tools.ingest.downloader import download_bytes, download_to_temp
+
+    api_max_bytes: int | None = None
+    if storage_context is not None and storage_context.channel == "openai_api":
+        from core.api_storage_store import ApiStorageStore
+        api_store = ApiStorageStore(storage_context)
+        api_store.initialize()
+        api_max_bytes = api_store.get_policy().max_upload_bytes
 
     for part in parts:
         if part.type == "audio":
@@ -187,10 +222,18 @@ async def process_media_parts(
         if part.type not in {"file", "image"}:
             continue
         if part.type == "file" and part.file_id and not part.url:
-            errors.append(
-                f"文件 {part.filename or part.file_id} 仅提供了 file_id；"
-                "当前清小搭接入文档未提供外部 Agent 解析 file_id 的接口，"
-                "请改为传入 file.url。"
+            logger.info(
+                "OpenAI-compatible file input degraded",
+                extra={
+                    "reason_code": "missing_download_url",
+                    "has_file_id": True,
+                    "has_filename": bool(part.filename),
+                },
+            )
+            notes.append(
+                f"[文件 {_safe_part_label(part)} 仅提供了 file_id，缺少可下载的 file.url；"
+                "当前版本不会把 file_id 当作路径或网址，也不会发起网络请求。"
+                "请由平台同时提供公网或签名 file.url 后重试。]"
             )
             continue
         if not part.url:
@@ -207,43 +250,48 @@ async def process_media_parts(
                 raw = None
                 if storage_context is not None and storage_context.channel == "openai_api":
                     temp_path, content_type = await download_to_temp(
-                        part.url, temp_dir=storage_context.temp_dir
+                        part.url, temp_dir=storage_context.temp_dir,
+                        max_bytes=api_max_bytes,
                     )
                 else:
                     temp_path = None
                     raw, content_type = await download_bytes(part.url)
-            filename = part.filename
-            if not filename:
-                if part.type == "image":
-                    ext = {"image/jpeg": "jpg", "image/webp": "webp"}.get(
-                        content_type.split(";", 1)[0].lower(), "png")
-                    filename = f"image.{ext}"
-                else:
-                    filename = Path(part.url.split("?", 1)[0]).name or "upload"
+            filename = _download_filename(part, content_type)
             try:
                 if temp_path is not None:
                     attachment = await run_cpu_bound(
                         save_attachment_from_path, temp_path, filename,
                         content_type=content_type, storage_context=storage_context,
                         session_id=session_id,
+                        max_bytes=api_max_bytes if api_max_bytes is not None else DEFAULT_ATTACHMENT_MAX_BYTES,
                     )
                 else:
                     attachment = await run_cpu_bound(
                         save_attachment, raw or b"", filename,
                         content_type=content_type, storage_context=storage_context,
                         session_id=session_id,
+                        max_bytes=api_max_bytes if api_max_bytes is not None else DEFAULT_ATTACHMENT_MAX_BYTES,
                     )
             finally:
                 if temp_path is not None:
                     temp_path.unlink(missing_ok=True)
+            if part.file_id:
+                attachment["source_file_id"] = part.file_id
             attachments.append(attachment)
-            notes.append(
-                f"[用户上传了{attachment['filename']}，已保存到当前会话；"
-                "如问题涉及图、表、公式，将按需进行多模态理解。]"
-            )
+            if attachment.get("multimodal_status") == "deferred":
+                notes.append(
+                    f"[用户上传了{attachment['filename']}，原文件已安全保存到当前会话；"
+                    "当前版本尚未提供 DOC/XLS/XLSX 解析能力，因此本轮不会把空 sidecar "
+                    "视为已解析内容，后续深读也会返回延期状态。]"
+                )
+            else:
+                notes.append(
+                    f"[用户上传了{attachment['filename']}，已保存到当前会话；"
+                    "如问题涉及图、表、公式，将按需进行多模态理解。]"
+                )
         except (AttachmentError, ValueError) as e:
-            errors.append(f"文件 {part.filename or part.url[:80]} 读取失败：{e}")
+            errors.append(f"文件 {_safe_part_label(part)} 读取失败：{e}")
         except Exception as e:  # noqa: BLE001
             logger.debug("media ingest failed: %s", e)
-            errors.append(f"文件 {part.filename or part.url[:80]} 读取失败。")
+            errors.append(f"文件 {_safe_part_label(part)} 读取失败。")
     return notes, attachments, errors

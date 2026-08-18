@@ -158,6 +158,7 @@ def _attachment_ref(attachment: Mapping[str, Any]) -> dict[str, Any]:
         "id", "filename", "char_count", "ext", "media_type",
         "multimodal_status", "element_count", "preview_url",
         "artifact_id", "sidecar_artifact_id", "relative_path", "text_relative_path",
+        "source_file_id",
     )
     return {
         key: attachment.get(key, 0 if key in {"char_count", "element_count"} else "")

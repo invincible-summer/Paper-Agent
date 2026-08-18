@@ -30,8 +30,10 @@ UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
 MAX_FILE_BYTES = 50 * 1024 * 1024
 TEXT_EXTENSIONS = {"txt", "md", "markdown", "tex", "bib"}
 DOCUMENT_EXTENSIONS = {"pdf", "docx"}
+API_DEFERRED_EXTENSIONS = {"doc", "xls", "xlsx"}
 IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | DOCUMENT_EXTENSIONS | IMAGE_EXTENSIONS
+_KNOWN_EXTENSIONS = SUPPORTED_EXTENSIONS | API_DEFERRED_EXTENSIONS
 MULTIMODAL_EXTENSIONS = DOCUMENT_EXTENSIONS | IMAGE_EXTENSIONS
 _ID_RE = re.compile(r"[a-f0-9]{32}")
 _MARKER = "\n\n<!-- attachment-multimodal-understanding -->\n"
@@ -39,6 +41,9 @@ _MARKER = "\n\n<!-- attachment-multimodal-understanding -->\n"
 _MEDIA_TYPES = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "doc": "application/msword",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "tex": "application/x-tex",
     "txt": "text/plain",
     "md": "text/markdown",
@@ -59,12 +64,19 @@ def normalize_ext(filename: str, content_type: str = "", raw: bytes = b"") -> st
     ext = Path(filename or "").suffix.lower().lstrip(".")
     if ext == "markdown":
         return "md"
-    if ext in SUPPORTED_EXTENSIONS:
-        return ext
+    if ext:
+        # A caller-provided filename is authoritative. In particular, never
+        # reinterpret an explicitly unsupported .ppt/.pptx (or arbitrary
+        # suffix) as PDF/Word merely because a remote server reports a loose
+        # Content-Type.
+        return ext if ext in _KNOWN_EXTENSIONS else ""
     ct = (content_type or "").split(";", 1)[0].strip().lower()
     by_ct = {
         "application/pdf": "pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+        "application/msword": "doc",
+        "application/vnd.ms-excel": "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
         "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp",
         "text/markdown": "md", "text/plain": "txt", "application/x-tex": "tex",
         "application/x-bibtex": "bib",
@@ -93,6 +105,19 @@ def media_type_for(ext: str) -> str:
     return _MEDIA_TYPES.get(ext, mimetypes.guess_type(f"x.{ext}")[0] or "application/octet-stream")
 
 
+def _effective_max_bytes(
+    storage_context: StorageContext | None, max_bytes: int | None,
+) -> int:
+    if max_bytes is not None:
+        return max_bytes
+    if storage_context is not None and storage_context.channel == "openai_api":
+        from core.api_storage_store import ApiStorageStore
+        store = ApiStorageStore(storage_context)
+        store.initialize()
+        return store.get_policy().max_upload_bytes
+    return MAX_FILE_BYTES
+
+
 def original_path(attachment_id: str, ext: str) -> Path:
     return UPLOAD_DIR / f"{attachment_id}.{ext}"
 
@@ -108,7 +133,7 @@ def find_original(attachment_id: str) -> Path | None:
     # Probe real binary/document formats first so a WebP original is not hidden
     # by that sidecar; text formats come last (for a genuine TXT upload the
     # original and sidecar intentionally share the same path).
-    priority = ["pdf", "docx", "png", "jpg", "jpeg", "webp", "tex", "md", "bib", "txt"]
+    priority = ["pdf", "docx", "doc", "xls", "xlsx", "png", "jpg", "jpeg", "webp", "tex", "md", "bib", "txt"]
     for ext in priority:
         fp = original_path(attachment_id, ext)
         if fp.is_file():
@@ -154,7 +179,7 @@ def extract_quick_text(raw: bytes, ext: str) -> str:
                 return raw.decode(enc)
             except UnicodeDecodeError:
                 continue
-    if ext in IMAGE_EXTENSIONS:
+    if ext in IMAGE_EXTENSIONS or ext in API_DEFERRED_EXTENSIONS:
         return ""
     raise AttachmentError(f"暂不支持的文件类型：{ext or '未知'}")
 
@@ -182,7 +207,7 @@ def _extract_quick_text_path(source: Path, ext: str) -> str:
     if ext in TEXT_EXTENSIONS:
         raw = source.read_bytes()
         return extract_quick_text(raw, ext)
-    if ext in IMAGE_EXTENSIONS:
+    if ext in IMAGE_EXTENSIONS or ext in API_DEFERRED_EXTENSIONS:
         return ""
     raise AttachmentError(f"暂不支持的文件类型：{ext or '未知'}")
 
@@ -190,21 +215,27 @@ def _extract_quick_text_path(source: Path, ext: str) -> str:
 def save_attachment_from_path(
     source: Path, filename: str, *, content_type: str = "", attachment_id: str = "",
     storage_context: StorageContext | None = None, session_id: str = "",
-    owner_id: str = "",
+    owner_id: str = "", max_bytes: int | None = None,
 ) -> dict:
+    max_bytes = _effective_max_bytes(storage_context, max_bytes)
     size = source.stat().st_size
-    if size > MAX_FILE_BYTES:
-        raise AttachmentError(f"文件超过 {MAX_FILE_BYTES // (1024 * 1024)}MB 上限")
+    if size > max_bytes:
+        from tools.ingest.downloader import format_byte_limit
+        raise AttachmentError(f"文件超过 {format_byte_limit(max_bytes)} 上限")
     with source.open("rb") as stream:
         header = stream.read(4096)
     ext = normalize_ext(filename, content_type, header)
-    if ext not in SUPPORTED_EXTENSIONS:
-        raise AttachmentError("暂不支持该文件类型；支持 PDF、DOCX、TEX、TXT、MD、BIB、PNG、JPG、WebP")
+    is_api = storage_context is not None and storage_context.channel == "openai_api"
+    allowed_extensions = SUPPORTED_EXTENSIONS | (API_DEFERRED_EXTENSIONS if is_api else set())
+    if ext not in allowed_extensions:
+        raise AttachmentError("暂不支持该文件类型；支持 PDF、DOCX、TEX、TXT、MD、BIB、PNG、JPG、WebP，API 另可暂存 DOC、XLS、XLSX")
     aid = attachment_id or uuid.uuid4().hex
     if not _ID_RE.fullmatch(aid):
         raise AttachmentError("附件 id 不合法")
-    text = _extract_quick_text_path(source, ext)
+    text = "" if ext in API_DEFERRED_EXTENSIONS else _extract_quick_text_path(source, ext)
     safe_name = Path(filename or f"upload.{ext}").name
+    if not Path(safe_name).suffix:
+        safe_name = f"{safe_name or 'upload'}.{ext}"
     extra: dict[str, str] = {}
     if storage_context is not None and storage_context.channel == "openai_api":
         if not session_id:
@@ -234,7 +265,8 @@ def save_attachment_from_path(
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, original_path(aid, ext))
         text_path(aid).write_text(text, encoding="utf-8")
-    status = "pending" if ext in MULTIMODAL_EXTENSIONS else "text_only"
+    status = ("deferred" if ext in API_DEFERRED_EXTENSIONS else
+              "pending" if ext in MULTIMODAL_EXTENSIONS else "text_only")
     result = {
         "id": aid, "filename": safe_name, "char_count": len(text),
         "text_preview": text[:500], "ext": ext, "media_type": media_type_for(ext),
@@ -256,18 +288,24 @@ def save_attachment_from_path(
 def save_attachment(
     raw: bytes, filename: str, *, content_type: str = "", attachment_id: str = "",
     storage_context: StorageContext | None = None, session_id: str = "",
-    owner_id: str = "",
+    owner_id: str = "", max_bytes: int | None = None,
 ) -> dict:
-    if len(raw) > MAX_FILE_BYTES:
-        raise AttachmentError(f"文件超过 {MAX_FILE_BYTES // (1024 * 1024)}MB 上限")
+    max_bytes = _effective_max_bytes(storage_context, max_bytes)
+    if len(raw) > max_bytes:
+        from tools.ingest.downloader import format_byte_limit
+        raise AttachmentError(f"文件超过 {format_byte_limit(max_bytes)} 上限")
     ext = normalize_ext(filename, content_type, raw)
-    if ext not in SUPPORTED_EXTENSIONS:
-        raise AttachmentError("暂不支持该文件类型；支持 PDF、DOCX、TEX、TXT、MD、BIB、PNG、JPG、WebP")
+    is_api = storage_context is not None and storage_context.channel == "openai_api"
+    allowed_extensions = SUPPORTED_EXTENSIONS | (API_DEFERRED_EXTENSIONS if is_api else set())
+    if ext not in allowed_extensions:
+        raise AttachmentError("暂不支持该文件类型；支持 PDF、DOCX、TEX、TXT、MD、BIB、PNG、JPG、WebP，API 另可暂存 DOC、XLS、XLSX")
     aid = attachment_id or uuid.uuid4().hex
     if not _ID_RE.fullmatch(aid):
         raise AttachmentError("附件 id 不合法")
-    text = extract_quick_text(raw, ext)
+    text = "" if ext in API_DEFERRED_EXTENSIONS else extract_quick_text(raw, ext)
     safe_name = Path(filename or f"upload.{ext}").name
+    if not Path(safe_name).suffix:
+        safe_name = f"{safe_name or 'upload'}.{ext}"
     extra: dict[str, str] = {}
     if storage_context is not None and storage_context.channel == "openai_api":
         if not session_id:
@@ -306,7 +344,8 @@ def save_attachment(
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         original_path(aid, ext).write_bytes(raw)
         text_path(aid).write_text(text, encoding="utf-8")
-    status = "pending" if ext in MULTIMODAL_EXTENSIONS else "text_only"
+    status = ("deferred" if ext in API_DEFERRED_EXTENSIONS else
+              "pending" if ext in MULTIMODAL_EXTENSIONS else "text_only")
     result = {
         "id": aid,
         "filename": safe_name,
@@ -531,6 +570,14 @@ async def ensure_attachment_understood(attachment: dict, session, *, focus: str 
     if ext:
         attachment["ext"] = ext
         attachment["media_type"] = media_type_for(ext)
+    if ext in API_DEFERRED_EXTENSIONS:
+        attachment["multimodal_status"] = "deferred"
+        return {
+            "id": aid,
+            "status": "deferred",
+            "element_count": 0,
+            "reason": "该格式已安全保存，但当前版本尚未提供解析能力。",
+        }
     if ext not in MULTIMODAL_EXTENSIONS:
         attachment["multimodal_status"] = "text_only" if ext in TEXT_EXTENSIONS or not source else "unsupported"
         return {"id": aid, "status": attachment["multimodal_status"], "element_count": 0}

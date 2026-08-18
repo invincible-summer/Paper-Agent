@@ -17,7 +17,11 @@ from typing import Any, Iterator, Mapping
 
 from core.storage_context import StorageContext, StoragePathError
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+
+MIN_API_UPLOAD_BYTES = 1 * 1024 * 1024
+MAX_API_UPLOAD_BYTES = 200 * 1024 * 1024
+DEFAULT_API_UPLOAD_BYTES = MAX_API_UPLOAD_BYTES
 
 
 class ApiStorageError(RuntimeError):
@@ -49,6 +53,7 @@ class ApiStoragePolicy:
     preset: str = "balanced"
     session_ttl_seconds: int = 7 * 24 * 60 * 60
     upload_ttl_seconds: int = 7 * 24 * 60 * 60
+    max_upload_bytes: int = DEFAULT_API_UPLOAD_BYTES
     export_ttl_seconds: int = 24 * 60 * 60
     # Deep-read OA PDFs are a rebuildable cache: scheduled cleanup deletes them
     # after 3 days; the next deep_read downloads and extracts them again.
@@ -98,7 +103,7 @@ POLICY_PRESETS: dict[str, dict[str, Any]] = {
 
 _POLICY_COLUMNS = frozenset(DEFAULT_POLICY)
 _POLICY_ENUMS = {
-    "preset": {"privacy", "balanced", "archive", "custom"},
+    "preset": {"privacy", "balanced", "performance", "archive", "custom"},
     "pressure_strategy": {"continuous_evict"},
     "critical_strategy": {"pause_heavy", "emergency_evict"},
     "trace_mode": {"off", "metadata", "full"},
@@ -120,6 +125,8 @@ CREATE TABLE IF NOT EXISTS api_storage_policy (
     preset TEXT NOT NULL,
     session_ttl_seconds INTEGER NOT NULL CHECK (session_ttl_seconds > 0),
     upload_ttl_seconds INTEGER NOT NULL CHECK (upload_ttl_seconds > 0),
+    max_upload_bytes INTEGER NOT NULL DEFAULT 209715200
+        CHECK (max_upload_bytes >= 1048576 AND max_upload_bytes <= 209715200),
     export_ttl_seconds INTEGER NOT NULL CHECK (export_ttl_seconds > 0),
     public_pdf_ttl_seconds INTEGER NOT NULL CHECK (public_pdf_ttl_seconds > 0),
     cache_ttl_seconds INTEGER NOT NULL CHECK (cache_ttl_seconds > 0),
@@ -297,6 +304,19 @@ class ApiStorageStore:
                     f"state.db schema {row[0]} is newer than supported {SCHEMA_VERSION}"
                 )
             previous_version = int(row[0]) if row is not None else 0
+            policy_columns = {
+                str(column[1])
+                for column in conn.execute("PRAGMA table_info(api_storage_policy)").fetchall()
+            }
+            if "max_upload_bytes" not in policy_columns:
+                # v6: /v1 remote-file ingestion gets an administrator-controlled
+                # limit. Existing databases inherit the 清小搭-compatible 200 MiB
+                # default without changing their optimistic-lock policy version.
+                conn.execute(
+                    "ALTER TABLE api_storage_policy ADD COLUMN max_upload_bytes "
+                    "INTEGER NOT NULL DEFAULT 209715200 "
+                    "CHECK (max_upload_bytes >= 1048576 AND max_upload_bytes <= 209715200)"
+                )
             if previous_version < 4:
                 # v4: public PDF retention is shortened to 3 days. Shrink any
                 # existing rows that were written with the old 30-day policy;
@@ -544,6 +564,12 @@ class ApiStorageStore:
             value = policy[field]
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{field} must be a positive integer")
+        max_upload_bytes = policy["max_upload_bytes"]
+        if (not isinstance(max_upload_bytes, int) or isinstance(max_upload_bytes, bool)
+                or not MIN_API_UPLOAD_BYTES <= max_upload_bytes <= MAX_API_UPLOAD_BYTES):
+            raise ValueError(
+                "max_upload_bytes must be an integer between 1 MiB and 200 MiB"
+            )
         interval = policy["cleanup_interval_minutes"]
         if not isinstance(interval, int) or isinstance(interval, bool) or interval <= 0:
             raise ValueError("cleanup_interval_minutes must be a positive integer")
