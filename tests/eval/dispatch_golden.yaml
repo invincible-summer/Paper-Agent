@@ -116,3 +116,11 @@
 - id: evidence_boundary_draft_review
   utterance: "帮我评审一下我整篇草稿"
   expect: draft_review
+
+# --- short confirmation / explicit multi-step budget boundaries ---
+- id: neg_short_confirmation
+  utterance: "你刚才建议先补理论检索、再补应用检索；可以，先做第一项"
+  expect: null
+- id: neg_explicit_multistep_budget
+  utterance: "请检索这个主题并精读，再生成研究地图；如果本轮时间不够就先完成检索"
+  expect: null

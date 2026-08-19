@@ -306,6 +306,14 @@ class ApiCheckpointStore:
         ))
         return hmac.new(self._secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
+    def stable_session_alias(
+        self, principal: ApiCredentialPrincipal, provider_session_id: str
+    ) -> str:
+        """HMAC a provider sessionId without ever persisting the raw value."""
+        value = _normal_text(provider_session_id).strip()[:128]
+        payload = "stable-session\0" + principal.credential_id + "\0" + value
+        return hmac.new(self._secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
     async def _lock_for(self, session_id: str) -> asyncio.Lock:
         async with self._locks_guard:
             return self._locks.setdefault(session_id, asyncio.Lock())
@@ -374,21 +382,35 @@ class ApiCheckpointStore:
         principal: ApiCredentialPrincipal,
         openai_user: str | None,
         messages: Sequence[Mapping[str, Any]] | None,
+        *,
+        provider_session_id: str | None = None,
     ) -> CheckpointLoad:
-        alias = self.alias_for(principal, openai_user, messages)
+        stable = _normal_text(provider_session_id).strip()[:128] if provider_session_id else ""
+        alias = (self.stable_session_alias(principal, stable) if stable else
+                 self.alias_for(principal, openai_user, messages))
         session_id = self._find_alias_session(alias, principal)
         if session_id:
             loaded = self._load_checkpoint_sync(session_id)
             if loaded is not None:
                 now = time.time()
                 with self.storage.connect() as conn:
+                    expiry = now + self.storage.get_policy().session_ttl_seconds
                     conn.execute(
                         "UPDATE api_sessions SET last_accessed_at = ?, expires_at = ? WHERE id = ?",
-                        (now, now + self.storage.get_policy().session_ttl_seconds, session_id),
+                        (now, expiry, session_id),
+                    )
+                    conn.execute(
+                        "UPDATE api_session_aliases SET expires_at = ? "
+                        "WHERE lookup_hash = ? AND session_id = ?",
+                        (expiry, alias, session_id),
                     )
                     conn.commit()
                 return CheckpointLoad(loaded, False, session_id)
         session = self._new_session(principal)
+        # Bind a supplied sessionId immediately, before tools or streaming work.
+        # A later disconnect can therefore recover any partial Checkpoint.
+        if stable:
+            self.add_alias_hash_sync(session.session_id, alias, replace_expired=bool(stable))
         return CheckpointLoad(session, True, session.session_id)
 
     def _write_external_field(self, session_id: str, field: str, value: Any) -> dict[str, str]:
@@ -492,6 +514,35 @@ class ApiCheckpointStore:
             conn.commit()
             session.checkpoint_version = version + 1
 
+    def add_alias_hash_sync(self, session_id: str, alias: str, *, replace_expired: bool = False) -> None:
+        now = time.time()
+        expiry = now + self.storage.get_policy().session_ttl_seconds
+        with self.storage.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if replace_expired:
+                conn.execute(
+                    "DELETE FROM api_session_aliases WHERE lookup_hash = ? AND expires_at <= ?",
+                    (alias, now),
+                )
+            existing = conn.execute(
+                "SELECT session_id FROM api_session_aliases WHERE lookup_hash = ?",
+                (alias,),
+            ).fetchall()
+            other = any(row[0] != session_id for row in existing)
+            if other:
+                conn.execute(
+                    "UPDATE api_session_aliases SET ambiguous = 1 WHERE lookup_hash = ?",
+                    (alias,),
+                )
+            conn.execute(
+                "INSERT INTO api_session_aliases(lookup_hash, session_id, expires_at, ambiguous, created_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(lookup_hash, session_id) DO UPDATE SET "
+                "expires_at=excluded.expires_at, "
+                "ambiguous=MAX(api_session_aliases.ambiguous, excluded.ambiguous)",
+                (alias, session_id, expiry, 1 if other else 0, now),
+            )
+            conn.commit()
+
     def add_alias_sync(
         self,
         session_id: str,
@@ -500,23 +551,7 @@ class ApiCheckpointStore:
         messages: Sequence[Mapping[str, Any]] | None,
     ) -> None:
         alias = self.alias_for(principal, openai_user, messages, complete=True)
-        now = time.time()
-        expiry = now + self.storage.get_policy().session_ttl_seconds
-        with self.storage.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute(
-                "SELECT session_id FROM api_session_aliases WHERE lookup_hash = ?",
-                (alias,),
-            ).fetchall()
-            other = any(row[0] != session_id for row in existing)
-            if other:
-                conn.execute("UPDATE api_session_aliases SET ambiguous = 1 WHERE lookup_hash = ?", (alias,))
-            conn.execute(
-                "INSERT INTO api_session_aliases(lookup_hash, session_id, expires_at, ambiguous, created_at) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(lookup_hash, session_id) DO UPDATE SET expires_at=excluded.expires_at, ambiguous=MAX(api_session_aliases.ambiguous, excluded.ambiguous)",
-                (alias, session_id, expiry, 1 if other else 0, now),
-            )
-            conn.commit()
+        self.add_alias_hash_sync(session_id, alias)
 
     async def checkpoint_callback(
         self,

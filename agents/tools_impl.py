@@ -9,6 +9,8 @@ to do next directly from the tool result.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import time
 import logging
 import re
 from typing import Any, Callable
@@ -22,9 +24,9 @@ from core.blocking import run_cpu_bound
 from core.circuit_breaker import get_breaker
 from core.llm import ainvoke_utility, get_llm
 from core.models import Paper
-from core.tool_budget_store import CODE_TOOL_BUDGETS, get_tool_budget, get_turn_reserve
+from core.tool_budget_store import CODE_TOOL_BUDGETS
 from core.tool_protocol import ErrorCode, ToolResult, err, ok, partial_result
-from core.turn_execution import TurnExecutionContext
+from core.turn_execution import ToolInvocationContext, TurnExecutionContext
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,19 @@ async def execute_tool(
     impl = _IMPLS.get(name)
     if impl is None:
         return err(name, ErrorCode.NO_TOOL, f"未知工具：{name}")
+
+    invocation_context: ToolInvocationContext | None = None
+
+    async def call_impl() -> ToolResult:
+        kwargs = {}
+        try:
+            signature = inspect.signature(impl)
+            if "invocation_context" in signature.parameters:
+                kwargs["invocation_context"] = invocation_context
+        except (TypeError, ValueError):
+            pass
+        return await impl(args, session, progress_cb, **kwargs)
+
     async def invoke_impl() -> ToolResult:
         operation = {
             "deep_read": "deep_read", "exhibit_index": "deep_read",
@@ -142,25 +157,29 @@ async def execute_tool(
             if guard is not None:
                 try:
                     async with guard.protect(operation, session.session_id):
-                        return await impl(args, session, progress_cb)
+                        return await call_impl()
                 except StoragePressureError as exc:
                     return err(
                         name, ErrorCode.STORAGE_PRESSURE,
                         f"API 存储空间已达到 {exc.threshold}% 保护阈值，当前暂停文件型重任务；普通文字问答仍可继续。",
                     )
-            else:
-                return await impl(args, session, progress_cb)
-        return await impl(args, session, progress_cb)
+        return await call_impl()
 
     try:
         timeout = None
         timeout_kind = "tool_budget"
         preferred = _TOOL_BUDGETS.get(name, 30.0)
         if execution_context is not None:
-            preferred = float(get_tool_budget(name))
+            preferred = execution_context.configured_tool_budget(name)
             timeout, timeout_kind = execution_context.timeout_for(
-                preferred, reserve=float(get_turn_reserve()))
+                preferred, reserve=execution_context.reserve_seconds)
             execution_context.set_phase(f"tool:{name}")
+        if timeout is not None:
+            invocation_context = ToolInvocationContext(
+                name=name, configured_timeout_seconds=preferred,
+                effective_timeout_seconds=timeout, timeout_kind=timeout_kind,
+                deadline=time.monotonic() + max(0.001, timeout - 0.75),
+            )
         async with asyncio.timeout(timeout):
             result = await invoke_impl()
     except TimeoutError:
@@ -177,7 +196,14 @@ async def execute_tool(
                        round((timeout or 0) * 1000))
         if timeout_kind == "tool_budget":
             breaker.record_failure(name)
-        timed_out = err(name, ErrorCode.TIMEOUT, message)
+        if invocation_context is not None and invocation_context.partial_result is not None:
+            timed_out = invocation_context.partial_result
+            timed_out.data.setdefault("budget_exhausted", True)
+            timed_out.data.setdefault("timeout_kind", timeout_kind)
+            timed_out.text = (timed_out.text.rstrip("。") +
+                              "。后续增强步骤因时间预算停止，已保留当前结果。")
+        else:
+            timed_out = err(name, ErrorCode.TIMEOUT, message)
         timed_out.stats = {
             "configured_timeout_ms": round(preferred * 1000),
             "effective_timeout_ms": round((timeout or 0) * 1000),
@@ -204,7 +230,8 @@ async def execute_tool(
 # search_papers
 # ---------------------------------------------------------------------------
 
-async def _tool_search_papers(args: dict, session: ChatSession, progress_cb) -> ToolResult:
+async def _tool_search_papers(args: dict, session: ChatSession, progress_cb,
+                              invocation_context: ToolInvocationContext | None = None) -> ToolResult:
     from agents.search_agent import search_agent
 
     topic = (args.get("topic") or "").strip()
@@ -230,14 +257,56 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb) -> 
     session.conception = args.get("conception") or session.conception
     session.language = args.get("language") or session.language
 
+    def apply_snapshot(snapshot: dict) -> None:
+        papers = [p if isinstance(p, Paper) else Paper.from_dict(p)
+                  for p in snapshot.get("papers", [])]
+        candidates = [p if isinstance(p, Paper) else Paper.from_dict(p)
+                      for p in snapshot.get("candidates", [])]
+        if not papers and not candidates:
+            return
+        session.papers = papers
+        session.candidates = candidates
+        session.sub_directions = list(snapshot.get("sub_directions", []))
+        session.search_queries = list(snapshot.get("search_queries", []))
+        session.map_data = {}
+        session.reading_path = []
+        session.literature_review = ""
+        if invocation_context is not None:
+            from core.reading_policy import normalize_fulltext_status
+            total = len(papers) + len(candidates)
+            text = (f"检索已获得可恢复结果：核心集 {len(papers)} 篇，"
+                    f"候选 {len(candidates)} 篇。")
+            invocation_context.publish_partial(partial_result(
+                "search_papers", text, total_papers=total,
+                core_titles=[p.title for p in papers[:10]],
+                papers=[p.to_dict() for p in papers],
+                candidates=[p.to_dict() for p in candidates],
+                sub_directions=session.sub_directions,
+                search_queries=session.search_queries,
+                completed_stages=list(snapshot.get("completed_stages", [])),
+                skipped_stages=list(snapshot.get("skipped_stages", [])),
+                budget_exhausted=True,
+                fulltext_unknown=sum(
+                    normalize_fulltext_status(p.fulltext_status) == "unknown"
+                    for p in papers + candidates),
+            ))
+
     state: dict = {
         "topic": topic,
         "user_conception": session.conception or "",
         "language": session.language or "both",
         "session_id": session.session_id,
         "storage_context": session.storage_context,
+        "snapshot_callback": apply_snapshot,
     }
-    result = await search_agent(state, progress_callback=progress_cb)
+    search_kwargs = {"progress_callback": progress_cb}
+    try:
+        signature = inspect.signature(search_agent)
+        if "invocation_context" in signature.parameters:
+            search_kwargs["invocation_context"] = invocation_context
+    except (TypeError, ValueError):
+        pass
+    result = await search_agent(state, **search_kwargs)
 
     session.papers = [p if isinstance(p, Paper) else Paper.from_dict(p)
                       for p in result.get("papers", [])]
@@ -281,7 +350,8 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb) -> 
     )
     if source_notices:
         text += "\n来源提示：" + "；".join(source_notices)
-    return ok(
+    build_result = partial_result if result.get("budget_exhausted") else ok
+    return build_result(
         "search_papers",
         text,
         core_titles=[p.title for p in session.papers[:10]],
@@ -297,6 +367,9 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb) -> 
         search_queries=session.search_queries,
         source_notices=source_notices,
         search_route=result.get("search_route", {}),
+        budget_exhausted=bool(result.get("budget_exhausted")),
+        completed_stages=list(result.get("completed_stages", [])),
+        skipped_stages=list(result.get("skipped_stages", [])),
         papers=[p.to_dict() for p in session.papers],
         candidates=[{"id": p.id, "title": p.title, "year": p.year,
                      "citation_count": p.citation_count, "source": p.source,

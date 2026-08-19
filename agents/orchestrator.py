@@ -534,6 +534,15 @@ async def chat_turn(
                 _SKILL_ITERATION_BONUS if session.loaded_skills else 0):
             break
         iterations = iteration + 1
+        if execution_context is not None and execution_context.channel == "openai_api":
+            # Keep only the current snapshot on the model side; stale remaining
+            # time hints would contradict the newest one. Never persist it.
+            messages = [
+                message for message in messages
+                if not (isinstance(message, SystemMessage) and
+                        str(message.content).startswith("[本轮动态预算]"))
+            ]
+            messages.append(SystemMessage(content=execution_context.budget_hint()))
         collected = ""
         buffer = ""
         state = "pre_thinking"
@@ -690,15 +699,16 @@ async def chat_turn(
         entries: list[dict] = []
         tc_batch = native_tcs[:_MAX_PARALLEL_TOOLS]
 
+        public_batch_index = 0
         for tc in tc_batch:
             tool_name = tc.get("name", "unknown")
             tool_args = tc.get("args", {})
             tool_names.append(tool_name)
             executed_tool_count += 1
             is_internal_skill = tool_name == "use_skill"
+            current_public_index = public_batch_index
             if not is_internal_skill:
-                yield {"type": "step", "step": "tool_executing", "tool": tool_name}
-                yield {"type": "tool_start", "name": tool_name, "args": tool_args}
+                public_batch_index += 1
             call_key = make_call_key(tool_name, tool_args)
             if call_key in seen_calls:
                 result = err(
@@ -709,15 +719,49 @@ async def chat_turn(
                 trace.event("tool_result", status=result.status,
                             error_code=result.error_code, tool=tool_name,
                             reason="duplicate_call")
-                entries.append({"tc": tc, "result": result, "internal": is_internal_skill})
+                entries.append({"tc": tc, "result": result, "internal": is_internal_skill,
+                                "batch_index": current_public_index})
             else:
                 seen_calls.add(call_key)
-                entries.append({"tc": tc, "result": None, "internal": is_internal_skill})
+                entries.append({"tc": tc, "result": None, "internal": is_internal_skill,
+                                "batch_index": current_public_index})
+
+        for entry in entries:
+            if entry["internal"]:
+                continue
+            tc = entry["tc"]
+            name = tc.get("name", "unknown")
+            if (execution_context is not None and
+                    execution_context.channel == "openai_api" and
+                    entry["result"] is None):
+                if name in _BUDGETED_TOOLS and budgeted_tool_calls.get(name, 0) >= 1:
+                    execution_context.close_public_tools("重量工具本轮已启动过一次。")
+                    entry["result"] = err(
+                        name, ErrorCode.TIMEOUT,
+                        f"工具 {name} 本轮已开始执行过一次。请直接总结已有结果。")
+                else:
+                    admission = execution_context.admit_public_tool(
+                        name, batch_index=entry.get("batch_index", 0))
+                    if not admission.allowed:
+                        execution_context.close_public_tools(admission.reason)
+                        entry["result"] = err(
+                            name, ErrorCode.TIMEOUT,
+                            admission.reason + "请直接总结已有结果或等待下一轮。")
+                    else:
+                        execution_context.mark_public_tool_started()
+            # Rejected API calls are budget decisions, not fake tool starts.
+            if (entry["result"] is None or execution_context is None or
+                    execution_context.channel != "openai_api"):
+
+                yield {"type": "step", "step": "tool_executing", "tool": name}
+                yield {"type": "tool_start", "name": name, "args": tc.get("args", {})}
 
         async def invoke_entry(entry: dict) -> ToolResult:
             tc = entry["tc"]
             name = tc.get("name", "unknown")
             if name in _BUDGETED_TOOLS and budgeted_tool_calls.get(name, 0) >= 1:
+                if execution_context is not None:
+                    execution_context.close_public_tools("重量工具本轮已启动过一次。")
                 return err(name, ErrorCode.TIMEOUT,
                            f"工具 {name} 本轮已开始执行过一次。当前轮不要再次调用该工具；"
                            "请直接总结已有结果或在下一轮继续。")
@@ -734,10 +778,17 @@ async def chat_turn(
                 except (TypeError, ValueError):
                     pass
                 result = await execute_tool(tc, session, progress_cb, **kwargs)
+                if execution_context is not None and not entry["internal"] and (
+                        result.error_code == ErrorCode.TIMEOUT or
+                        bool(result.data.get("budget_exhausted"))):
+                    execution_context.close_public_tools(
+                        "工具已达到时间预算；本轮停止后续工具调用。")
                 if name in _BUDGETED_TOOLS and result.error_code != ErrorCode.VALIDATION_ERROR:
                     budgeted_tool_calls[name] = budgeted_tool_calls.get(name, 0) + 1
             except Exception as exc:  # tool failure is data, not a stream failure
                 result = err(name, ErrorCode.TOOL_ERROR, str(exc))
+                if execution_context is not None and not entry["internal"]:
+                    execution_context.close_public_tools("工具调用失败；本轮停止后续工具调用。")
                 if name in _BUDGETED_TOOLS:
                     budgeted_tool_calls[name] = budgeted_tool_calls.get(name, 0) + 1
             latency_ms = round(
@@ -789,7 +840,7 @@ async def chat_turn(
                     yield {"type": "tool_warning",
                            "warning": reflection_warning, "tool": tool_name}
 
-            if result.status == "success":
+            if result.status in {"success", "partial"}:
                 checkpoint_changed = True
                 if is_internal_skill and result.data.get("instructions"):
                     yield {"type": "skill_loaded",

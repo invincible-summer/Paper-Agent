@@ -101,16 +101,18 @@ def conversation_key(messages: list[dict], salt: str = "") -> str:
 def seed_session_from_messages(session: ChatSession, messages: list[dict]) -> None:
     """Seed a fresh session with the request's message array (minus the last
     user message, which becomes the new turn input). Text-only, bounded."""
+    source = list(messages or [])
+    current_user_index = next(
+        (i for i in range(len(source) - 1, -1, -1)
+         if source[i].get("role") == "user"),
+        None,
+    )
     history: list[dict] = []
-    user_seen = 0
-    for m in messages or []:
-        role = m.get("role")
+    for index, message in enumerate(source):
+        if index == current_user_index:
+            continue
+        role = message.get("role")
         if role not in ("user", "assistant"):
             continue
-        if role == "user":
-            user_seen += 1
-        history.append({"role": role, "content": _message_text(m.get("content"))})
-    # Drop the trailing user message(s) — the last one is the new turn input.
-    while history and history[-1]["role"] == "user":
-        history.pop()
+        history.append({"role": role, "content": _message_text(message.get("content"))})
     session.messages = history[-20:]

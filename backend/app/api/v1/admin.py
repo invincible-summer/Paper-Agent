@@ -1,6 +1,8 @@
 """Administrator-only management for long-lived Agent API credentials."""
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
@@ -385,6 +387,9 @@ class DisplayPolicyUpdate(BaseModel):
     expected_version: int = Field(gt=0)
     tool_cards_enabled: bool | None = None
     skill_card_enabled: bool | None = None
+    research_map_render_strategy: Literal[
+        "legacy_svg", "pretty_svg", "pretty_svg_markdown"
+    ] | None = None
 
     def changes(self) -> dict:
         return self.model_dump(exclude={"expected_version"}, exclude_none=True)
@@ -746,6 +751,7 @@ class ToolBudgetPolicyUpdate(BaseModel):
     budgets: dict[str, int] | None = None
     default_budget_seconds: int | None = Field(default=None, ge=5, le=105)
     reserve_seconds: int | None = Field(default=None, ge=2, le=30)
+    api_turn_soft_seconds: int | None = Field(default=None, ge=30, le=100)
 
     def changes(self) -> dict:
         return self.model_dump(exclude={"expected_version"}, exclude_none=True)
@@ -783,6 +789,7 @@ def _tool_budget_payload() -> dict:
             "budgets": dict(policy.budgets),
             "default_budget_seconds": policy.default_budget_seconds,
             "reserve_seconds": policy.reserve_seconds,
+            "api_turn_soft_seconds": policy.api_turn_soft_seconds,
             "version": policy.version,
             "updated_by": policy.updated_by,
             "updated_at": policy.updated_at,
@@ -792,7 +799,8 @@ def _tool_budget_payload() -> dict:
             "min_seconds": 5, "max_seconds": 105,
             "min_reserve": 2, "max_reserve": 30,
             "gateway_timeout_seconds": 120,
-            "api_turn_soft_seconds": 95, "api_turn_hard_seconds": 105,
+            "api_turn_soft_seconds": policy.api_turn_soft_seconds,
+            "api_turn_hard_seconds": 105,
             "web_turn_soft_seconds": 240, "web_turn_hard_seconds": 300,
         },
         "breaker": {"threshold": 3, "cooldown_seconds": 300},

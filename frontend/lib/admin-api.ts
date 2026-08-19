@@ -198,9 +198,15 @@ export async function cleanupWebPaperCache(): Promise<{ deleted: boolean; files:
   return parseResponse(res);
 }
 
+export type ResearchMapRenderStrategy =
+  | "legacy_svg"
+  | "pretty_svg"
+  | "pretty_svg_markdown";
+
 export interface ApiDisplayPolicy {
   tool_cards_enabled: boolean;
   skill_card_enabled: boolean;
+  research_map_render_strategy: ResearchMapRenderStrategy;
   version: number;
   updated_by: string;
   updated_at: number;
@@ -261,7 +267,10 @@ export async function getDisplayPolicy(): Promise<{
 
 export async function updateDisplayPolicy(
   expectedVersion: number,
-  changes: Partial<Pick<ApiDisplayPolicy, "tool_cards_enabled" | "skill_card_enabled">>,
+  changes: Partial<Pick<
+    ApiDisplayPolicy,
+    "tool_cards_enabled" | "skill_card_enabled" | "research_map_render_strategy"
+  >>,
 ): Promise<{ policy: ApiDisplayPolicy }> {
   const res = await fetch(`${BASE}/display-policy`, {
     method: "PUT",
@@ -418,6 +427,7 @@ export interface ToolBudgetPolicyData {
   budgets: Record<string, number>;
   default_budget_seconds: number;
   reserve_seconds: number;
+  api_turn_soft_seconds: number;
   version: number;
   updated_by: string;
   updated_at: number;
@@ -461,6 +471,7 @@ export async function updateToolBudgets(
     budgets?: Record<string, number>;
     default_budget_seconds?: number;
     reserve_seconds?: number;
+    api_turn_soft_seconds?: number;
   },
 ): Promise<ToolBudgetsResponse> {
   const res = await fetch(`${BASE}/tool-budgets`, {

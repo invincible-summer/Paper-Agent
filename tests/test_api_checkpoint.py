@@ -274,3 +274,35 @@ def test_api_pdf_path_is_checkpointed_only_as_relative_reference(tmp_path: Path)
     restored = store._load_checkpoint_sync(session.session_id)
     assert restored is not None
     assert restored.papers[0].pdf_path == str(pdf)
+
+
+def test_stable_session_id_is_immediate_hmac_primary_and_credential_isolated(tmp_path: Path):
+    store = _store(tmp_path)
+    raw_session_id = "qing-session-raw-must-not-persist"
+    first = store.get_or_create(
+        _principal("key-a"), "caller", [{"role": "user", "content": "第一问"}],
+        provider_session_id=raw_session_id,
+    )
+    assert first.created
+    first.session.topic = "部分状态"
+    first.session.papers = [Paper(id="p1", title="已恢复论文")]
+    store.save_checkpoint_sync(first.session)
+
+    # A completely different message chain still resolves through sessionId.
+    resumed = store.get_or_create(
+        _principal("key-a"), "another-user-field",
+        [{"role": "user", "content": "可以"}],
+        provider_session_id=raw_session_id,
+    )
+    assert not resumed.created
+    assert resumed.session_id == first.session_id
+    assert resumed.session.topic == "部分状态"
+    assert resumed.session.papers[0].id == "p1"
+
+    isolated = store.get_or_create(
+        _principal("key-b"), "caller", [{"role": "user", "content": "可以"}],
+        provider_session_id=raw_session_id,
+    )
+    assert isolated.created
+    assert isolated.session_id != first.session_id
+    assert raw_session_id.encode() not in (store.context.state_db).read_bytes()

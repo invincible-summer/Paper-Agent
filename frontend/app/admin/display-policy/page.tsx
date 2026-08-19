@@ -3,14 +3,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  BookMarked, LayoutGrid, ListChecks, Loader2, RotateCcw, Save,
+  BookMarked, ImageIcon, LayoutGrid, ListChecks, Loader2, RotateCcw, Save,
 } from "lucide-react";
 import {
   AdminHeader, AdminSection, AdminToggle, HelpModal, InfoButton, type HelpEntry,
 } from "@/components/admin/AdminUI";
 import {
   AdminApiError, getDisplayPolicy, updateDisplayPolicy,
-  type ApiDisplayPolicy,
+  type ApiDisplayPolicy, type ResearchMapRenderStrategy,
 } from "@/lib/admin-api";
 import { useAuthStore } from "@/stores/auth";
 
@@ -34,15 +34,49 @@ const HELP: Record<string, HelpEntry> = {
       ["与自制前端的区别", "自制前端不显示技能加载（技能是内部指令加载）；此提示是清小搭通道专用的可视化。"],
     ],
   },
+  researchMap: {
+    title: "引用关系图谱渲染策略",
+    entries: [
+      ["兼容 SVG（原版）", "保持升级前的 Markdown 研究报告 + 原版静态 SVG 附件，适合旧客户端验证和一键回滚。"],
+      ["美化 SVG（推荐）", "只发送自包含的 image/svg+xml 矢量图；支持无损缩放，不依赖 Mermaid、JavaScript、外部字体或远程资源。"],
+      ["美化 SVG + Markdown", "除美化 SVG 外，再发送一份普通 Markdown 关系清单；即使客户端不预览 SVG，也能阅读论文、引用边和聚合节点明细。"],
+      ["生效范围", "只影响保存后新生成的 /v1 研究地图附件。历史附件与自有 Web 前端的交互式 GenealogyGraph 均不改变。"],
+      ["回滚", "重新选择“兼容 SVG（原版）”并保存即可；OpenAI 请求无需增加任何私有字段。"],
+    ],
+  },
   save: {
     title: "保存与版本说明",
     entries: [
       ["乐观锁", "策略带版本号。若其他管理员刚保存过，本页保存会返回 409 冲突——刷新页面拿到最新版本后再修改。"],
       ["重置修改", "放弃当前未保存的改动，回到上次保存（或服务器上）的策略。"],
-      ["默认值", "首次部署的默认策略是工具状态行与技能行均开启，无需任何配置即有完整效果。"],
+      ["默认值", "首次部署默认开启工具状态行和技能行，并使用“兼容 SVG（原版）”，因此升级不会突然改变既有附件。"],
     ],
   },
 };
+
+const RENDER_STRATEGIES: Array<{
+  value: ResearchMapRenderStrategy;
+  label: string;
+  description: string;
+  recommended?: boolean;
+}> = [
+  {
+    value: "legacy_svg",
+    label: "兼容 SVG（原版）",
+    description: "保留原版 SVG 与 Markdown 研究报告；默认值，适合兼容验证与回滚。",
+  },
+  {
+    value: "pretty_svg",
+    label: "美化 SVG",
+    description: "自包含纯矢量图，可缩放且更接近自有前端视觉，不额外发送说明文件。",
+    recommended: true,
+  },
+  {
+    value: "pretty_svg_markdown",
+    label: "美化 SVG + Markdown",
+    description: "同时发送矢量图与论文/引用关系清单，适合下载、复制或 SVG 无法预览时阅读。",
+  },
+];
 
 export default function DisplayPolicyAdminPage() {
   const router = useRouter();
@@ -87,6 +121,9 @@ export default function DisplayPolicyAdminPage() {
     if (draft.skill_card_enabled !== policy.skill_card_enabled) {
       out.skill_card_enabled = draft.skill_card_enabled;
     }
+    if (draft.research_map_render_strategy !== policy.research_map_render_strategy) {
+      out.research_map_render_strategy = draft.research_map_render_strategy;
+    }
     return out;
   }, [policy, draft]);
 
@@ -108,8 +145,8 @@ export default function DisplayPolicyAdminPage() {
 
   return <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-8">
     <div className="mx-auto max-w-4xl space-y-6 pb-24">
-      <AdminHeader title="清小搭卡片展示策略" icon={<LayoutGrid className="h-5 w-5" />}
-        subtitle="控制 /v1 通道在清小搭上的工具状态行与技能提示；不影响自制前端。"
+      <AdminHeader title="清小搭展示策略" icon={<LayoutGrid className="h-5 w-5" />}
+        subtitle="控制 /v1 通道的状态行、技能提示与引用关系图谱附件；不影响自有前端。"
         current="/admin/display-policy" onRefresh={() => void refresh()} refreshing={loading} />
 
       {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
@@ -135,6 +172,44 @@ export default function DisplayPolicyAdminPage() {
           </p>
           <AdminToggle checked={draft.skill_card_enabled} label="正文技能提示行"
             onChange={(next) => setDraft({ ...draft, skill_card_enabled: next })} />
+        </div>
+      </AdminSection>
+
+      <AdminSection title="引用关系图谱渲染策略" icon={<ImageIcon className="h-5 w-5 text-accent" />}
+        info={<InfoButton onClick={() => setHelpItem(HELP.researchMap)} label="图谱渲染策略说明" />}>
+        <div className="space-y-3">
+          <p className="text-sm text-muted">
+            仅控制后续 /v1 研究地图的文件附件。三种模式都使用清小搭附件协议；美化模式以
+            <code className="mx-1 rounded bg-surface-hover px-1.5 py-0.5 text-xs">image/svg+xml</code>
+            发送纯矢量图，不假设客户端支持 Mermaid 或可执行 HTML。
+          </p>
+          <div className="grid gap-3 md:grid-cols-3">
+            {RENDER_STRATEGIES.map((item) => {
+              const selected = draft.research_map_render_strategy === item.value;
+              return (
+                <button key={item.value} type="button"
+                  aria-pressed={selected}
+                  onClick={() => setDraft({ ...draft, research_map_render_strategy: item.value })}
+                  className={`rounded-xl border p-4 text-left transition-colors ${
+                    selected
+                      ? "border-accent bg-accent/10 ring-1 ring-accent/30"
+                      : "border-border-light bg-surface hover:bg-surface-hover"
+                  }`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-sm font-medium text-fg">{item.label}</span>
+                    {item.recommended && (
+                      <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent">推荐</span>
+                    )}
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-muted">{item.description}</p>
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-xs text-muted">
+            当前选择：{RENDER_STRATEGIES.find((item) => item.value === draft.research_map_render_strategy)?.label}
+            。保存后从下一轮 /v1 请求开始生效；选择“兼容 SVG（原版）”即可回滚。
+          </p>
         </div>
       </AdminSection>
     </div>

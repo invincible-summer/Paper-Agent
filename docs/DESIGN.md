@@ -101,7 +101,7 @@ Paper_Agent/
 │   │   ├── map_path.py         # 簇标注/脉络/阅读路径 prompt
 │   │   ├── reader_prompts.py / review_prompts.py / qa_prompts.py
 │   ├── llm.py                  # RateLimitedLLM（每模型信号量 3）+ bind_tools 保限流
-│   ├── session_memory.py       # /v1 会话缓存（TTL+LRU，见 §7）
+│   ├── session_memory.py       # /v1 请求 messages 临时文本历史重建（见 §7）
 │   ├── embeddings.py           # 本地 sentence-transformers 单例，失败降级
 │   ├── tool_protocol.py        # ToolResult 统一协议 + ErrorCode
 │   ├── circuit_breaker.py      # 进程级熔断（3 连败，冷却 300s）
@@ -284,7 +284,7 @@ Skill = 目录 + `SKILL.md`（YAML frontmatter：name/version/description/**requ
 
 ### 4.7 格式检查与文稿导出（`tools/writing/format_check.py` + `manuscript_export.py`）
 
-`check_format` 同为零 LLM 确定性工具，双模式：纯文本模式（图表编号连续性/正文引用、引用风格混用、GB/T 7714 类型标识命中率、关键词数量、多级标题断号）与 LaTeX 模式（自动识别，查 `\cite` 无参考文献块、`\ref` 无 `\label`、abstract 环境）。`spec` 参数接收用户粘贴的格式要求原文，关键词规则引擎映射可文本化检查项（摘要字数/关键词个数/正文规模/GB/T 7714）逐条对照；字体/行距/页边距等排版项**诚实降级**为"需 Word/LaTeX 人工核对"清单。`export_manuscript` 把写作产物（初稿/润色稿/修改清单）的 markdown 转为 docx（python-docx：标题/列表/加粗/表格）、tex（ctexart 中文可编译）或 md，写入 `data/exports/`。`GET /files/{filename}` 仅接受 basename 及 `.md/.txt/.docx/.tex` 白名单，使用 `FileResponse` 返回正确 MIME 和 RFC 5987 兼容的 UTF-8 `Content-Disposition`，因此长中文 DOCX 文件名也可直接下载；清小搭渠道经 x_soda 附件通道下发（§7.4）。
+`check_format` 同为零 LLM 确定性工具，双模式：纯文本模式（图表编号连续性/正文引用、引用风格混用、GB/T 7714 类型标识命中率、关键词数量、多级标题断号）与 LaTeX 模式（自动识别，查 `\cite` 无参考文献块、`\ref` 无 `\label`、abstract 环境）。`spec` 参数接收用户粘贴的格式要求原文，关键词规则引擎映射可文本化检查项（摘要字数/关键词个数/正文规模/GB/T 7714）逐条对照；字体/行距/页边距等排版项**诚实降级**为"需 Word/LaTeX 人工核对"清单。`export_manuscript` 把写作产物（初稿/润色稿/修改清单）的 markdown 转为 docx（python-docx：标题/列表/加粗/表格）、tex（ctexart 中文可编译）或 md，写入 `data/exports/`。`GET /files/{filename}` 仅接受 basename 及 `.md/.txt/.docx/.tex` 白名单，使用 `FileResponse` 返回正确 MIME 和 RFC 5987 兼容的 UTF-8 `Content-Disposition`，因此长中文 DOCX 文件名也可直接下载；清小搭渠道经 x_soda 附件通道下发（§7.5）。
 
 ### 4.4 对话 SSE 事件
 
@@ -300,8 +300,8 @@ topic (+conception)
       + 2-4 个子方向 × 中英检索式；JSON 容错解析，失败回退 [topic]
   → ② SearchManager.search_all（启用源 × 查询并发，deadline = min(管理员检索总时限, 工具预算剩余−8s)，去重）
   → ③ 语义重排 rerank_papers：
-      score = 0.55*cos(本地 MiniLM) + 0.20*log被引 + 0.15*时效 + 0.10*token重叠
-      嵌入不可用时 0.65*token重叠 + 0.20*log被引 + 0.15*时效（降级链）
+      时间充足时 score = 0.55*cos(本地 MiniLM) + 0.20*log被引 + 0.15*时效 + 0.10*token重叠
+      嵌入不可用或共享 deadline 余时不足时，立即使用 0.65*token重叠 + 0.20*log被引 + 0.15*时效的确定性快速重排
   → ④ 自适应分层 adaptive_tier：
       候选集 = score ≥ max(0.35, top1*0.45)，封顶 25 篇
       核心集 = 候选集头部，在 [5,12] 内找最大相对分数断崖（elbow≥0.25）截断
@@ -317,6 +317,7 @@ topic (+conception)
 - **数据源与限流**（`tools/search/registry.py`、`tools/search/base.py::RateLimiter`）：来源集中登记协议、许可、路由标签、配置门禁和每轮查询预算。SearchManager 按来源创建一个批处理任务，而不是“来源×查询式”任务；arXiv 单连接/3 秒一次，PubMed 按 NCBI 3/10 RPS，OpenAIRE 按匿名/认证小时额度，其他源使用保守进程级 limiter。共享 `httpx.AsyncClient` 使用 `trust_env=False`。`SearchOutcome` 分别记录真实请求数、限流头、最终域名、重定向以及 queue/connect/read/network 耗时，并区分远端 timeout/429/schema/redirect/challenge 与本地 `local_budget_exhausted`；每源每轮只向熔断器提交一次结果。默认 smart 路由最多 4 个主渠道、2 个兜底渠道，学科、预印本、机构仓储和 dataset/software/report/thesis/DOI 意图使用不同的确定性矩阵。新 bioRxiv/medRxiv 使用官方 metadata API + 本地 FTS5，不抓网页；PubMed/DataCite/DBLP 为元数据源。全文只跟随明确 OA 链接；Crossref/DataCite/PubMed/DBLP 普通链接不构成 PDF 候选。详细许可见根目录 [Official_Paper_Platform_License_Description.md](../Official_Paper_Platform_License_Description.md)。
 - **去重**：DOI 精确 → 标题归一化精确/模糊（Jaccard≥0.95）→ 字段合并（摘要取长、被引取大、来源取并集）。
 - 搜索结果注入 LLM 上下文时用 `<search_results>` 定界标记（数据非指令）。
+- **部分成功优先**：来源 wave 使用同一绝对 deadline；到点取消未完成 task，但保留已完成来源。分层一完成就把核心/候选集发布为 session snapshot，后续全文探测和 SQLite/Chroma 增强都是可跳过步骤；外层 timeout 从 snapshot 组装 partial，而不是把已检索论文作废。
 - **全文状态不算命**：`paper.pdf_url` 只表示“源 API 提供了明确 PDF 候选”，绝不直接当作全文可获取。`tools/pdf/availability.py` 在检索完成前先探测源 PDF，只有源候选实际失败时才惰性查询 Unpaywall，避免对每篇已有直链的论文重复做 DOI 请求；随后只发 Range 请求读取前几 KB，确认 `%PDF-` 文件头，**不下载全文、不跑结构解析**。探测写入 `fulltext_status`（available/unavailable/unknown）到 SQLite `fulltext_status` 表（30 天 TTL，缓存命中免重复探测）。全文探测总预算硬上限 30 秒，且进一步钳制为 `search_papers` 工具预算的剩余时间（剩余不足 2 秒直接跳过探测，状态保持 unknown）。真正的全文下载与解析仍只在 deep_read / ask_papers 按需升级时发生，其结果回写同一状态字段。`research_map` 谱系图节点和前端检索卡片只显示这一已验证状态；unknown 显示“待验证”。
 
 ### 5.4 可靠性质检（`tools/search/integrity.py`，确定性 · 零 LLM）
@@ -385,19 +386,27 @@ topic (+conception)
 
 ### 7.1 真流式帧序
 
-role 帧 → `delta.reasoning`（provider 原生 reasoning、显式 `<thinking>`、工具调用前说明、带参 emoji 进度文案与 15s 心跳）→ `delta.content`（**Markdown 卡片块** 与 answer 增量，见 §7.6）→ stop 帧（finish_reason=stop/length + usage + x_soda）→ `data: [DONE]`。帧随 agent 事件即时转发（非跑完重放），流式层不改写 provider 原始 reasoning；`use_skill` 的公开工具开始/结果事件仍被忽略，但技能**新加载**成功会触发专用 `skill_loaded` 内部事件（只携带技能名），`/v1` 通道将其同时映射为思考折叠提示（`📘 已加载技能《标题》，按其工作流执行…`）与正文技能行（`━━ 📘 技能 · 标题 ━━`，可经展示策略关闭），web 通道原样转发该命名事件而前端忽略——自制前端行为不变。未产出内容即失败 → HTTP 5xx；流式中途出错 → stop 帧 + error 字段 + [DONE]。
+role 帧 → `delta.reasoning`（provider 原生 reasoning、显式 `<thinking>`、工具调用前说明、带参 emoji 进度文案与 15s 心跳）→ `delta.content`（**Markdown 卡片块** 与 answer 增量，见 §7.7）→ stop 帧（finish_reason=stop/length + usage + x_soda）→ `data: [DONE]`。帧随 agent 事件即时转发（非跑完重放），流式层不改写 provider 原始 reasoning；`use_skill` 的公开工具开始/结果事件仍被忽略，但技能**新加载**成功会触发专用 `skill_loaded` 内部事件（只携带技能名），`/v1` 通道将其同时映射为思考折叠提示（`📘 已加载技能《标题》，按其工作流执行…`）与正文技能行（`━━ 📘 技能 · 标题 ━━`，可经展示策略关闭），web 通道原样转发该命名事件而前端忽略——自制前端行为不变。未产出内容即失败 → HTTP 5xx；流式中途出错 → stop 帧 + error 字段 + [DONE]。
 
 **alias 一致性不变量**：卡片块与技能行作为 `delta.content` 的一部分进入 `content_parts` 与 `finalize_turn` 的 `final_answer`，保证下一轮 `canonical_message_chain` 与清小搭回传的 assistant 内容逐字一致——否则跨轮会话续接会断裂。卡片与回答共享 `max_tokens*4` 内容预算，且卡片占比被硬性限制在 60% 以内；预算过小（<2000 字符）时直接跳过卡片。
 
 ### 7.2 API 独立存储、会话身份与 7 天 Checkpoint
 
-`/v1` 不再依赖首句哈希的 2 小时内存 SessionMemory。鉴权先得到不含明文 Key 的 principal（数据库 `key_id/created_by/source`；应急/开发 token 只使用单向摘要），再对 `credential_id + optional OpenAI user + canonical prior messages` 做服务器 HMAC。当前最后一条 user 消息不参与 lookup；正常响应结束后，以请求完整消息链加实际 assistant 内容建立下一轮 alias。相同开场的首轮不会共享；一个 alias 指向多个 session 时标记 ambiguous，后续拒绝猜测并新建会话。
+`/v1` 不再依赖首句哈希的 2 小时内存 SessionMemory。鉴权先得到不含明文 Key 的 principal（数据库 `key_id/created_by/source`；应急/开发 token 只使用单向摘要）。清小搭提供 `sessionId` 时，以 `HMAC(secret, credential_id + sessionId)` 作为稳定主别名：原始值不落库、不同 credential 永不共享，并在首次请求准备阶段立即写入 alias，因此 response 尚未正常结束、但工具已写过部分 Checkpoint 时，下一轮仍可恢复。没有 `sessionId` 才使用 `credential_id + optional OpenAI user + canonical prior messages` 的消息链 alias；当前最后一条 user 不参与 lookup，正常响应后以实际 assistant 内容建立下一轮 alias。相同开场的首轮不会共享；一个消息链 alias 指向多个 session 时标记 ambiguous，后续拒绝猜测并新建会话。
 
-API 工作状态写入 `data/openai_api/state.db`：版本化 JSON + zlib，未压缩总量上限 8 MiB，单字段超过 256 KiB 外置为私有 `state_payload` artifact。只保存 topic/profile、论文候选、结构化摘要、地图/路径/综述、附件 artifact 引用、loaded skills、深读计数和 RAG session id；**不保存完整 messages、reasoning/思维链、API Key、raw bytes、完整 PDF 正文或默认 Trace**。TTL 默认 7 天，SQLite optimistic version + 单进程 asyncio lock 防止陈旧 writer 覆盖。重启后可恢复研究状态和 API 专属 RAG；请求内 messages 仅在 miss 时临时补齐文本上下文。
+API 工作状态写入 `data/openai_api/state.db`：版本化 JSON + zlib，未压缩总量上限 8 MiB，单字段超过 256 KiB 外置为私有 `state_payload` artifact。只保存 topic/profile、论文候选、结构化摘要、地图/路径/综述、附件 artifact 引用、loaded skills、深读计数和 RAG session id；**不保存完整 messages、reasoning/思维链、API Key、raw bytes、完整 PDF 正文或默认 Trace**。TTL 默认 7 天，SQLite optimistic version + 单进程 asyncio lock 防止陈旧 writer 覆盖。每次请求无论新建还是恢复 Checkpoint，都从调用方完整可见 `messages` 重建临时 `session.messages`，只排除本轮最后一条 user；因此短确认能看到上一轮助手提议，而这些文本仍不会进入 Checkpoint。
 
 API 物理根目录固定隔离为 `data/openai_api/{state.db,metadata.db,chroma,blobs,tmp,traces}`。web 继续使用原 `history_record`、`data/uploads`、`data/pdfs`、`data/assets`、`data/exports` 和 web Chroma；API 清理器没有权限扫描这些路径。
 
-### 7.3 多模态输入（`backend/app/api/v1/multimodal.py`）
+### 7.3 整轮预算、最少工具门禁与部分成功
+
+`tool_budget_policy` 除逐工具预算和 `reserve_seconds` 外，还持久化 `api_turn_soft_seconds`（默认 95、范围 30–100 秒，旧库幂等 `ALTER TABLE`）；固定硬截止 105 秒不暴露为可改设置。`/v1` 请求只读取一次完整策略快照并创建 `TurnExecutionContext`，所以同一轮的软时限、逐工具预算和预留量一致；Web 仍使用 240/300 秒软硬时限。每次模型决策前追加不持久化的动态预算提示。
+
+仅 `openai_api` 启用执行门禁：一个模型决策批次最多一个公开工具、整轮最多三个；首个工具在轻/中/重 5/10/15 秒最低启动阈值以上可裁剪到“剩余软时限−预留”，后续工具必须完整容纳管理员预算 + 预留。`search_papers`/`research_map` 仍各自最多实际启动一次。任一 TIMEOUT 或携带 `budget_exhausted` 的 partial 关闭后续公开工具准入，模型只做最终总结；`use_skill` 是内部加载事件，不占公开工具额度。
+
+`ToolInvocationContext` 把外层算出的真实 deadline 传入检索。`SearchManager` 到点取消未完成来源但返回已完成来源；检索在分层后立即把 papers/candidates 写入 session 并发布 snapshot。余时不足时用无 embedding 的确定性重排，并跳过 OA 探测、SQLite/Chroma 持久化。若内部或外层时限随后触发，`search_papers` 返回 `status=partial`、`budget_exhausted=true`、完成/跳过阶段及 configured/effective timeout；orchestrator 把有状态变化的 partial 与 success 一样写 Checkpoint，`/v1` 仍先输出标准检索表再总结。SSE 帧序不变。
+
+### 7.4 多模态输入（`backend/app/api/v1/multimodal.py`）
 
 content 数组解析：`text` 直取；`file.url` 存在时始终作为当前请求的实际下载地址，即使同时携带 `file_id` 也不会被后者阻断；`file_id` 仅作为清小搭来源标识写入轻量附件元数据，不参与路径拼接、本地查找或 URL 推导。仅有 `file_id` 时记录 `reason_code=missing_download_url` 的安全结构化日志（不记录完整请求、URL、文件内容或标识值），不发起网络请求，并把“缺少可下载 `file.url`”降级说明放入本轮上下文。缺失 `filename` 时仅从 URL path 的安全 basename 回退，URL query 不进入文件名或错误文本。
 
@@ -405,17 +414,17 @@ content 数组解析：`text` 直取；`file.url` 存在时始终作为当前请
 
 HTTP(S) URL 逐 redirect 做 SSRF/公网地址校验并流式写入 0600 temp，`trust_env=False`；每次请求从 `api_storage_policy.max_upload_bytes` 读取动态上限（默认/最大 200 MiB、最小 1 MiB），下载流与私有附件保存执行同一限制，超限/中断删除 temp，错误显示实际配置值且不回显签名 query。成功后转为当前 session 的私有 artifact；也支持 `data:` URI。只把附件引用登记到当前 `/v1` Checkpoint 并建立 API 专属文本索引，**摄取阶段零 VLM**。公共 OA PDF 按 SHA-256 跨 API session 复用，私有上传绝不跨 session 自动共享。后续 `deep_read`、附件问答或图表请求才按需理解并复用缓存。`input_audio` 仍明确不支持并要求文字转写。
 
-### 7.4 文件产物输出（`x_soda.attachments`）
+### 7.5 文件产物输出（`x_soda.attachments`）
 
 本轮成功调用 research_map/write_review 时，`tools/export/report.py` 写入 API 独立 export artifact；research_map 同时产出 Markdown 结构化报告和静态 SVG 谱系图（标题块/彩色簇泳道标签/被引三档节点/奠基光环/`+N` 聚合桶/年份网格/图例，与前端 `GenealogyGraph` 同布局规则），write_review 产出 Markdown。非流式挂响应顶层、流式挂 stop 帧：`{fileUrl, fileName, fileType, mimeType, fileSize}`（4 必填+size，image 类自动补可选 `previewUrl`）。展示名与物理 hash 路径分离，每次导出产生唯一 public alias；fileUrl 由请求 base URL 拼 `/files/{alias}`，清小搭负责转存。`/files` 先解析未过期 API alias，再回退 web exports；过期 API alias 固定 404。此外，`data.files` 型工具结果（export_report / export_manuscript）在当轮同样转换为附件下发——写作产物导出在清小搭侧也是可下载文件卡片。
 
 三类工具结果还会追加**当轮即时附件**（`openai_compat._extra_attachments`，均走同一 export artifact 管道与 24h TTL）：`explain_element` 的图/表裁剪图 PNG（落盘位置按 `settings.reader.assets_dir` 解析，且重新校验该文档属于当前会话的元素 scope，会话隔离红线在附件层二次生效）；`citation_export` 的 `.bib`/`.txt` 引用文件；`field_census` 的纯 SVG 趋势图（年度折线 + 高产作者/机构横条，`tools/export/cards.py::render_field_census_svg`）。
 
-协议边界必须明确：`openai-compatible-agent-integration-guide.md` 只定义正文/推理增量和 `x_soda.attachments`，没有任意 React 工具卡或交互图谱组件协议。因此自有前端的 `SearchResultCard`、`ResearchMapCard`、`GenealogyGraph` 等不能原样出现在清小搭；清小搭接收 Agent 的自然语言总结、一行式工具状态行与检索结果表格（§7.6）、附件文件卡和静态 SVG 图。筛选、缩放、节点详情及“深问这篇”等交互继续由本项目 `/chat` 提供，不发送私有未声明字段冒充兼容能力。
+协议边界必须明确：`openai-compatible-agent-integration-guide.md` 只定义正文/推理增量和 `x_soda.attachments`，没有任意 React 工具卡或交互图谱组件协议。因此自有前端的 `SearchResultCard`、`ResearchMapCard`、`GenealogyGraph` 等不能原样出现在清小搭；清小搭接收 Agent 的自然语言总结、一行式工具状态行与检索结果表格（§7.7）、附件文件卡和静态 SVG 图。筛选、缩放、节点详情及“深问这篇”等交互继续由本项目 `/chat` 提供，不发送私有未声明字段冒充兼容能力。
 
-### 7.5 生命周期、磁盘压力与 API Trace
+### 7.6 生命周期、磁盘压力与 API Trace
 
-默认保留：session/upload 7 天、export 24 小时、public PDF 3 天（过期即清理，后续 deep_read 自动重新下载提取）、语义/视觉缓存 90 天、Trace off；API 单文件上限默认 200 MiB。`api_storage_policy.max_upload_bytes` 使用同一乐观锁更新，管理员页面以 MiB 输入并由后端强制校验 1–200 MiB，保存后立即影响后续请求，不删除或重处理既有文件。`state.db` schema 迁移在初始化时进行：v6 用受检 `ALTER TABLE` 为旧库补 `max_upload_bytes` 列和 200 MiB 默认值，v7 重建 `api_display_policy` 为双开关形状（见 §7.6）；均不改变旧 policy 的版本号或冲突语义。
+默认保留：session/upload 7 天、export 24 小时、public PDF 3 天（过期即清理，后续 deep_read 自动重新下载提取）、语义/视觉缓存 90 天、Trace off；API 单文件上限默认 200 MiB。`api_storage_policy.max_upload_bytes` 使用同一乐观锁更新，管理员页面以 MiB 输入并由后端强制校验 1–200 MiB，保存后立即影响后续请求，不删除或重处理既有文件。`state.db` schema 迁移在初始化时进行：v6 用受检 `ALTER TABLE` 为旧库补 `max_upload_bytes` 列和 200 MiB 默认值，v7 重建 `api_display_policy` 为双开关形状，v8 幂等补充研究地图渲染枚举并以 `legacy_svg` 回填旧行（见 §7.7）；均不改变旧 policy 的版本号或冲突语义。
 
 hourly cleanup 只在 API 根目录内执行过期、孤立对账和压力清理。75% 清过期并告警；85% 连续清理公共/生成/向量/视觉等可重建数据，不提前删除未过期私有上传；95% 默认 `pause_heavy`（上传、下载、deep_read、OCR、VLM、导出暂停，文字聊天继续），管理员可经预览和二次确认改为 `emergency_evict`；98% 强制暂停文件重任务，不可关闭。in-flight、`protected_until` 和一小时内未完成登记文件受保护。
 
@@ -423,17 +432,19 @@ hourly cleanup 只在 API 根目录内执行过期、孤立对账和压力清理
 
 API Trace 与 web Trace 独立：off 只写匿名请求/错误/Token/耗时聚合；metadata 仅 trace id、模型、工具名、状态、错误码、Token、耗时；full 仅供临时排障并脱敏 Key、bytes、完整正文和 URL query，最长 7 天。web Trace 仍按原路径和原始行为工作。管理员浏览器页面 `/admin/api-storage` 提供策略、API 远程文件上限、容量、状态、清理记录、完整帮助 catalog 和危险操作确认；Agent Key 无管理权限。
 
-### 7.6 一行式状态行、检索表格与展示策略（`/admin/display-policy`）
+### 7.7 一行式状态行、检索表格、图谱附件与展示策略（`/admin/display-policy`）
 
 `tools/export/cards.py` 是 `/v1` 通道专属的卡片渲染层。回显的 assistant content 会作为下一轮 messages 回到模型上下文，因此卡片采用 **context-first 一行式设计**：每个工具结果（`ToolResult.to_dict()` 载荷）只渲染一行状态摘要（emoji 卡头对齐前端 `TOOL_META`，如 `**🔎 文献检索 · 核心集 12 篇 / 候选 13 篇**`、`**📖 深度阅读 · 2 篇全文级 / 1 篇摘要级**`），在工具完成时以 `delta.content` 插入、位于最终回答之前；错误/部分成功仍加 `⚠️`/`🟡` 前缀，缺字段降级为一行摘要，单行 1200 字符上限，渲染永不抛异常。
 
 **检索结果规范化表格**：`search_papers` 成功后，通道层用 `render_search_table` 确定性地生成完整论文清单 markdown 表格（列：分层（核心/候选）/标题（截 60 字符、转义管道符）/年份/被引/全文（🟢/🟡/⚪，有 `pdf_url` 时徽章带 PDF 链接）/链接（DOI 优先，无 DOI 取 `urls` 来源页，再无则 —）），与状态行同块插在回答之前。表格是规范化正式输出：由代码保证存在（不依赖模型自觉），不受工具状态行开关控制，仅在 `max_tokens` 派生的 content 预算 < 2000 字符时让位给回答本身；流式路径经 `emit_block(required=True)` 绕过 60% 卡片份额，非流式路径的尾部裁剪只丢弃可选状态行、绝不丢表格块。候选集精简 dict 补带 `doi` 字段以保证链接列数据完整。
 
-策略存于 `data/openai_api/state.db` 的 `api_display_policy` 单行表（schema v7，乐观锁版本并发）：`tool_cards_enabled`（一行式工具状态行开关）与 `skill_card_enabled`（正文技能行开关；思考折叠提示始终保留），默认均开启。v7 迁移在初始化时重建旧表并把旧 `preset` 折叠为单一布尔（`off` → 0，其余 → 1），不改变乐观锁版本号。管理员经 `/api/v1/admin/display-policy`（GET/PUT，复用 `_administrator` 鉴权与 `expected_version` 乐观锁）与前端 `/admin/display-policy` 页面（两个开关）配置；每请求读取一次（存储读取失败时降级为默认，绝不让对话回合失败）。关闭工具状态行后，思考折叠中的进度提示、检索表格与文件附件均不受影响。
+策略存于 `data/openai_api/state.db` 的 `api_display_policy` 单行表（schema v8，乐观锁版本并发）：`tool_cards_enabled`（一行式工具状态行开关）、`skill_card_enabled`（正文技能行开关；思考折叠提示始终保留）以及严格枚举 `research_map_render_strategy`。枚举值为 `legacy_svg`、`pretty_svg`、`pretty_svg_markdown`；默认 `legacy_svg`，因此旧部署升级后仍输出既有 Markdown 研究报告 + 原版 SVG。v7 迁移重建旧 preset 表，v8 对缺列数据库执行幂等 `ALTER TABLE` 并回填 `legacy_svg`，两者均保留乐观锁版本。读路径使用进程内 5 秒缓存；管理员更新成功后主动失效缓存，因此下一轮 `/v1` 请求立即看到新策略，读取失败则降级到默认而不让对话回合失败。管理员经 `/api/v1/admin/display-policy`（GET/PUT，复用 `_administrator` 鉴权、严格 Pydantic 枚举与 `expected_version` 乐观锁）和前端 `/admin/display-policy` 页面配置；未知值、空字符串、非字符串与额外字段均返回 422。关闭工具状态行后，思考折叠中的进度提示、检索表格与文件附件均不受影响。
+
+研究地图附件只在 `/v1` 通道按上述策略选择，Web 通道继续使用 React `GenealogyGraph`，数据结构不变。`legacy_svg` 调用原 `render_research_map_svg()`；`pretty_svg` 调用独立的美化渲染器并只输出一个 SVG；`pretty_svg_markdown` 再输出一份普通 Markdown 关系说明。SVG 仍经 `x_soda.attachments` 发送为 `fileType: image` / `mimeType: image/svg+xml`，Markdown 为 `fileType: text` / `mimeType: text/markdown`；非流式挂响应顶层，流式仅挂唯一 stop 帧并随后发送 `[DONE]`。美化 SVG 是纯矢量、自包含文档：固定坐标系 `viewBox`、`width=100%`、`preserveAspectRatio=xMidYMid meet`，内部样式且无 JavaScript、外部 CSS、外部字体、远程图片或滤镜；标题、主题、年份、DOI 等动态文本全部 XML 转义。布局按主题簇与年份确定性排序，密集 `(主题, 年份)` 桶折叠为聚合节点，主题过多时归并到稳定的“其他主题”泳道，年份标签抽稀；引用/语义边分别使用实线实心箭头和虚线空心箭头，奠基论文、候选层、聚合节点也使用边框/形状而非只靠颜色区分。Markdown 不含 Mermaid，列出图例、主题摘要、论文 DOI/来源、关系边和聚合成员，因此 SVG 无法预览时仍可读。附件继续走 API 私有 export 生命周期与 `/files/{alias}` 公共短期别名，字节不写入 Checkpoint。
 
 `scripts/preview_qxd_cards.py` 在本地把全部状态行、检索表格与两张 SVG 渲染到 `data/preview/`（gitignored）供部署前目检，不参与部署。
 
-### 7.7 其他契约
+### 7.8 其他契约
 
 - 鉴权：Bearer 支持数据库长期 Agent API Key（只存 SHA-256、可撤销）和迁移/应急 `AGENT_API_KEY`（常量时间比较）。本地无配置时接受任意非空 token；生产从未配置任何 Agent Key 返回 503，错误或已撤销 key 返回 401
 - 请求验证：`stream` 使用 `StrictBool`；消息非空且至少有一条 user；角色/content part 白名单；`model` 可缺失、空或 null；`max_tokens` 为严格正整数；畸形 JSON 为 400，schema 错误为 422
@@ -541,7 +552,7 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 ### 部署单 worker 与事件循环隔离
 
-`/v1`、网页 `/api/v1` 和健康检查共享同一个 Uvicorn 事件循环；会话内存、熔断器、LLM 限流信号量也都是进程内状态，因此仍必须 `--workers 1`。同步的 Docling/PyMuPDF 结构解析、SentenceTransformer/CrossEncoder 推理、Chroma 向量读写和附件快速提取不得直接运行在 async 请求链：统一经 `core.blocking.run_cpu_bound` 投递到一个进程级 daemon ML worker 串行执行。SQLite Checkpoint、轻量文件写入等 I/O 经 `core.blocking.run_io_bound` 投递到独立的两个受限 I/O worker，避免 ML 队列形成跨请求队头阻塞。OpenAI-compatible 流式链路验证后先发 role 首帧；工具进度经 reasoning 输出，95 秒软时限停止启动新工作，105 秒硬时限前闭合 stop + `[DONE]`，客户端断开会取消并回收 producer。原生 ML 调用被取消时无法强杀，但已取消的等待任务不再写入请求状态。扩多 worker/多机前仍须外置共享会话、任务队列、熔断和限流状态，不能直接增加 Uvicorn worker。
+`/v1`、网页 `/api/v1` 和健康检查共享同一个 Uvicorn 事件循环；会话内存、熔断器、LLM 限流信号量也都是进程内状态，因此仍必须 `--workers 1`。同步的 Docling/PyMuPDF 结构解析、SentenceTransformer/CrossEncoder 推理、Chroma 向量读写和附件快速提取不得直接运行在 async 请求链：统一经 `core.blocking.run_cpu_bound` 投递到一个进程级 daemon ML worker 串行执行。SQLite Checkpoint、轻量文件写入等 I/O 经 `core.blocking.run_io_bound` 投递到独立的两个受限 I/O worker，避免 ML 队列形成跨请求队头阻塞。OpenAI-compatible 流式链路验证后先发 role 首帧；工具进度经 reasoning 输出，管理员可调 30–100 秒（默认 95 秒）的 `/v1` 软时限停止启动新工作，固定 105 秒硬时限前闭合 stop + `[DONE]`，客户端断开会取消并回收 producer。原生 ML 调用被取消时无法强杀，但已取消的等待任务不再写入请求状态。扩多 worker/多机前仍须外置共享会话、任务队列、熔断和限流状态，不能直接增加 Uvicorn worker。
 
 前端 `fetchAuthConfig` 使用 8 秒超时；超时只结束首屏无限 spinner，并保留本地已有登录信息。所有 `/api/v1` 权限仍由后端逐请求校验，前端降级不构成授权。
 
@@ -566,7 +577,7 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 ### 运行时工具时限预算
 
-`tool_budget_policy` 是 `data/users.db` 中的单行管理员设置（5 秒读缓存、乐观锁、更新立即生效、无需重启），存放每个工具的预算覆盖、未列出工具的默认预算和整轮预留量。代码级默认（search_papers/research_map 45s、deep_read 75s、write_review 60s、reading_path 20s、field_census/integrity_sweep 35s、其余 30s、预留量 8s）定义在 `core/tool_budget_store.py::CODE_TOOL_BUDGETS`；单工具解析顺序为显式覆盖 → 代码默认 → 默认预算。`execute_tool` 读取该策略计算 preferred 超时与 `configured/effective/timeout_kind` 统计，策略读取失败回退代码默认。预算可调区间 5–105 秒（105 由清小搭网关 120 秒推导的 /v1 硬时限决定），预留量 2–30 秒，实际生效值 = min(工具预算, 整轮剩余 − 预留量)；超出 /v1 整轮软时限的部分仅在 Web 通道（240/300 秒）生效。管理页 `/admin/performance` 以按用途分组的中文名卡片呈现每个工具（名称、一句话用途、建议上限、代码默认、悬浮说明），并展示工具级熔断状态与一键恢复（`CircuitBreaker.snapshot/force_close`），解决连续 3 次超时后工具被锁 300 秒而管理员无从解除的问题。内部指令加载事件 `use_skill` 不在可调列表中。
+`tool_budget_policy` 是 `data/users.db` 中的单行管理员设置（5 秒读缓存、乐观锁、更新立即生效、无需重启），存放每个工具的预算覆盖、未列出工具的默认预算、整轮预留量和 `/v1` 整轮软时限。代码级默认（search_papers/research_map 45s、deep_read 75s、write_review 60s、reading_path 20s、field_census/integrity_sweep 35s、其余 30s、预留量 8s）定义在 `core/tool_budget_store.py::CODE_TOOL_BUDGETS`；单工具解析顺序为显式覆盖 → 代码默认 → 默认预算。`execute_tool` 读取该策略计算 preferred 超时与 `configured/effective/timeout_kind` 统计，策略读取失败回退代码默认。预算可调区间 5–105 秒（105 由清小搭网关 120 秒推导的 /v1 硬时限决定），预留量 2–30 秒，实际生效值 = min(工具预算, 整轮剩余 − 预留量)；超出 /v1 整轮软时限的部分仅在 Web 通道（240/300 秒）生效。管理页 `/admin/performance` 以按用途分组的中文名卡片呈现每个工具（名称、一句话用途、建议上限、代码默认、悬浮说明），并展示工具级熔断状态与一键恢复（`CircuitBreaker.snapshot/force_close`），解决连续 3 次超时后工具被锁 300 秒而管理员无从解除的问题。内部指令加载事件 `use_skill` 不在可调列表中。
 
 `search_papers` 内部各阶段共享同一工具预算而不是各自独立封顶：意图理解 LLM 10 秒子超时（超时回退原始主题平凡计划），检索 deadline = min(管理员检索总时限, 剩余−8s)，全文探测预算 = min(管理员探测时限, 剩余−3s)、剩余不足 2 秒直接跳过。“检索已成功却因后续探测段把整次调用拖过工具预算而作废”由此成为结构性不可能。
 
@@ -594,4 +605,4 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 研究地图计算一次标题/摘要嵌入并同时用于聚类和语义边；地图簇标签、概述和领域脉络由注册 Prompt 的一次 utility 调用完成，和引文增强并发。所有增强步骤都可失败，结果仍为 success 并包含 `degraded`、各阶段状态、引文状态、缓存命中和 `stage_ms`。地图缓存指纹包含论文 id/标题/年份/引用数/全文状态、Prompt 版本和引文策略；新搜索会清空旧地图。
 
-Web 与 `/v1` 都传递 `TurnExecutionContext`。Web 使用 240 秒软时限和 300 秒硬时限；软时限正常收尾并保存，硬时限取消且不保存半轮历史。OpenAI 保持 95 秒软时限、105 秒硬时限和既有 SSE 帧序。`search_papers`、`research_map` 每轮最多实际开始一次；参数校验失败不占次数，工具耗尽自身预算和整轮剩余预算使用不同 `timeout_kind`，超时文案明确要求本轮不要再次调用该工具。工具自身预算与整轮预留量不再硬编码，由「运行时工具时限预算」的策略存储管理。
+Web 与 `/v1` 都传递 `TurnExecutionContext`。Web 使用 240 秒软时限和 300 秒硬时限；软时限正常收尾并保存，硬时限取消且不保存半轮历史。OpenAI 使用管理员可调 30–100 秒（默认 95 秒）的软时限、固定 105 秒硬时限和既有 SSE 帧序。`search_papers`、`research_map` 每轮最多实际开始一次；参数校验失败不占次数，工具耗尽自身预算和整轮剩余预算使用不同 `timeout_kind`，超时文案明确要求本轮不要再次调用该工具。工具自身预算与整轮预留量不再硬编码，由「运行时工具时限预算」的策略存储管理。

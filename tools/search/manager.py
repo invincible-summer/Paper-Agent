@@ -124,7 +124,7 @@ class SearchManager:
 
     async def search_all(self, queries: list[str], progress_callback=None,
                          route_hints: RouteHints | dict | None = None,
-                         topic: str = "") -> list[Paper]:
+                         topic: str = "", deadline: float | None = None) -> list[Paper]:
         report = progress_callback or (lambda _msg: None)
         seen = set(); unique_queries=[]
         for query in queries:
@@ -149,7 +149,8 @@ class SearchManager:
         report(f"  → 智能路由主渠道：{', '.join(primary) if primary else '无'}")
         if "pubmed" in primary or "pubmed" in fallback:
             report("  → PubMed/NLM 仅提供来源记录，不代表 NLM 对内容或结论背书；请核对原始记录。")
-        deadline=asyncio.get_running_loop().time()+self.search_deadline_seconds
+        local_deadline = asyncio.get_running_loop().time() + self.search_deadline_seconds
+        deadline = min(local_deadline, deadline) if deadline is not None else local_deadline
         outcomes=await self._run_wave(primary,queries,deadline,report)
         papers=[p for o in outcomes for p in o.papers]
         deduped=self._dedup(papers)

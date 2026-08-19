@@ -448,6 +448,74 @@ async def test_research_map_nonstream_emits_markdown_and_svg_attachments(client,
     assert {item["mimeType"] for item in attachments} == {"text/markdown", "image/svg+xml"}
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("stream", "strategy", "expected_mimes"),
+    [
+        (True, "legacy_svg", ["text/markdown", "image/svg+xml"]),
+        (False, "pretty_svg", ["image/svg+xml"]),
+        (True, "pretty_svg_markdown", ["text/markdown", "image/svg+xml"]),
+    ],
+)
+async def test_research_map_attachment_strategy_protocol(
+    client, monkeypatch, tmp_path, stream, strategy, expected_mimes,
+):
+    from core.session_memory import get_memory
+
+    get_memory()._store.clear()
+    _set_display_policy(tmp_path, research_map_render_strategy=strategy)
+
+    async def map_turn(user_message, session, progress_cb, attachments=None, regenerate=False):
+        session.topic = "策略地图"
+        session.map_data = {
+            "clusters": [{"id": 0, "label": "主题"}], "timeline": [], "landscape": "",
+            "graph": {
+                "nodes": [
+                    {"id": "p1", "title": "P1", "year": 2020, "cluster": 0,
+                     "citation_count": 10, "role": "foundational", "layer": "core"},
+                    {"id": "p2", "title": "P2", "year": 2022, "cluster": 0,
+                     "citation_count": 1, "role": "", "layer": "core"},
+                ],
+                "edges": [{"source": "p2", "target": "p1", "type": "cites"}],
+            },
+        }
+        yield {"type": "tool_result", "result": {
+            "tool": "research_map", "status": "success", "data": {}}}
+        yield {"type": "answer", "content": "地图完成", "is_delta": True}
+        yield {"type": "done", "thinking": "", "answer": "地图完成",
+               "tool_calls": [], "trace_id": "map-strategy", "usage": {
+                   "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+
+    monkeypatch.setattr(orch, "chat_turn", map_turn)
+    resp = await _post(client, {
+        "stream": stream, "user": f"map-strategy-{stream}-{strategy}",
+        "messages": [{"role": "user", "content": "生成地图"}],
+    })
+    if stream:
+        assert resp.text.rstrip().endswith("data: [DONE]")
+        frames = _parse_sse(resp.text)
+        assert sum(frame["choices"][0]["finish_reason"] == "stop" for frame in frames) == 1
+        payload = frames[-1]
+    else:
+        payload = resp.json()
+        assert payload["choices"][0]["message"]["content"].endswith("地图完成")
+    attachments = payload["x_soda"]["attachments"]
+    assert [item["mimeType"] for item in attachments] == expected_mimes
+    assert [item["fileType"] for item in attachments] == [
+        "text" if mime == "text/markdown" else "image" for mime in expected_mimes
+    ]
+    assert all(item["fileUrl"].startswith("http://testserver/files/") for item in attachments)
+
+    for item in attachments:
+        downloaded = await client.get(item["fileUrl"])
+        assert downloaded.status_code == 200
+        assert downloaded.headers["content-type"].split(";", 1)[0] == item["mimeType"]
+        if item["mimeType"] == "image/svg+xml" and strategy != "legacy_svg":
+            assert 'preserveAspectRatio="xMidYMid meet"' in downloaded.text
+        if item["mimeType"] == "text/markdown" and strategy == "pretty_svg_markdown":
+            assert "## 引用与语义关系" in downloaded.text
+
+
 def test_attachment_shape_encodes_and_deduplicates(monkeypatch):
     from starlette.requests import Request
     from app.api.v1.openai_compat import _dedupe_attachments, _shape_attachment

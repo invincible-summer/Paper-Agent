@@ -14,8 +14,8 @@ Beyond L0:
   - multimodal input: content arrays with text / file (downloaded, parsed,
     RAG-indexed) / image_url / input_audio (reserved MediaAdapter, honest
     degradation on the current text-only model);
-  - x_soda.attachments: research reports generated this turn are attached
-    as downloadable markdown files (stop frame / response top-level);
+  - x_soda.attachments: research reports and vector maps generated this turn
+    are attached as downloadable Markdown/SVG files (stop frame / response top-level);
   - markdown card emulation: tool results render as compact markdown cards
     (tools/export/cards.py) inserted into delta.content when a tool
     completes, before the final answer — mirroring the self-hosted frontend
@@ -283,7 +283,7 @@ async def _prepare_turn(body: dict, principal):
     text, media = extract_user_content(last_user or {})
     openai_user = str(body.get("user") or "").strip()[:128]
     session_id = str(body.get("sessionId") or "").strip()[:128]
-    checkpoint_scope = f"session:{session_id}" if session_id else openai_user
+    checkpoint_scope = openai_user
     caller_system = "\n\n".join(
         str(m.get("content") or "").strip()
         for m in messages_in
@@ -292,12 +292,13 @@ async def _prepare_turn(body: dict, principal):
     )[:8000]
 
     checkpoint_store = get_api_checkpoint_store()
-    loaded = checkpoint_store.get_or_create(principal, checkpoint_scope, messages_in)
+    loaded = checkpoint_store.get_or_create(
+        principal, checkpoint_scope, messages_in, provider_session_id=session_id or None
+    )
     session = loaded.session
-    if loaded.created:
-        # The request itself is the only temporary source for text history on a
-        # first/missing checkpoint. It is deliberately not written to state.db.
-        seed_session_from_messages(session, messages_in)
+    # Full visible messages are request-scoped text context on every turn.  They
+    # replace any transient in-process copy but are never written to Checkpoint.
+    seed_session_from_messages(session, messages_in)
 
     if media and session.storage_context is not None:
         from core.storage_pressure import StoragePressureError, StoragePressureGuard
@@ -455,12 +456,20 @@ def _usage_of(done_event: dict | None, est_prompt: int = 0, est_completion: int 
     return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
 
 
-def _reports_for(request: Request, session, kinds: set[str]) -> list[dict]:
+def _reports_for(
+    request: Request, session, kinds: set[str], *,
+    research_map_render_strategy: str = "legacy_svg",
+) -> list[dict]:
     if not kinds:
         return []
     from tools.export.report import write_reports
-    return [att for rec in write_reports(session, kinds)
-            if (att := _shape_attachment(request, rec)) is not None]
+    return [
+        att for rec in write_reports(
+            session, kinds,
+            research_map_render_strategy=research_map_render_strategy,
+        )
+        if (att := _shape_attachment(request, rec)) is not None
+    ]
 
 
 def _tool_result_files(request: Request, result: dict) -> list[dict]:
@@ -633,6 +642,26 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     startup_mode = get_performance_policy().startup_prewarm_mode
     agent_stack = None
     from core.turn_execution import TurnExecutionContext
+    from core.tool_budget_store import (
+        CODE_FALLBACK_BUDGET, CODE_FALLBACK_RESERVE,
+        API_TURN_SOFT_DEFAULT_SECONDS, ToolBudgetPolicy, get_tool_budget_policy,
+    )
+    try:
+        tool_budget_policy = get_tool_budget_policy()
+    except Exception:
+        logger.exception("tool_budget_policy_snapshot_failed")
+        tool_budget_policy = ToolBudgetPolicy(
+            budgets={}, default_budget_seconds=CODE_FALLBACK_BUDGET,
+            reserve_seconds=CODE_FALLBACK_RESERVE,
+            api_turn_soft_seconds=API_TURN_SOFT_DEFAULT_SECONDS,
+        )
+    # Keep the historical module-level override usable by focused tests and
+    # embedding callers; production uses the administrator snapshot.
+    api_soft_seconds = (
+        _API_SOFT_DEADLINE_SECONDS
+        if _API_SOFT_DEADLINE_SECONDS != 95.0
+        else tool_budget_policy.api_turn_soft_seconds
+    )
 
     async def prepare():
         prepared = await _prepare_turn(body, principal)
@@ -678,8 +707,9 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         agent_stack = _load_agent_stack()
         chat_turn, render_skill_card, render_tool_card, render_search_table, skill_display_title = agent_stack
         execution = TurnExecutionContext.openai_api(
-            soft_timeout_seconds=_API_SOFT_DEADLINE_SECONDS,
+            soft_timeout_seconds=api_soft_seconds,
             hard_timeout_seconds=_API_HARD_DEADLINE_SECONDS,
+            tool_budget_policy=tool_budget_policy,
         )
         try:
             async with asyncio.timeout(_API_HARD_DEADLINE_SECONDS):
@@ -784,7 +814,10 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                     ),
                 }
                 attachments_out = _dedupe_attachments(
-                    _reports_for(request, session, artifact_kinds)
+                    _reports_for(
+                        request, session, artifact_kinds,
+                        research_map_render_strategy=policy.research_map_render_strategy,
+                    )
                     + result_files
                     + _extra_attachments(request, session, tool_results)
                 )
@@ -826,8 +859,9 @@ async def chat_completions(request: Request, authorization: str | None = Header(
 
     execution = TurnExecutionContext.openai_api(
         progress_cb=progress_cb,
-        soft_timeout_seconds=_API_SOFT_DEADLINE_SECONDS,
+        soft_timeout_seconds=api_soft_seconds,
         hard_timeout_seconds=_API_HARD_DEADLINE_SECONDS,
+        tool_budget_policy=tool_budget_policy,
     )
 
     async def frame_stream():
@@ -1091,7 +1125,10 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             attachments_out: list[dict] = []
             if session is not None and not deadline_hit:
                 attachments_out = _dedupe_attachments(
-                    _reports_for(request, session, artifact_kinds)
+                    _reports_for(
+                        request, session, artifact_kinds,
+                        research_map_render_strategy=state["policy"].research_map_render_strategy,
+                    )
                     + result_files
                     + _extra_attachments(request, session, tool_results)
                 )

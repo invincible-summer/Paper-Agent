@@ -17,6 +17,7 @@ Pipeline (one LLM call total; reranking is local embeddings, zero API cost):
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import math
@@ -326,7 +327,7 @@ def adaptive_tier(
 # Main entry
 # ---------------------------------------------------------------------------
 
-async def search_agent(state: ResearchState, progress_callback=None) -> ResearchState:
+async def search_agent(state: ResearchState, progress_callback=None, invocation_context=None) -> ResearchState:
     """Run the full search pipeline. Outputs into state:
     papers (core set), candidates, sub_directions, search_queries, research_goal.
     """
@@ -348,19 +349,33 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
         total_budget = float(get_tool_budget("search_papers"))
     except Exception:  # pragma: no cover - degraded-storage fallback
         total_budget = 45.0
+    deadline = (invocation_context.deadline if invocation_context is not None
+                else started + total_budget)
+    completed_stages: list[str] = []
+    skipped_stages: list[str] = []
+    initial_remaining = max(0.0, deadline - started)
 
     def remaining_budget() -> float:
-        return total_budget - (time.monotonic() - started)
+        return deadline - time.monotonic()
+
+    def publish_snapshot() -> None:
+        state["completed_stages"] = list(completed_stages)
+        state["skipped_stages"] = list(skipped_stages)
+        callback = state.get("snapshot_callback")
+        if callback:
+            callback(state)
 
     # ① Understand
     report("理解研究意图、拆解研究方向...")
     try:
+        understand_timeout = max(0.001, min(
+            _UNDERSTAND_TIMEOUT_SECONDS, max(1.0, initial_remaining * 0.20)))
         plan = await asyncio.wait_for(
-            _understand(topic, conception, language),
-            timeout=_UNDERSTAND_TIMEOUT_SECONDS)
+            _understand(topic, conception, language), timeout=understand_timeout)
     except TimeoutError:
         plan = _fallback_plan(topic)
         report("意图理解超时，已改用原始主题直接检索")
+    completed_stages.append("intent")
     state["research_goal"] = plan["research_goal"]
     state["sub_directions"] = plan["sub_directions"]
     state["search_queries"] = plan["queries"]
@@ -390,10 +405,13 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
     report(f"在 {len(enabled)} 个数据源中检索...")
     route_hints = {k: plan.get(k) for k in ("disciplines", "query_intents", "requested_sources", "requires_preprints", "requires_datasets")}
     try:
-        all_papers = await manager.search_all(plan["queries"], progress_callback=report, route_hints=route_hints, topic=topic)
+        all_papers = await manager.search_all(
+            plan["queries"], progress_callback=report, route_hints=route_hints,
+            topic=topic, deadline=deadline - _SEARCH_TAIL_RESERVE_SECONDS)
     except TypeError:
         # Compatibility for injected extension/test managers with the legacy signature.
         all_papers = await manager.search_all(plan["queries"], progress_callback=report)
+    completed_stages.append("retrieval")
     state["search_route"] = getattr(manager, "last_route", {}) or {}
     used_sources = {
         outcome.source for outcome in (getattr(manager, "last_outcomes", []) or [])
@@ -407,14 +425,38 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
     state["source_notices"] = source_notices
     report(f"去重后共 {len(all_papers)} 篇")
 
-    # ③ Semantic rerank
-    report("语义相关性重排（本地嵌入）...")
+    # ③ Semantic rerank.  Keep the paper list recoverable: when time is
+    # short, use the deterministic no-embedding scorer rather than risking
+    # that local model loading consumes the outer timeout.
     query_text = f"{plan['research_goal']}\n{topic}"
-    scored = await run_cpu_bound(rerank_papers, all_papers, query_text)
+    if remaining_budget() >= 6.0:
+        report("语义相关性重排（本地嵌入）...")
+        try:
+            rerank_timeout = max(0.1, remaining_budget() - 2.0)
+            scored = await asyncio.wait_for(
+                run_cpu_bound(rerank_papers, copy.deepcopy(all_papers), query_text),
+                timeout=rerank_timeout,
+            )
+            has_embeddings = bool(scored) and scored[0].relevance_score >= 0 and _embed_ok(query_text)
+            completed_stages.append("embedding_rerank")
+        except (TimeoutError, asyncio.TimeoutError):
+            report("本地嵌入重排超时，切换快速确定性重排...")
+            scored = rerank_papers(all_papers, query_text, embed_fn=None)
+            has_embeddings = False
+            completed_stages.append("fast_rerank")
+            skipped_stages.append("embedding_rerank")
+            state["budget_exhausted"] = True
+    else:
+        report("剩余时间较少，使用快速确定性重排...")
+        scored = rerank_papers(all_papers, query_text, embed_fn=None)
+        has_embeddings = False
+        completed_stages.append("fast_rerank")
+        skipped_stages.append("embedding_rerank")
+        state["budget_exhausted"] = True
 
     # ④ Adaptive tiering
-    has_embeddings = bool(scored) and scored[0].relevance_score >= 0 and _embed_ok(query_text)
     core, candidates = adaptive_tier(scored, has_embeddings=has_embeddings)
+    completed_stages.append("tiering")
     report(f"分层完成：核心集 {len(core)} 篇，候选 {len(candidates)} 篇")
 
     # ④.5 Verified full-text availability. Search results and the genealogy
@@ -423,6 +465,7 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
     # page). The actual PDF download happens later in deep_read.
     state["papers"] = core
     state["candidates"] = candidates
+    publish_snapshot()
     fulltext_statuses: dict[str, str] = {}
     if (policy.verify_fulltext and policy.fulltext_verify_timeout_seconds > 0
             and policy.paper_fetch_mode != "disabled" and (core or candidates)):
@@ -444,13 +487,18 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("fulltext verification degraded to unknown: %s", e)
+            completed_stages.append("fulltext_probe")
             n_avail = sum(v == "available" for v in fulltext_statuses.values())
             n_unavail = sum(v == "unavailable" for v in fulltext_statuses.values())
             n_unknown = len(core) + len(candidates) - n_avail - n_unavail
             report(f"全文探测完成：可获取 {n_avail} · 不可获取 {n_unavail} · 待验证 {n_unknown}")
         else:
+            skipped_stages.append("fulltext_probe")
+            state["budget_exhausted"] = True
             report("剩余时间不足，跳过全文探测（全文状态保持待验证）")
     state["fulltext_statuses"] = fulltext_statuses
+    if not policy.verify_fulltext or policy.paper_fetch_mode == "disabled":
+        skipped_stages.append("fulltext_probe")
 
     # ④.6 Best-effort readable core guarantee. Availability is authoritative
     # only after the probe above; doing this before verification would promote
@@ -477,13 +525,23 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
 
     # ⑤ Persist + index (best-effort). SQLite/Chroma and local embeddings are
     # synchronous, so keep them off the shared FastAPI event loop.
+    publish_snapshot()
     session_id = state.get("session_id", "")
-    await run_cpu_bound(
-        _persist_and_index_results, core + candidates, storage_context,
-        s.storage.sqlite_path, session_id,
-    )
+    if remaining_budget() >= 2.0:
+        await run_cpu_bound(
+            _persist_and_index_results, core + candidates, storage_context,
+            s.storage.sqlite_path, session_id,
+        )
+        completed_stages.append("persistence")
+    else:
+        skipped_stages.append("persistence")
+        state["budget_exhausted"] = True
+        report("剩余时间不足，跳过 SQLite/向量索引增强")
 
     state["current_phase"] = "search_done"
+    state["completed_stages"] = completed_stages
+    state["skipped_stages"] = skipped_stages
+    publish_snapshot()
     return state
 
 

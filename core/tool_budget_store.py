@@ -13,9 +13,10 @@ Resolution order for one tool's budget: explicit override → code default →
 would overflow the remaining turn time; it applies to every tool.
 
 Upper bound rationale (surfaced in the admin UI): the 清小搭 gateway times a
-whole request out at 120 s, the /v1 channel therefore runs 95 s soft / 105 s
-hard turn deadlines, so a budget above 105 s can never take effect and values
-above ~``95 - reserve`` only take effect on the web channel (240 s / 300 s).
+whole request out at 120 s. The /v1 soft deadline is administrator-configurable
+from 30–100 s (95 s default), while the hard deadline remains fixed at 105 s;
+a budget above the current ``soft - reserve`` only takes full effect on the
+web channel (240 s / 300 s).
 """
 from __future__ import annotations
 
@@ -33,6 +34,9 @@ BUDGET_MIN_SECONDS = 5.0
 BUDGET_MAX_SECONDS = 105.0
 RESERVE_MIN_SECONDS = 2.0
 RESERVE_MAX_SECONDS = 30.0
+API_TURN_SOFT_MIN_SECONDS = 30.0
+API_TURN_SOFT_MAX_SECONDS = 100.0
+API_TURN_SOFT_DEFAULT_SECONDS = 95.0
 
 # Code-level defaults (previously the hardcoded ``_TOOL_BUDGETS`` dict).
 CODE_TOOL_BUDGETS: dict[str, float] = {
@@ -61,6 +65,7 @@ class ToolBudgetPolicy:
     budgets: dict[str, float]
     default_budget_seconds: float
     reserve_seconds: float
+    api_turn_soft_seconds: float = API_TURN_SOFT_DEFAULT_SECONDS
     version: int = 1
     updated_by: str = "bootstrap"
     updated_at: float = 0.0
@@ -76,11 +81,18 @@ def _connect() -> sqlite3.Connection:
                budgets_json TEXT NOT NULL,
                default_budget_seconds REAL NOT NULL,
                reserve_seconds REAL NOT NULL,
+               api_turn_soft_seconds REAL NOT NULL DEFAULT 95,
                version INTEGER NOT NULL,
                updated_by TEXT NOT NULL,
                updated_at REAL NOT NULL
            )"""
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tool_budget_policy)").fetchall()}
+    if "api_turn_soft_seconds" not in columns:
+        conn.execute(
+            "ALTER TABLE tool_budget_policy ADD COLUMN api_turn_soft_seconds "
+            "REAL NOT NULL DEFAULT 95"
+        )
     conn.commit()
     return conn
 
@@ -109,8 +121,9 @@ def _row_to_policy(row) -> ToolBudgetPolicy:
         budgets=_parse_budgets(row[0]),
         default_budget_seconds=float(row[1]),
         reserve_seconds=float(row[2]),
-        version=int(row[3]), updated_by=str(row[4] or "bootstrap"),
-        updated_at=float(row[5] or 0.0),
+        api_turn_soft_seconds=float(row[3]),
+        version=int(row[4]), updated_by=str(row[5] or "bootstrap"),
+        updated_at=float(row[6] or 0.0),
     )
 
 
@@ -123,19 +136,22 @@ def get_tool_budget_policy() -> ToolBudgetPolicy:
     try:
         row = conn.execute(
             "SELECT budgets_json, default_budget_seconds, reserve_seconds, "
-            "version, updated_by, updated_at FROM tool_budget_policy WHERE id = 1"
+            "api_turn_soft_seconds, version, updated_by, updated_at "
+            "FROM tool_budget_policy WHERE id = 1"
         ).fetchone()
         if row is None:
             conn.execute(
                 "INSERT INTO tool_budget_policy (id, budgets_json, default_budget_seconds, "
-                "reserve_seconds, version, updated_by, updated_at) "
-                "VALUES (1, '{}', ?, ?, 1, 'bootstrap', ?)",
-                (CODE_FALLBACK_BUDGET, CODE_FALLBACK_RESERVE, now),
+                "reserve_seconds, api_turn_soft_seconds, version, updated_by, updated_at) "
+                "VALUES (1, '{}', ?, ?, ?, 1, 'bootstrap', ?)",
+                (CODE_FALLBACK_BUDGET, CODE_FALLBACK_RESERVE,
+                 API_TURN_SOFT_DEFAULT_SECONDS, now),
             )
             conn.commit()
             row = conn.execute(
                 "SELECT budgets_json, default_budget_seconds, reserve_seconds, "
-                "version, updated_by, updated_at FROM tool_budget_policy WHERE id = 1"
+                "api_turn_soft_seconds, version, updated_by, updated_at "
+                "FROM tool_budget_policy WHERE id = 1"
             ).fetchone()
     finally:
         conn.close()
@@ -155,11 +171,15 @@ def _validate(policy: ToolBudgetPolicy) -> None:
     if not RESERVE_MIN_SECONDS <= policy.reserve_seconds <= RESERVE_MAX_SECONDS:
         raise ToolBudgetSettingsError(
             f"整轮预留量必须在 {RESERVE_MIN_SECONDS:.0f}–{RESERVE_MAX_SECONDS:.0f} 秒之间")
+    if not API_TURN_SOFT_MIN_SECONDS <= policy.api_turn_soft_seconds <= API_TURN_SOFT_MAX_SECONDS:
+        raise ToolBudgetSettingsError(
+            f"清小搭整轮软时限必须在 {API_TURN_SOFT_MIN_SECONDS:.0f}–"
+            f"{API_TURN_SOFT_MAX_SECONDS:.0f} 秒之间")
 
 
 def update_tool_budget_policy(changes: dict, *, expected_version: int,
                               updated_by: str) -> ToolBudgetPolicy:
-    allowed = {"budgets", "default_budget_seconds", "reserve_seconds"}
+    allowed = {"budgets", "default_budget_seconds", "reserve_seconds", "api_turn_soft_seconds"}
     unknown = sorted(set(changes) - allowed)
     if unknown:
         raise ToolBudgetSettingsError(f"未知设置字段：{', '.join(unknown)}")
@@ -177,11 +197,12 @@ def update_tool_budget_policy(changes: dict, *, expected_version: int,
         cursor = conn.execute(
             """UPDATE tool_budget_policy SET budgets_json = ?,
                    default_budget_seconds = ?, reserve_seconds = ?,
-                   version = version + 1, updated_by = ?, updated_at = ?
+                   api_turn_soft_seconds = ?, version = version + 1, updated_by = ?, updated_at = ?
                WHERE id = 1 AND version = ?""",
             (json.dumps(candidate.budgets, sort_keys=True),
              candidate.default_budget_seconds, candidate.reserve_seconds,
-             updated_by, candidate.updated_at, int(expected_version)),
+             candidate.api_turn_soft_seconds, updated_by, candidate.updated_at,
+             int(expected_version)),
         )
         if cursor.rowcount != 1:
             conn.rollback()

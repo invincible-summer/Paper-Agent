@@ -140,3 +140,36 @@ def test_source_breaker_manual_control_and_suggestion(env, monkeypatch):
             admin_api.PaperSourceBreakerRequest(source="made_up", action="open"),
             env["admin"])
     assert exc.value.status_code == 404
+
+
+def test_old_policy_table_migrates_api_turn_soft_seconds(env, monkeypatch, tmp_path):
+    import sqlite3
+
+    legacy = tmp_path / "legacy-users.db"
+    with sqlite3.connect(legacy) as conn:
+        conn.execute("""CREATE TABLE tool_budget_policy (
+            id INTEGER PRIMARY KEY, budgets_json TEXT NOT NULL,
+            default_budget_seconds REAL NOT NULL, reserve_seconds REAL NOT NULL,
+            version INTEGER NOT NULL, updated_by TEXT NOT NULL, updated_at REAL NOT NULL)""")
+        conn.execute("INSERT INTO tool_budget_policy VALUES (1, '{}', 30, 8, 3, 'legacy', 1)")
+        conn.commit()
+    monkeypatch.setattr(budget_store, "_DB_PATH", legacy)
+    budget_store.reset_cache()
+    policy = budget_store.get_tool_budget_policy()
+    assert policy.api_turn_soft_seconds == 95
+    with sqlite3.connect(legacy) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tool_budget_policy)")}
+    assert "api_turn_soft_seconds" in columns
+
+
+def test_api_turn_soft_seconds_update_and_bounds(env):
+    data = asyncio.run(admin_api.get_admin_tool_budgets(env["admin"]))
+    result = asyncio.run(admin_api.put_admin_tool_budgets(
+        admin_api.ToolBudgetPolicyUpdate(
+            expected_version=data["policy"]["version"], api_turn_soft_seconds=88),
+        env["admin"],
+    ))
+    assert result["policy"]["api_turn_soft_seconds"] == 88
+    with pytest.raises(Exception):
+        admin_api.ToolBudgetPolicyUpdate(
+            expected_version=result["policy"]["version"], api_turn_soft_seconds=101)

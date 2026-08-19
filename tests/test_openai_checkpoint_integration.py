@@ -106,3 +106,55 @@ async def test_openai_error_turn_creates_no_final_alias(monkeypatch, tmp_path: P
         # A partial structured checkpoint is allowed and aids fault recovery,
         # but it is intentionally unreachable by a final conversation alias.
         assert conn.execute("SELECT COUNT(*) FROM api_sessions WHERE checkpoint_blob IS NOT NULL").fetchone()[0] == 1
+
+
+@pytest.mark.anyio
+async def test_session_id_restores_state_and_rebuilds_full_visible_history_every_turn(
+        monkeypatch, tmp_path: Path):
+    import httpx
+
+    root = tmp_path / "openai-api"
+    monkeypatch.setenv("OPENAI_API_STORAGE_ROOT", str(root))
+    monkeypatch.setenv("AGENT_API_KEY", "")
+    _STORE_CACHE.clear()
+    observed: list[tuple[str, str, list[dict], str]] = []
+
+    async def fake_turn(user_message, session, progress_cb, attachments=None,
+                        regenerate=False, checkpoint_cb=None, **kwargs):
+        observed.append((user_message, session.session_id, list(session.messages), session.topic))
+        if user_message == "先检索":
+            session.topic = "图学习"
+            if checkpoint_cb:
+                await checkpoint_cb(session)
+            answer = "我建议下一步补充两路检索：先查理论，再查应用。"
+        else:
+            answer = "已按确认先执行理论检索。"
+        yield {"type": "answer", "content": answer, "is_delta": True}
+        yield {"type": "done", "answer": answer, "thinking": "", "tool_calls": [],
+               "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+
+    monkeypatch.setattr(orchestrator, "chat_turn", fake_turn)
+    transport = httpx.ASGITransport(app=create_app())
+    headers = {"Authorization": "Bearer local-test-key"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.post("/v1/chat/completions", headers=headers, json={
+            "sessionId": "stable-qing-session",
+            "messages": [{"role": "user", "content": "先检索"}],
+        })
+        assert first.status_code == 200
+        _STORE_CACHE.clear()
+        second = await client.post("/v1/chat/completions", headers=headers, json={
+            "sessionId": "stable-qing-session",
+            "messages": [
+                {"role": "user", "content": "先检索"},
+                {"role": "assistant", "content": "我建议下一步补充两路检索：先查理论，再查应用。"},
+                {"role": "user", "content": "可以"},
+            ],
+        })
+    assert second.status_code == 200
+    assert observed[1][1] == observed[0][1]
+    assert observed[1][3] == "图学习"
+    assert observed[1][2] == [
+        {"role": "user", "content": "先检索"},
+        {"role": "assistant", "content": "我建议下一步补充两路检索：先查理论，再查应用。"},
+    ]

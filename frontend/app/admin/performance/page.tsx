@@ -23,7 +23,7 @@ const citationOptions: Array<[MapCitationMode, string, string]> = [
 
 const BUDGET_HELP: HelpEntry = { title: "工具时限预算说明", entries: [
   ["生效规则", "每个工具的预算是单次调用的最长执行时间；实际生效值 = min(本预算, 整轮剩余时间 − 预留量)。超时后当前轮不会再调用该工具，下一轮自动恢复。"],
-  ["清小搭 /v1 通道", "平台网关对整次请求的总超时是 120 秒，本服务因此整轮软时限 95 秒、硬时限 105 秒；预算 + 预留超过 95 秒的部分在 /v1 不会生效。"],
+  ["清小搭 /v1 通道", "平台网关对整次请求的总超时是 120 秒；/v1 整轮软时限可在 30–100 秒内调整（默认 95 秒），硬截止固定 105 秒；预算 + 预留超过当前软时限的部分在 /v1 不会生效。"],
   ["Web 通道", "自制前端整轮 240/300 秒，较大的预算在 Web 端可以完整使用。"],
   ["预留量", "从整轮剩余时间中为最终答案生成与流式收尾预留的秒数，对所有工具生效；建议 8 秒。"],
   ["建议上限", "每个工具行内的「建议 ≤Xs」基于典型耗时给出；调大预算前请先在「论文检索」页确认检索内部时限与渠道连通状况。"],
@@ -43,6 +43,7 @@ export default function PerformancePage() {
   const [draftValues, setDraftValues] = useState<Record<string, number>>({});
   const [draftDefault, setDraftDefault] = useState(30);
   const [draftReserve, setDraftReserve] = useState(8);
+  const [draftApiTurnSoft, setDraftApiTurnSoft] = useState(95);
   const [savingBudgets, setSavingBudgets] = useState(false);
   const [budgetMessage, setBudgetMessage] = useState("");
   const [recoverTool, setRecoverTool] = useState<string | null>(null);
@@ -55,6 +56,7 @@ export default function PerformancePage() {
     setDraftValues(Object.fromEntries(d.catalog.map((c) => [c.name, c.current_seconds])));
     setDraftDefault(d.policy.default_budget_seconds);
     setDraftReserve(d.policy.reserve_seconds);
+    setDraftApiTurnSoft(d.policy.api_turn_soft_seconds);
   };
   useEffect(() => {
     load().catch(e => setMessage(String(e)));
@@ -71,9 +73,10 @@ export default function PerformancePage() {
   const budgetDirty = useMemo(() => {
     if (!budgets) return false;
     if (draftReserve !== budgets.policy.reserve_seconds) return true;
+    if (draftApiTurnSoft !== budgets.policy.api_turn_soft_seconds) return true;
     if (draftDefault !== budgets.policy.default_budget_seconds) return true;
     return budgets.catalog.some((c) => (draftValues[c.name] ?? c.current_seconds) !== c.current_seconds);
-  }, [budgets, draftValues, draftDefault, draftReserve]);
+  }, [budgets, draftValues, draftDefault, draftReserve, draftApiTurnSoft]);
 
   const grouped = useMemo(() => {
     if (!budgets) return [] as Array<[string, ToolBudgetsResponse["catalog"]]>;
@@ -94,11 +97,13 @@ export default function PerformancePage() {
       for (const c of budgets.catalog) payload[c.name] = draftValues[c.name] ?? c.current_seconds;
       const d = await updateToolBudgets(budgets.policy.version, {
         budgets: payload, default_budget_seconds: draftDefault, reserve_seconds: draftReserve,
+        api_turn_soft_seconds: draftApiTurnSoft,
       });
       setBudgets(d);
       setDraftValues(Object.fromEntries(d.catalog.map((c) => [c.name, c.current_seconds])));
       setDraftDefault(d.policy.default_budget_seconds);
       setDraftReserve(d.policy.reserve_seconds);
+      setDraftApiTurnSoft(d.policy.api_turn_soft_seconds);
       setBudgetMessage("工具时限预算已保存，下一次工具调用立即生效。");
     } catch (e) { setBudgetMessage(String(e)); await loadBudgets().catch(() => {}); }
     finally { setSavingBudgets(false); }
@@ -107,7 +112,7 @@ export default function PerformancePage() {
   const resetBudgetDrafts = () => {
     if (!budgets) return;
     setDraftValues(Object.fromEntries(budgets.catalog.map((c) => [c.name, c.default_seconds])));
-    setDraftDefault(30); setDraftReserve(8);
+    setDraftDefault(30); setDraftReserve(8); setDraftApiTurnSoft(95);
   };
 
   const doRecover = async (tool: string) => {
@@ -145,6 +150,14 @@ export default function PerformancePage() {
               onChange={(e) => setDraftReserve(Number(e.target.value))}
               className={`mt-2 w-32 rounded-lg border px-3 py-2 ${draftReserve !== budgets.policy.reserve_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
             <span className="ml-2 text-xs text-muted">建议 8s</span>
+          </label>
+          <label className="rounded-xl border border-border-light p-4 text-sm" title="清小搭 /v1 整轮软时限；固定 105 秒硬截止至少留出 5 秒协议收尾。">
+            <span className="font-medium">清小搭整轮软时限（秒）</span>
+            <span className="mt-1 block text-xs text-muted">30–100 秒；与工具预算、预留量共同限制 /v1，Web 不受影响</span>
+            <input type="number" min={30} max={100} value={draftApiTurnSoft}
+              onChange={(e) => setDraftApiTurnSoft(Number(e.target.value))}
+              className={`mt-2 w-32 rounded-lg border px-3 py-2 ${draftApiTurnSoft !== budgets.policy.api_turn_soft_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
+            <span className="ml-2 text-xs text-muted">硬截止固定 105s</span>
           </label>
           <label className="rounded-xl border border-border-light p-4 text-sm" title="未在下方列出的工具（以及未来新增工具）使用的默认预算。">
             <span className="font-medium">默认预算（秒）</span>

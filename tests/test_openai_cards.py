@@ -333,10 +333,13 @@ def test_display_policy_store_roundtrip(tmp_path):
     assert store.schema_version() == SCHEMA_VERSION
     policy = store.get_display_policy()
     assert policy.tool_cards_enabled and policy.skill_card_enabled
+    assert policy.research_map_render_strategy == "legacy_svg"
 
     updated = store.update_display_policy(
-        {"tool_cards_enabled": False}, expected_version=1, updated_by="tester")
+        {"tool_cards_enabled": False, "research_map_render_strategy": "pretty_svg"},
+        expected_version=1, updated_by="tester")
     assert updated.tool_cards_enabled is False and updated.version == 2
+    assert updated.research_map_render_strategy == "pretty_svg"
     assert store.get_display_policy().tool_cards_enabled is False
 
     with pytest.raises(PolicyVersionConflict):
@@ -347,6 +350,43 @@ def test_display_policy_store_roundtrip(tmp_path):
                                     expected_version=2, updated_by="tester")
     with pytest.raises(ValueError):
         store.update_display_policy({"nope": 1}, expected_version=2, updated_by="tester")
+    for invalid in ("", "mermaid", 1, None):
+        with pytest.raises(ValueError):
+            store.update_display_policy(
+                {"research_map_render_strategy": invalid},
+                expected_version=2, updated_by="tester",
+            )
+
+
+def test_display_policy_cache_expires_and_admin_update_invalidates(tmp_path, monkeypatch):
+    import core.api_storage_store as storage
+    from core.api_storage_store import ApiStorageStore
+    from core.storage_context import StorageContext
+
+    clock = [100.0]
+    monkeypatch.setattr(storage.time, "monotonic", lambda: clock[0])
+    storage.reset_display_policy_cache()
+    store = ApiStorageStore(StorageContext.openai_api(root_dir=tmp_path))
+    store.initialize()
+    first = store.get_display_policy()
+
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE api_display_policy SET research_map_render_strategy='pretty_svg' "
+            "WHERE id=1"
+        )
+        conn.commit()
+    assert store.get_display_policy() is first
+    clock[0] += storage.DISPLAY_POLICY_CACHE_TTL_SECONDS + 0.1
+    assert store.get_display_policy().research_map_render_strategy == "pretty_svg"
+
+    current = store.get_display_policy()
+    updated = store.update_display_policy(
+        {"research_map_render_strategy": "pretty_svg_markdown"},
+        expected_version=current.version, updated_by="admin",
+    )
+    assert updated.research_map_render_strategy == "pretty_svg_markdown"
+    assert store.get_display_policy().research_map_render_strategy == "pretty_svg_markdown"
 
 
 @pytest.mark.anyio
@@ -358,15 +398,18 @@ async def test_display_policy_admin_routes(client, monkeypatch):
     body = got.json()
     assert body["policy"]["tool_cards_enabled"] is True
     assert body["policy"]["skill_card_enabled"] is True
+    assert body["policy"]["research_map_render_strategy"] == "legacy_svg"
     assert "tools" not in body and "core_tools" not in body
 
     put = await client.put("/api/v1/admin/display-policy", json={
         "expected_version": body["policy"]["version"],
-        "tool_cards_enabled": False, "skill_card_enabled": False})
+        "tool_cards_enabled": False, "skill_card_enabled": False,
+        "research_map_render_strategy": "pretty_svg_markdown"})
     assert put.status_code == 200
     updated = put.json()["policy"]
     assert updated["tool_cards_enabled"] is False
     assert updated["skill_card_enabled"] is False
+    assert updated["research_map_render_strategy"] == "pretty_svg_markdown"
 
     conflict = await client.put("/api/v1/admin/display-policy", json={
         "expected_version": body["policy"]["version"], "tool_cards_enabled": True})
@@ -375,3 +418,14 @@ async def test_display_policy_admin_routes(client, monkeypatch):
     bad_type = await client.put("/api/v1/admin/display-policy", json={
         "expected_version": updated["version"], "tool_cards_enabled": "yes"})
     assert bad_type.status_code == 422
+
+    bad_strategy = await client.put("/api/v1/admin/display-policy", json={
+        "expected_version": updated["version"],
+        "research_map_render_strategy": "mermaid",
+    })
+    assert bad_strategy.status_code == 422
+
+    extra = await client.put("/api/v1/admin/display-policy", json={
+        "expected_version": updated["version"], "unknown": True,
+    })
+    assert extra.status_code == 422
