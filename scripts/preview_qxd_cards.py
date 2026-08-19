@@ -19,9 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from tools.export.cards import (  # noqa: E402
-    ALL_CARD_TOOLS,
-    CORE_CARD_TOOLS,
     render_field_census_svg,
+    render_search_table,
     render_skill_card,
     render_tool_card,
     skill_display_title,
@@ -40,6 +39,9 @@ def _papers(n, prefix, start_year=2018):
             "cluster": i % 3,
             "fulltext_status": ["available", "unknown", "unavailable"][i % 3],
             "layer": "core" if i % 4 else "candidate",
+            "doi": f"10.1000/demo.{prefix}{i}",
+            "urls": {"openalex": f"https://openalex.org/demo/{prefix}{i}"},
+            "pdf_url": f"https://demo.example.com/{prefix}{i}.pdf" if i % 3 == 0 else None,
         }
         for i in range(n)
     ]
@@ -150,7 +152,11 @@ def main() -> None:
             blocks.append(render_skill_card(skill_display_title(payload["name"])))
             blocks.append("")
             continue
-        card = render_tool_card(key, payload, CORE_CARD_TOOLS)
+        card = render_tool_card(key, payload)
+        if key == "search_papers":
+            table = render_search_table(payload)
+            if table:
+                card = f"{card}\n\n{table}" if card else table
         blocks.append(card or f"(no card for {key})")
         blocks.append("")
 

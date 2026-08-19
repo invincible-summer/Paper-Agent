@@ -18,7 +18,7 @@
 - **check_format** — 格式检查（纯代码）：图表编号连续性与正文引用、引用风格混用、GB/T 7714 规范度、关键词数量、标题断号；LaTeX 源查 \cite/\ref/参考文献块配对；支持传入用户格式要求逐条对照，排版项诚实列入人工核对清单
 - **export_manuscript** — 写作产物导出：初稿/润色稿/修改清单 → docx / tex（ctexart 中文可编译）/ md 下载文件，清小搭侧经 x_soda 附件下发
 - **使用文档公告页** — `/usage-doc` 始终公开只读展示管理员维护的 Markdown 功能说明；管理员登录后可在同一页面的单个文本框中编辑并保存，使用“上传图片并插入”按钮把 PNG/JPEG/GIF/WebP 上传到受控文档资源目录并插入当前光标位置。
-- **清小搭展示边界与卡片仿真** — 自有前端的 React 工具卡和可交互谱系图不会随 OpenAI 协议跨端执行；`/v1` 通道以文档允许的三个表面复刻视觉效果：正文 **Markdown 卡片仿真**（`tools/export/cards.py`，检索/研究地图/阅读路径/深读/元素解读/领域普查/综述/引文导出等完整卡片，插在回答之前，列表优先保证纯文本降级可读）、思考折叠中的 **emoji 进度与技能加载提示**（`📘 已加载技能《…》` + 正文 `━━ 📘 技能 · … ━━` 行）、以及 `x_soda.attachments` **文件卡片**（研究地图 Markdown 报告 + 静态 SVG 谱系图、元素裁剪图 PNG、BibTeX 文件、领域普查趋势图 SVG）。卡片覆盖范围由管理员在 `/admin/display-policy` 配置（core/all/custom/off 预设，默认 core 重点工具）；交互筛选、缩放、节点“深问”仍需打开本项目自有前端
+- **清小搭展示边界与卡片仿真** — 自有前端的 React 工具卡和可交互谱系图不会随 OpenAI 协议跨端执行；`/v1` 通道以接口文档允许的三个表面复刻视觉效果：正文 **一行式工具状态行**（`tools/export/cards.py`，每个工具完成后插入一行状态摘要，如 `🔎 文献检索 · 核心集 12 篇 / 候选 13 篇`，插在回答之前，节省被回显进下一轮上下文的体积）、**检索结果规范化表格**（文献检索完成后确定性生成完整论文清单 markdown 表格：核心层/候选层、年份、被引、全文可取性、DOI/来源链接，不受卡片开关控制）、思考折叠中的 **emoji 进度与技能加载提示**（`📘 已加载技能《…》` + 正文 `━━ 📘 技能 · … ━━` 行）、以及 `x_soda.attachments` **文件卡片**（研究地图 Markdown 报告 + 静态 SVG 谱系图、元素裁剪图 PNG、BibTeX 文件、领域普查趋势图 SVG）。工具状态行与技能行由管理员在 `/admin/display-policy` 以两个开关配置（默认均开启）；交互筛选、缩放、节点“深问”仍需打开本项目自有前端
 - **integrity_sweep** — 可靠性质检（纯官方 API，零模型）：逐篇查撤稿（OpenAlex `is_retracted`）/ 勘误或关切声明（Crossref `relation`）/ arXiv 预印本是否已有正式版；写综述、投稿导出前必跑
 - **bib_import** — 导入 .bib 文献库（Zotero/EndNote/Mendeley 导出）到候选集，DOI 经 Crossref 自动补全，与会话论文去重后并入；与 citation_export 双向互通
 - **exhibit_index** — 图表导览：列出网络论文或上传 PDF / DOCX / 图片里的图、表、公式（编号/类型/页码/缩略图）；上传附件按需解析并复用缓存，点击元素可继续追问
@@ -61,7 +61,7 @@
 - 多轮对话：优先使用清小搭传入的 `sessionId`，缺失时回退到 credential/user/message-chain HMAC alias；调用方 `system` 指令会在服务端安全规则之后受限加入上下文，外部 `tool` 历史可安全忽略
 - 多模态输入：支持 OpenAI content 数组——`file.url` 存在时始终作为实际下载地址（与 `file_id` 同时存在也不例外），`file_id` 只保留为来源标识，绝不拼接成本地路径或猜测公网 URL；仅有 `file_id` 时不联网、不报 500，而是在本轮明确提示缺少可下载 URL。`file` 与 `image_url`（URL 或 data URI）统一注册为会话附件，HTTP(S) 下载逐跳执行 SSRF 公网校验。`/v1` 文件上限默认 200 MiB，可由管理员在 `/admin/api-storage` 下调但不能超过 200 MiB；Web `/chat/upload` 仍为 20 MiB。PDF/DOCX/TEX/TXT/MD/BIB/PNG/JPG/JPEG/WebP 按原能力处理；DOC/XLS/XLSX 可安全保存到 API 私有会话并生成空 sidecar，但标记为 `deferred`、当前不解析；PPT/PPTX 和其他未知格式继续拒绝。`input_audio` 当前明确降级为不支持音频解析
 - 文件产物输出：研究地图 / 综述可生成为 markdown；`export_manuscript` 可导出 md / docx / tex，下载路由同时支持 `.txt` 文本产物。所有文件均由 `GET /files/{name}` 下载，长中文文件名受 basename 与后缀白名单保护并可正常获取
-- 富展示（按接口文档能力实现）：工具完成时正文插入 Markdown 卡片仿真（默认 8 个核心工具完整卡片，其余一行摘要）；技能加载触发思考折叠提示 + 正文技能行；`explain_element` 图表裁剪图、`citation_export` 的 .bib、`field_census` 趋势图 SVG 作为当轮附件卡片下发（image 类附件自动带 `previewUrl`）。卡片策略由管理员在 `/admin/display-policy` 页面配置（`api_display_policy` 单行表，schema v6，乐观锁），存于 `data/openai_api/state.db`
+- 富展示（按接口文档能力实现）：工具完成时正文插入一行式 Markdown 状态行；文献检索完成后确定性生成完整论文清单表格（核心/候选层、全文可取性、原文链接），不受卡片开关控制；技能加载触发思考折叠提示 + 正文技能行；`explain_element` 图表裁剪图、`citation_export` 的 .bib、`field_census` 趋势图 SVG 作为当轮附件卡片下发（image 类附件自动带 `previewUrl`）。工具状态行与技能行由管理员在 `/admin/display-policy` 页面以两个开关配置（`api_display_policy` 单行表，schema v7，乐观锁），存于 `data/openai_api/state.db`
 - 接入向导：`baseUrl = https://你的域名/v1`，`credential = 管理员创建的长期 Agent API Key`；附件 URL 由 `PUBLIC_BASE_URL` 生成
 
 ## 多用户账号（自有前端公开部署时开启）

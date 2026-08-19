@@ -671,9 +671,11 @@ async def test_stream_card_before_answer_with_separator(client, monkeypatch):
                                 "messages": [{"role": "user", "content": "搜"}]})
     frames = _parse_sse(resp.text)
     content = _content_of(frames)
-    # full card (search_papers is core) then one-liner, separated by ---,
-    # both before the answer
+    # one-line status card + the mandated search table, then the next tool's
+    # one-liner separated by ---, all before the answer
     assert "**🔎 文献检索 · 核心集 1 篇 / 候选 0 篇**" in content
+    assert "| 分层 | 标题 | 年份 | 被引 | 全文 | 链接 |" in content
+    assert "| 核心 | Paper A | 2021 | 5 | 🟢 | — |" in content
     assert "**🛡️ 可靠性质检** · 可靠性质检完成（2 篇）：无异常 2" in content
     assert "\n---\n\n" in content
     assert content.index("文献检索 · 核心集") < content.index("这是最终回答。")
@@ -685,6 +687,7 @@ async def test_nonstream_card_prepended_to_answer(client, monkeypatch):
     resp = await _post(client, {"messages": [{"role": "user", "content": "搜"}]})
     content = resp.json()["choices"][0]["message"]["content"]
     assert content.index("🔎 文献检索") < content.index("这是最终回答。")
+    assert "| 分层 | 标题 | 年份 | 被引 | 全文 | 链接 |" in content
     assert content.rstrip().endswith("这是最终回答。")
 
 
@@ -726,14 +729,16 @@ def _set_display_policy(tmp_root, **changes):
 
 
 @pytest.mark.anyio
-async def test_cards_disabled_by_off_policy(client, monkeypatch, tmp_path):
-    _set_display_policy(tmp_path, preset="off")
+async def test_tool_cards_disabled_keeps_search_table(client, monkeypatch, tmp_path):
+    _set_display_policy(tmp_path, tool_cards_enabled=False)
     monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_card_events()))
     resp = await _post(client, {"stream": True, "max_tokens": 500,
                                 "messages": [{"role": "user", "content": "搜"}]})
     frames = _parse_sse(resp.text)
     content = _content_of(frames)
+    # status lines are off, but the mandated search-results table stays on
     assert "文献检索" not in content and "可靠性质检" not in content
+    assert "| 分层 | 标题 | 年份 | 被引 | 全文 | 链接 |" in content
     assert "这是最终回答。" in content
     # progress lines in the thinking fold remain
     reasonings = [f["choices"][0]["delta"].get("reasoning") for f in frames]
@@ -741,25 +746,14 @@ async def test_cards_disabled_by_off_policy(client, monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
-async def test_custom_policy_limits_full_cards(client, monkeypatch, tmp_path):
-    _set_display_policy(tmp_path, preset="custom", enabled_tools=["integrity_sweep"])
-    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_card_events()))
-    resp = await _post(client, {"stream": True, "max_tokens": 500,
-                                "messages": [{"role": "user", "content": "搜"}]})
-    content = _content_of(_parse_sse(resp.text))
-    # search_papers lost its full card (one-liner still shown: not in _FULL_CARDS
-    # renderers, custom preset only upgrades listed tools)
-    assert "核心集 1 篇" not in content
-    assert "**🔎 文献检索**" in content
-
-
-@pytest.mark.anyio
-async def test_small_budget_skips_cards(client, monkeypatch):
+async def test_small_budget_skips_search_table(client, monkeypatch):
     monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_card_events()))
     resp = await _post(client, {"stream": True, "max_tokens": 50,
                                 "messages": [{"role": "user", "content": "搜"}]})
     content = _content_of(_parse_sse(resp.text))
-    assert "文献检索 · 核心集" not in content
+    # the full table is skipped under a tight budget so it cannot crowd out
+    # the answer; the cheap one-line status cards still appear
+    assert "| 分层 |" not in content
     assert "这是最终回答。" in content
 
 

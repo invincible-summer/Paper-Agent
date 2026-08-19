@@ -204,6 +204,49 @@ def test_schema_v5_migrates_max_upload_bytes_without_policy_version_bump(tmp_pat
     assert migrated.version == before.version
 
 
+def test_schema_v6_migrates_display_policy_preset_to_toggle(tmp_path: Path):
+    context = StorageContext.openai_api(root_dir=tmp_path / "api")
+    store = ApiStorageStore(context)
+    store.initialize()
+
+    def _rebuild_legacy(preset: str, skill: int, version: int) -> None:
+        with store.connect() as conn:
+            conn.execute("DROP TABLE api_display_policy")
+            conn.execute("""
+                CREATE TABLE api_display_policy (
+                    id INTEGER PRIMARY KEY CHECK (id = 1), preset TEXT NOT NULL,
+                    enabled_tools_json TEXT NOT NULL DEFAULT '[]',
+                    skill_card_enabled INTEGER NOT NULL DEFAULT 1
+                        CHECK (skill_card_enabled IN (0, 1)),
+                    version INTEGER NOT NULL CHECK (version > 0),
+                    updated_by TEXT NOT NULL, updated_at REAL NOT NULL
+                )
+            """)
+            conn.execute(
+                "INSERT INTO api_display_policy(id, preset, enabled_tools_json, "
+                "skill_card_enabled, version, updated_by, updated_at) "
+                "VALUES(1, ?, '[]', ?, ?, 'legacy-admin', 123.0)",
+                (preset, skill, version),
+            )
+            conn.execute("UPDATE api_schema_meta SET schema_version = 6 WHERE id = 1")
+            conn.commit()
+
+    _rebuild_legacy("custom", 0, 4)
+    store.initialize()
+    policy = store.get_display_policy()
+    assert store.schema_version() == SCHEMA_VERSION
+    assert policy.tool_cards_enabled is True  # anything except 'off' maps to on
+    assert policy.skill_card_enabled is False
+    assert policy.version == 4 and policy.updated_by == "legacy-admin"
+
+    _rebuild_legacy("off", 1, 2)
+    store.initialize()
+    policy = store.get_display_policy()
+    assert policy.tool_cards_enabled is False
+    assert policy.skill_card_enabled is True
+    assert policy.version == 2
+
+
 def test_policy_upload_limit_validation(tmp_path: Path):
     store = ApiStorageStore(StorageContext.openai_api(root_dir=tmp_path / "api"))
     store.initialize()

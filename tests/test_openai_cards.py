@@ -14,13 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from tools.export.cards import (  # noqa: E402
-    ALL_CARD_TOOLS,
-    CORE_CARD_TOOLS,
     MAX_CARD_CHARS,
     render_field_census_svg,
+    render_search_table,
     render_skill_card,
     render_tool_card,
-    resolve_full_card_tools,
     skill_display_title,
 )
 from tools.export.report import render_research_map_svg  # noqa: E402
@@ -39,10 +37,10 @@ def client(monkeypatch, tmp_path):
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
-# --- card renderers -------------------------------------------------------------
+# --- card renderers (one-line status cards) --------------------------------------
 
 
-def test_search_card_lists_papers_with_fulltext_badges():
+def test_search_card_is_a_single_status_line():
     result = {
         "status": "success", "tool": "search_papers",
         "papers": [
@@ -55,26 +53,60 @@ def test_search_card_lists_papers_with_fulltext_badges():
         "fulltext_core_available": 1, "fulltext_core_target": 8,
         "source_notices": ["PubMed/NLM 仅提供来源记录，不代表内容背书。"],
     }
-    card = render_tool_card("search_papers", result, CORE_CARD_TOOLS)
-    assert "**🔎 文献检索 · 核心集 2 篇 / 候选 10 篇**" in card
-    assert "🟢 **Paper A**（2021，被引 5）" in card
-    assert "🟡" in card and "核心层全文保障 1/8" in card
-    assert "PubMed/NLM 仅提供来源记录" in card
+    card = render_tool_card("search_papers", result)
+    assert card == "**🔎 文献检索 · 核心集 2 篇 / 候选 10 篇**"
+    # the per-paper listing lives in render_search_table, never in the card
+    assert "Paper A" not in card and "核心层全文保障" not in card
 
 
-def test_search_card_truncates_long_lists():
+def test_render_search_table_lists_all_papers_with_links():
     result = {
         "status": "success", "tool": "search_papers",
-        "papers": [{"title": f"P{i}", "year": 2020, "citation_count": i,
-                    "fulltext_status": "available"} for i in range(20)],
+        "papers": [
+            {"title": "Paper A", "year": 2021, "citation_count": 5,
+             "fulltext_status": "available", "doi": "10.1234/a",
+             "pdf_url": "https://oa.example.com/a.pdf"},
+            {"title": "Paper B", "year": None, "citation_count": None,
+             "fulltext_status": "unknown", "urls": {"openalex": "https://openalex.org/w/1"}},
+        ],
+        "candidates": [
+            {"title": "Cand | Pipe", "year": 2023, "citation_count": 0,
+             "fulltext_status": "unavailable"},
+        ],
+    }
+    table = render_search_table(result)
+    assert table is not None
+    lines = table.splitlines()
+    assert lines[0] == "| 分层 | 标题 | 年份 | 被引 | 全文 | 链接 |"
+    assert lines[1].startswith("| --- |")
+    assert len(lines) == 5  # header + separator + every core and candidate row
+    assert ("| 核心 | Paper A | 2021 | 5 | [🟢](https://oa.example.com/a.pdf) "
+            "| [DOI](https://doi.org/10.1234/a) |") in lines
+    assert "| 核心 | Paper B | — | — | 🟡 | [来源](https://openalex.org/w/1) |" in lines
+    assert "| 候选 | Cand \\| Pipe | 2023 | 0 | ⚪ | — |" in lines
+
+
+def test_render_search_table_truncates_and_escapes_titles():
+    result = {
+        "status": "success", "tool": "search_papers",
+        "papers": [{"title": "T" * 80, "year": 2020, "citation_count": 1,
+                    "fulltext_status": "available", "doi": "https://doi.org/10.1/x"}],
         "candidates": [],
     }
-    card = render_tool_card("search_papers", result, CORE_CARD_TOOLS)
-    assert "…等共 20 篇核心集论文" in card
-    assert card.count("\n") < 20  # only top-8 listed
+    table = render_search_table(result)
+    assert table is not None
+    row = table.splitlines()[2]
+    assert f"{'T' * 60}…" in row and "TT" * 31 not in row
+    assert "[DOI](https://doi.org/10.1/x)" in row  # full DOI URLs pass through
 
 
-def test_research_map_card_summarizes_clusters_and_span():
+def test_render_search_table_degrades_without_papers():
+    assert render_search_table({"papers": [], "candidates": []}) is None
+    assert render_search_table({}) is None
+    assert render_search_table({"papers": "junk", "candidates": None}) is None
+
+
+def test_research_map_card_is_a_single_status_line():
     result = {
         "status": "success", "tool": "research_map",
         "clusters": [{"id": 0, "label": "视觉基础", "papers": [1, 2]},
@@ -87,24 +119,20 @@ def test_research_map_card_summarizes_clusters_and_span():
             "edges": [{"source": "a", "target": "b", "type": "cites"}],
         },
     }
-    card = render_tool_card("research_map", result, CORE_CARD_TOOLS)
-    assert "**🗺️ 研究地图 · 2 篇论文 / 2 个主题簇 / 1 条关联（引用 1）**" in card
-    assert "**视觉基础**（2 篇）" in card and "2019–2024" in card
-    assert "奠基性论文 1 篇" in card
+    card = render_tool_card("research_map", result)
+    assert card == "**🗺️ 研究地图 · 2 篇论文 / 2 个主题簇 / 1 条关联**"
 
 
-def test_reading_path_card_roles_and_reasons():
+def test_reading_path_card_is_a_single_status_line():
     result = {"status": "success", "tool": "reading_path", "path": [
         {"paper_id": "a", "title": "Foundations", "role": "奠基",
          "reason": "领域开山之作，理解术语与问题定义"},
         {"paper_id": "b", "title": "Frontier", "role": "前沿", "reason": ""},
     ]}
-    card = render_tool_card("reading_path", result, CORE_CARD_TOOLS)
-    assert "【奠基】**Foundations**" in card and "领域开山之作" in card
-    assert "【前沿】**Frontier**" in card
+    assert render_tool_card("reading_path", result) == "**🧭 推荐阅读路径 · 2 篇**"
 
 
-def test_deep_read_card_shows_structured_summary():
+def test_deep_read_card_is_a_single_status_line():
     result = {
         "status": "success", "tool": "deep_read",
         "full_text_paper_ids": ["a"], "abstract_fallback_papers": [{"paper_id": "b"}],
@@ -114,10 +142,9 @@ def test_deep_read_card_shows_structured_summary():
             "b": {"title": "Paper B"},
         },
     }
-    card = render_tool_card("deep_read", result, CORE_CARD_TOOLS)
-    assert "**📖 深度阅读 · 1 篇全文级 / 1 篇摘要级**" in card
-    assert "研究问题：如何高效压缩 KV 缓存" in card
-    assert "主要发现：显存降低 40%" in card
+    card = render_tool_card("deep_read", result)
+    assert card == "**📖 深度阅读 · 1 篇全文级 / 1 篇摘要级**"
+    assert "研究问题" not in card  # details no longer duplicated in the card
 
 
 def test_explain_element_cards_by_kind():
@@ -126,20 +153,18 @@ def test_explain_element_cards_by_kind():
         "caption": "Overall architecture",
         "understanding": {"description": "整体架构包含编码器与解码器。"},
         "docling_extract": {}}}
-    card = render_tool_card("explain_element", figure, CORE_CARD_TOOLS)
-    assert "🔍 图解读 · Overall architecture" in card and "整体架构" in card
+    assert render_tool_card("explain_element", figure) == \
+        "**🔍 图解读 · Overall architecture**"
 
     table = {"status": "success", "tool": "explain_element", "element": {
         "element_id": "p::table::1", "kind": "table",
         "docling_extract": {"markdown": "| a | b |\n|---|---|\n| 1 | 2 |"}}}
-    card = render_tool_card("explain_element", table, CORE_CARD_TOOLS)
-    assert "| a | b |" in card
+    assert render_tool_card("explain_element", table) == "**🔍 表解读**"
 
     formula = {"status": "success", "tool": "explain_element", "element": {
         "element_id": "p::formula::1", "kind": "formula",
         "docling_extract": {"latex": "E = mc^2"}}}
-    card = render_tool_card("explain_element", formula, CORE_CARD_TOOLS)
-    assert "```latex" in card and "E = mc^2" in card
+    assert render_tool_card("explain_element", formula) == "**🔍 公式解读**"
 
 
 def test_field_census_and_write_review_and_citation_cards():
@@ -148,56 +173,48 @@ def test_field_census_and_write_review_and_citation_cards():
                          {"key": 2024, "name": "2024", "count": 1200}],
               "top_authors": [{"name": "A", "count": 3}],
               "top_institutions": [], "top_venues": []}
-    card = render_tool_card("field_census", census, CORE_CARD_TOOLS)
-    assert "2023: 900 → 2024: 1200" in card and "高产作者：A（3）" in card
+    assert render_tool_card("field_census", census) == "**📊 领域普查完成**"
 
     review = {"status": "success", "tool": "write_review",
               "literature_review": "综述正文开头。", "review_chars": 5000}
-    card = render_tool_card("write_review", review, CORE_CARD_TOOLS)
-    assert "📝 文献综述已生成 · 5000 字" in card and "综述正文开头" in card
+    assert render_tool_card("write_review", review) == "**📝 文献综述已生成 · 5000 字**"
 
     cite = {"status": "success", "tool": "citation_export",
             "citations": "@article{a, title={T}}", "format": "bibtex", "count": 1}
-    card = render_tool_card("citation_export", cite, CORE_CARD_TOOLS)
-    assert "📑 参考文献导出 · BibTeX · 1 篇" in card and "@article{a" in card
+    assert render_tool_card("citation_export", cite) == "**📑 参考文献导出 · BibTeX · 1 篇**"
 
 
 def test_one_liner_for_non_core_and_errors():
     ok = {"status": "success", "tool": "integrity_sweep",
           "summary": "可靠性质检完成（12 篇）：无异常 10"}
-    card = render_tool_card("integrity_sweep", ok, CORE_CARD_TOOLS)
+    card = render_tool_card("integrity_sweep", ok)
     assert card == "**🛡️ 可靠性质检** · 可靠性质检完成（12 篇）：无异常 10"
 
     bad = {"status": "error", "tool": "integrity_sweep",
            "error": {"message": "网络受限"}}
-    card = render_tool_card("integrity_sweep", bad, CORE_CARD_TOOLS)
+    card = render_tool_card("integrity_sweep", bad)
     assert card.startswith("⚠️ 🛡️ 可靠性质检 · 网络受限")
+
+    partial = {"status": "partial", "tool": "search_papers",
+               "papers": [{"title": "T", "year": 2020, "citation_count": 1}],
+               "candidates": [], "summary": "部分来源超时"}
+    assert render_tool_card("search_papers", partial).startswith("🟡**🔎 文献检索")
 
 
 def test_card_degrades_on_missing_payloads():
     empty = {"status": "success", "tool": "search_papers"}
-    assert render_tool_card("search_papers", empty, CORE_CARD_TOOLS) == \
-        "**🔎 文献检索**"
+    assert render_tool_card("search_papers", empty) == "**🔎 文献检索**"
     # unknown tools never render a card
-    assert render_tool_card("mystery", {"status": "success"}, CORE_CARD_TOOLS) is None
+    assert render_tool_card("mystery", {"status": "success"}) is None
     # a broken payload must not raise
-    assert render_tool_card("research_map", {"graph": None}, CORE_CARD_TOOLS) is not None
+    assert render_tool_card("research_map", {"graph": None}) is not None
 
 
 def test_card_respects_length_cap():
     result = {"status": "success", "tool": "citation_export",
               "citations": "x" * 10_000, "format": "bibtex", "count": 99}
-    card = render_tool_card("citation_export", result, CORE_CARD_TOOLS)
+    card = render_tool_card("citation_export", result)
     assert len(card) <= MAX_CARD_CHARS
-
-
-def test_render_tool_card_custom_full_set_changes_card_depth():
-    result = {"status": "success", "tool": "search_papers",
-              "papers": [{"title": "T", "year": 2020, "citation_count": 1,
-                          "fulltext_status": "available"}], "candidates": []}
-    one_liner_set = CORE_CARD_TOOLS - {"search_papers"}
-    assert "文献检索 · 核心集" not in render_tool_card(
-        "search_papers", result, one_liner_set)
 
 
 def test_skill_card_and_display_title():
@@ -206,14 +223,6 @@ def test_skill_card_and_display_title():
     title = skill_display_title("research_gap")
     assert title == "研究空白识别与选题评估"
     assert skill_display_title("__missing__") == "__missing__"
-
-
-def test_resolve_full_card_tools_presets():
-    assert resolve_full_card_tools("all") == ALL_CARD_TOOLS
-    assert resolve_full_card_tools("core") == CORE_CARD_TOOLS
-    assert resolve_full_card_tools("off") == frozenset()
-    custom = resolve_full_card_tools("custom", ["search_papers", "not_a_tool"])
-    assert custom == {"search_papers"}
 
 
 # --- field census SVG -----------------------------------------------------------
@@ -323,25 +332,21 @@ def test_display_policy_store_roundtrip(tmp_path):
     store.initialize()
     assert store.schema_version() == SCHEMA_VERSION
     policy = store.get_display_policy()
-    assert policy.preset == "core" and policy.skill_card_enabled
+    assert policy.tool_cards_enabled and policy.skill_card_enabled
 
     updated = store.update_display_policy(
-        {"preset": "custom", "enabled_tools": ["search_papers", "deep_read"]},
-        expected_version=1, updated_by="tester")
-    assert updated.preset == "custom" and updated.version == 2
-    assert set(updated.enabled_tools) == {"search_papers", "deep_read"}
-    # round-trips through JSON
-    assert set(store.get_display_policy().enabled_tools) == {"deep_read", "search_papers"}
+        {"tool_cards_enabled": False}, expected_version=1, updated_by="tester")
+    assert updated.tool_cards_enabled is False and updated.version == 2
+    assert store.get_display_policy().tool_cards_enabled is False
 
     with pytest.raises(PolicyVersionConflict):
-        store.update_display_policy({"preset": "all"}, expected_version=1,
-                                    updated_by="tester")
+        store.update_display_policy({"skill_card_enabled": False},
+                                    expected_version=1, updated_by="tester")
     with pytest.raises(ValueError):
-        store.update_display_policy({"preset": "nope"}, expected_version=2,
-                                    updated_by="tester")
-    with pytest.raises(ValueError):
-        store.update_display_policy({"enabled_tools": ["ok", ""]},
+        store.update_display_policy({"tool_cards_enabled": "yes"},
                                     expected_version=2, updated_by="tester")
+    with pytest.raises(ValueError):
+        store.update_display_policy({"nope": 1}, expected_version=2, updated_by="tester")
 
 
 @pytest.mark.anyio
@@ -351,29 +356,22 @@ async def test_display_policy_admin_routes(client, monkeypatch):
     got = await client.get("/api/v1/admin/display-policy")
     assert got.status_code == 200
     body = got.json()
-    assert body["policy"]["preset"] == "core"
-    assert "search_papers" in body["tools"]
-    assert set(body["core_tools"]) == set(CORE_CARD_TOOLS)
+    assert body["policy"]["tool_cards_enabled"] is True
+    assert body["policy"]["skill_card_enabled"] is True
+    assert "tools" not in body and "core_tools" not in body
 
     put = await client.put("/api/v1/admin/display-policy", json={
-        "expected_version": body["policy"]["version"], "preset": "custom",
-        "enabled_tools": ["research_map", "write_review"],
-        "skill_card_enabled": False})
+        "expected_version": body["policy"]["version"],
+        "tool_cards_enabled": False, "skill_card_enabled": False})
     assert put.status_code == 200
     updated = put.json()["policy"]
-    assert updated["preset"] == "custom"
+    assert updated["tool_cards_enabled"] is False
     assert updated["skill_card_enabled"] is False
-    assert set(updated["enabled_tools"]) == {"research_map", "write_review"}
 
     conflict = await client.put("/api/v1/admin/display-policy", json={
-        "expected_version": body["policy"]["version"], "preset": "all"})
+        "expected_version": body["policy"]["version"], "tool_cards_enabled": True})
     assert conflict.status_code == 409
 
-    unknown = await client.put("/api/v1/admin/display-policy", json={
-        "expected_version": updated["version"], "enabled_tools": ["nope"]})
-    assert unknown.status_code == 422
-
-    empty_custom = await client.put("/api/v1/admin/display-policy", json={
-        "expected_version": updated["version"], "preset": "custom",
-        "enabled_tools": []})
-    assert empty_custom.status_code == 422
+    bad_type = await client.put("/api/v1/admin/display-policy", json={
+        "expected_version": updated["version"], "tool_cards_enabled": "yes"})
+    assert bad_type.status_code == 422

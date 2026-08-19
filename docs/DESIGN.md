@@ -411,11 +411,11 @@ HTTP(S) URL 逐 redirect 做 SSRF/公网地址校验并流式写入 0600 temp，
 
 三类工具结果还会追加**当轮即时附件**（`openai_compat._extra_attachments`，均走同一 export artifact 管道与 24h TTL）：`explain_element` 的图/表裁剪图 PNG（落盘位置按 `settings.reader.assets_dir` 解析，且重新校验该文档属于当前会话的元素 scope，会话隔离红线在附件层二次生效）；`citation_export` 的 `.bib`/`.txt` 引用文件；`field_census` 的纯 SVG 趋势图（年度折线 + 高产作者/机构横条，`tools/export/cards.py::render_field_census_svg`）。
 
-协议边界必须明确：`openai-compatible-agent-integration-guide.md` 只定义正文/推理增量和 `x_soda.attachments`，没有任意 React 工具卡或交互图谱组件协议。因此自有前端的 `SearchResultCard`、`ResearchMapCard`、`GenealogyGraph` 等不能原样出现在清小搭；清小搭接收 Agent 的自然语言总结、Markdown 卡片仿真（§7.6）、附件文件卡和静态 SVG 图。筛选、缩放、节点详情及“深问这篇”等交互继续由本项目 `/chat` 提供，不发送私有未声明字段冒充兼容能力。
+协议边界必须明确：`openai-compatible-agent-integration-guide.md` 只定义正文/推理增量和 `x_soda.attachments`，没有任意 React 工具卡或交互图谱组件协议。因此自有前端的 `SearchResultCard`、`ResearchMapCard`、`GenealogyGraph` 等不能原样出现在清小搭；清小搭接收 Agent 的自然语言总结、一行式工具状态行与检索结果表格（§7.6）、附件文件卡和静态 SVG 图。筛选、缩放、节点详情及“深问这篇”等交互继续由本项目 `/chat` 提供，不发送私有未声明字段冒充兼容能力。
 
 ### 7.5 生命周期、磁盘压力与 API Trace
 
-默认保留：session/upload 7 天、export 24 小时、public PDF 3 天（过期即清理，后续 deep_read 自动重新下载提取）、语义/视觉缓存 90 天、Trace off；API 单文件上限默认 200 MiB。`api_storage_policy.max_upload_bytes` 使用同一乐观锁更新，管理员页面以 MiB 输入并由后端强制校验 1–200 MiB，保存后立即影响后续请求，不删除或重处理既有文件。`state.db` schema v6 在初始化时用受检 `ALTER TABLE` 为旧库补列和 200 MiB 默认值，不改变旧 policy 的版本号或冲突语义。
+默认保留：session/upload 7 天、export 24 小时、public PDF 3 天（过期即清理，后续 deep_read 自动重新下载提取）、语义/视觉缓存 90 天、Trace off；API 单文件上限默认 200 MiB。`api_storage_policy.max_upload_bytes` 使用同一乐观锁更新，管理员页面以 MiB 输入并由后端强制校验 1–200 MiB，保存后立即影响后续请求，不删除或重处理既有文件。`state.db` schema 迁移在初始化时进行：v6 用受检 `ALTER TABLE` 为旧库补 `max_upload_bytes` 列和 200 MiB 默认值，v7 重建 `api_display_policy` 为双开关形状（见 §7.6）；均不改变旧 policy 的版本号或冲突语义。
 
 hourly cleanup 只在 API 根目录内执行过期、孤立对账和压力清理。75% 清过期并告警；85% 连续清理公共/生成/向量/视觉等可重建数据，不提前删除未过期私有上传；95% 默认 `pause_heavy`（上传、下载、deep_read、OCR、VLM、导出暂停，文字聊天继续），管理员可经预览和二次确认改为 `emergency_evict`；98% 强制暂停文件重任务，不可关闭。in-flight、`protected_until` 和一小时内未完成登记文件受保护。
 
@@ -423,15 +423,17 @@ hourly cleanup 只在 API 根目录内执行过期、孤立对账和压力清理
 
 API Trace 与 web Trace 独立：off 只写匿名请求/错误/Token/耗时聚合；metadata 仅 trace id、模型、工具名、状态、错误码、Token、耗时；full 仅供临时排障并脱敏 Key、bytes、完整正文和 URL query，最长 7 天。web Trace 仍按原路径和原始行为工作。管理员浏览器页面 `/admin/api-storage` 提供策略、API 远程文件上限、容量、状态、清理记录、完整帮助 catalog 和危险操作确认；Agent Key 无管理权限。
 
-### 7.6 Markdown 卡片仿真与展示策略（`/admin/display-policy`）
+### 7.6 一行式状态行、检索表格与展示策略（`/admin/display-policy`）
 
-`tools/export/cards.py` 是 `/v1` 通道专属的卡片渲染层：每个工具结果（`ToolResult.to_dict()` 载荷）可渲染为一段紧凑 Markdown 卡片（emoji 卡头对齐前端 `TOOL_META`、列表优先保证纯文本降级可读、top-N 截断、单卡 1200 字符上限、缺字段优雅降级为一行摘要或空），在工具完成时以 `delta.content` 插入、位于最终回答之前——复刻自制前端"卡片在回答上方"的布局。8 个核心工具（检索/研究地图/阅读路径/深读/元素解读/领域普查/综述/引文导出）有完整卡片渲染器，其余工具渲染一行摘要；`explain_element` 按图/表/公式分三态（VLM 描述 / GFM 表格 / LaTeX 代码块）。
+`tools/export/cards.py` 是 `/v1` 通道专属的卡片渲染层。回显的 assistant content 会作为下一轮 messages 回到模型上下文，因此卡片采用 **context-first 一行式设计**：每个工具结果（`ToolResult.to_dict()` 载荷）只渲染一行状态摘要（emoji 卡头对齐前端 `TOOL_META`，如 `**🔎 文献检索 · 核心集 12 篇 / 候选 13 篇**`、`**📖 深度阅读 · 2 篇全文级 / 1 篇摘要级**`），在工具完成时以 `delta.content` 插入、位于最终回答之前；错误/部分成功仍加 `⚠️`/`🟡` 前缀，缺字段降级为一行摘要，单行 1200 字符上限，渲染永不抛异常。
 
-策略存于 `data/openai_api/state.db` 的 `api_display_policy` 单行表（schema v5，乐观锁版本并发）：`preset ∈ {core, all, custom, off}`（默认 core）、`enabled_tools`（custom 时的显式工具集）、`skill_card_enabled`（正文技能行开关；思考折叠提示始终保留）。管理员经 `/api/v1/admin/display-policy`（GET/PUT，复用 `_administrator` 鉴权与 `expected_version` 乐观锁）与前端 `/admin/display-policy` 页面配置；每请求读取一次（存储读取失败时降级为 core 默认，绝不让对话回合失败）。`off` 关闭全部 Markdown 卡片，思考折叠中的进度提示与文件附件不受影响。
+**检索结果规范化表格**：`search_papers` 成功后，通道层用 `render_search_table` 确定性地生成完整论文清单 markdown 表格（列：分层（核心/候选）/标题（截 60 字符、转义管道符）/年份/被引/全文（🟢/🟡/⚪，有 `pdf_url` 时徽章带 PDF 链接）/链接（DOI 优先，无 DOI 取 `urls` 来源页，再无则 —）），与状态行同块插在回答之前。表格是规范化正式输出：由代码保证存在（不依赖模型自觉），不受工具状态行开关控制，仅在 `max_tokens` 派生的 content 预算 < 2000 字符时让位给回答本身；流式路径经 `emit_block(required=True)` 绕过 60% 卡片份额，非流式路径的尾部裁剪只丢弃可选状态行、绝不丢表格块。候选集精简 dict 补带 `doi` 字段以保证链接列数据完整。
 
-`scripts/preview_qxd_cards.py` 在本地把全部卡片与两张 SVG 渲染到 `data/preview/`（gitignored）供部署前目检，不参与部署。
+策略存于 `data/openai_api/state.db` 的 `api_display_policy` 单行表（schema v7，乐观锁版本并发）：`tool_cards_enabled`（一行式工具状态行开关）与 `skill_card_enabled`（正文技能行开关；思考折叠提示始终保留），默认均开启。v7 迁移在初始化时重建旧表并把旧 `preset` 折叠为单一布尔（`off` → 0，其余 → 1），不改变乐观锁版本号。管理员经 `/api/v1/admin/display-policy`（GET/PUT，复用 `_administrator` 鉴权与 `expected_version` 乐观锁）与前端 `/admin/display-policy` 页面（两个开关）配置；每请求读取一次（存储读取失败时降级为默认，绝不让对话回合失败）。关闭工具状态行后，思考折叠中的进度提示、检索表格与文件附件均不受影响。
 
-### 7.6 其他契约
+`scripts/preview_qxd_cards.py` 在本地把全部状态行、检索表格与两张 SVG 渲染到 `data/preview/`（gitignored）供部署前目检，不参与部署。
+
+### 7.7 其他契约
 
 - 鉴权：Bearer 支持数据库长期 Agent API Key（只存 SHA-256、可撤销）和迁移/应急 `AGENT_API_KEY`（常量时间比较）。本地无配置时接受任意非空 token；生产从未配置任何 Agent Key 返回 503，错误或已撤销 key 返回 401
 - 请求验证：`stream` 使用 `StrictBool`；消息非空且至少有一条 user；角色/content part 白名单；`model` 可缺失、空或 null；`max_tokens` 为严格正整数；畸形 JSON 为 400，schema 错误为 422

@@ -5,7 +5,6 @@ construct an ``ApiStorageStore`` and invoke ``initialize`` explicitly.
 """
 from __future__ import annotations
 
-import json
 import os
 import secrets
 import sqlite3
@@ -17,7 +16,7 @@ from typing import Any, Iterator, Mapping
 
 from core.storage_context import StorageContext, StoragePathError
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 MIN_API_UPLOAD_BYTES = 1 * 1024 * 1024
 MAX_API_UPLOAD_BYTES = 200 * 1024 * 1024
@@ -36,12 +35,12 @@ class PolicyVersionConflict(ApiStorageError):
 class ApiDisplayPolicy:
     """清小搭 (/v1) markdown-card display policy, admin-editable.
 
-    preset: "core" = the 8 key tools get full cards; "all" = every tool;
-    "custom" = exactly ``enabled_tools``; "off" = no markdown cards (tool
-    progress in the thinking fold and file attachments remain).
+    tool_cards_enabled: emit the per-tool one-line status cards into
+    delta.content (the mandated search-results table and file attachments
+    stay on regardless of this switch).
+    skill_card_enabled: emit the in-content skill-loading line.
     """
-    preset: str = "core"
-    enabled_tools: tuple[str, ...] = ()
+    tool_cards_enabled: bool = True
     skill_card_enabled: bool = True
     version: int = 1
     updated_by: str = "bootstrap"
@@ -266,8 +265,7 @@ CREATE TABLE IF NOT EXISTS api_runtime_state (
 
 CREATE TABLE IF NOT EXISTS api_display_policy (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    preset TEXT NOT NULL,
-    enabled_tools_json TEXT NOT NULL DEFAULT '[]',
+    tool_cards_enabled INTEGER NOT NULL DEFAULT 1 CHECK (tool_cards_enabled IN (0, 1)),
     skill_card_enabled INTEGER NOT NULL DEFAULT 1 CHECK (skill_card_enabled IN (0, 1)),
     version INTEGER NOT NULL CHECK (version > 0),
     updated_by TEXT NOT NULL,
@@ -317,6 +315,34 @@ class ApiStorageStore:
                     "INTEGER NOT NULL DEFAULT 209715200 "
                     "CHECK (max_upload_bytes >= 1048576 AND max_upload_bytes <= 209715200)"
                 )
+            display_columns = {
+                str(column[1])
+                for column in conn.execute("PRAGMA table_info(api_display_policy)").fetchall()
+            }
+            if "preset" in display_columns:
+                # v7: one-line status cards replace the preset system. Rebuild the
+                # single-row table, mapping the legacy preset onto one boolean;
+                # the optimistic-lock version is preserved (same policy as v6).
+                conn.execute("ALTER TABLE api_display_policy RENAME TO api_display_policy_v6")
+                conn.execute(
+                    "CREATE TABLE api_display_policy ("
+                    "id INTEGER PRIMARY KEY CHECK (id = 1), "
+                    "tool_cards_enabled INTEGER NOT NULL DEFAULT 1 "
+                    "CHECK (tool_cards_enabled IN (0, 1)), "
+                    "skill_card_enabled INTEGER NOT NULL DEFAULT 1 "
+                    "CHECK (skill_card_enabled IN (0, 1)), "
+                    "version INTEGER NOT NULL CHECK (version > 0), "
+                    "updated_by TEXT NOT NULL, "
+                    "updated_at REAL NOT NULL)"
+                )
+                conn.execute(
+                    "INSERT INTO api_display_policy(id, tool_cards_enabled, "
+                    "skill_card_enabled, version, updated_by, updated_at) "
+                    "SELECT id, CASE WHEN preset = 'off' THEN 0 ELSE 1 END, "
+                    "skill_card_enabled, version, updated_by, updated_at "
+                    "FROM api_display_policy_v6"
+                )
+                conn.execute("DROP TABLE api_display_policy_v6")
             if previous_version < 4:
                 # v4: public PDF retention is shortened to 3 days. Shrink any
                 # existing rows that were written with the old 30-day policy;
@@ -369,8 +395,8 @@ class ApiStorageStore:
             )
             conn.execute(
                 "INSERT OR IGNORE INTO api_display_policy"
-                "(id, preset, enabled_tools_json, skill_card_enabled, version, "
-                "updated_by, updated_at) VALUES(1, 'core', '[]', 1, 1, 'bootstrap', ?)",
+                "(id, tool_cards_enabled, skill_card_enabled, version, "
+                "updated_by, updated_at) VALUES(1, 1, 1, 1, 'bootstrap', ?)",
                 (now,),
             )
             conn.commit()
@@ -488,8 +514,7 @@ class ApiStorageStore:
     # /v1 markdown-card display policy
     # ------------------------------------------------------------------
 
-    _DISPLAY_ENUMS = {"preset": {"core", "all", "custom", "off"}}
-    _DISPLAY_COLUMNS = {"preset": "preset", "enabled_tools": "enabled_tools_json",
+    _DISPLAY_COLUMNS = {"tool_cards_enabled": "tool_cards_enabled",
                         "skill_card_enabled": "skill_card_enabled"}
 
     def get_display_policy(self) -> ApiDisplayPolicy:
@@ -499,13 +524,8 @@ class ApiStorageStore:
             row = conn.execute("SELECT * FROM api_display_policy WHERE id = 1").fetchone()
         if row is None:
             return ApiDisplayPolicy()
-        try:
-            tools = tuple(str(t) for t in json.loads(row["enabled_tools_json"] or "[]"))
-        except (ValueError, TypeError):
-            tools = ()
         return ApiDisplayPolicy(
-            preset=str(row["preset"]),
-            enabled_tools=tools,
+            tool_cards_enabled=bool(row["tool_cards_enabled"]),
             skill_card_enabled=bool(row["skill_card_enabled"]),
             version=int(row["version"]),
             updated_by=str(row["updated_by"]),
@@ -515,9 +535,8 @@ class ApiStorageStore:
     def update_display_policy(
         self, changes: Mapping[str, Any], *, expected_version: int, updated_by: str
     ) -> ApiDisplayPolicy:
-        """Optimistic-lock update; ``enabled_tools`` is a JSON-serializable
-        list of tool names used only by the "custom" preset."""
-        allowed = {"preset", "enabled_tools", "skill_card_enabled"}
+        """Optimistic-lock update over the two display toggles."""
+        allowed = {"tool_cards_enabled", "skill_card_enabled"}
         unknown = set(changes) - allowed
         if unknown:
             raise ValueError(f"unsupported display policy fields: {', '.join(sorted(unknown))}")
@@ -528,28 +547,17 @@ class ApiStorageStore:
             raise ValueError("updated_by must be 1-128 characters")
         current = self.get_display_policy()
         merged = {
-            "preset": changes.get("preset", current.preset),
-            "enabled_tools": tuple(changes.get("enabled_tools", current.enabled_tools)),
+            "tool_cards_enabled": changes.get(
+                "tool_cards_enabled", current.tool_cards_enabled),
             "skill_card_enabled": changes.get(
                 "skill_card_enabled", current.skill_card_enabled),
         }
-        if merged["preset"] not in self._DISPLAY_ENUMS["preset"]:
-            raise ValueError("invalid display preset")
-        if not all(isinstance(t, str) and t.strip() for t in merged["enabled_tools"]):
-            raise ValueError("enabled_tools must be a list of non-empty tool names")
-        if not isinstance(merged["skill_card_enabled"], bool):
-            raise ValueError("skill_card_enabled must be a boolean")
+        for field in sorted(allowed):
+            if not isinstance(merged[field], bool):
+                raise ValueError(f"{field} must be a boolean")
         assignments = [f"{self._DISPLAY_COLUMNS[column]} = ?" for column in sorted(changes)]
         now = time.time()
-        params: list[Any] = []
-        for column in sorted(changes):
-            value = changes[column]
-            if column == "enabled_tools":
-                params.append(json.dumps(sorted(tuple(value)), ensure_ascii=False))
-            elif column == "skill_card_enabled":
-                params.append(1 if value else 0)
-            else:
-                params.append(value)
+        params: list[Any] = [1 if changes[column] else 0 for column in sorted(changes)]
         params.extend([actor, now, expected_version])
         with self.connect() as conn:
             cursor = conn.execute(

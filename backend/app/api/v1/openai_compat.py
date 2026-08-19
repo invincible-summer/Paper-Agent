@@ -113,9 +113,9 @@ def _load_agent_stack():
     """Import the heavy chat stack and return the callables used by this route."""
     from agents.orchestrator import chat_turn
     from tools.export.cards import (
-        render_skill_card, render_tool_card, resolve_full_card_tools, skill_display_title,
+        render_search_table, render_skill_card, render_tool_card, skill_display_title,
     )
-    return chat_turn, render_skill_card, render_tool_card, resolve_full_card_tools, skill_display_title
+    return chat_turn, render_skill_card, render_tool_card, render_search_table, skill_display_title
 
 
 async def _load_agent_stack_async(*, threaded: bool):
@@ -634,7 +634,7 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     agent_stack = None
     from core.turn_execution import TurnExecutionContext
 
-    async def prepare(resolve_full_card_tools):
+    async def prepare():
         prepared = await _prepare_turn(body, principal)
         (user_message, session, attachments, checkpoint_store,
          request_messages, checkpoint_scope, caller_system) = prepared
@@ -642,10 +642,11 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             from core.storage_pressure import StoragePressureGuard
             StoragePressureGuard(session.storage_context).ensure_allowed("text_chat")
         policy = _load_display_policy(session)
-        full_cards = resolve_full_card_tools(policy.preset, policy.enabled_tools)
-        cards_allowed = policy.preset != "off" and (
-            content_budget is None or content_budget >= 2000
-        )
+        cards_allowed = policy.tool_cards_enabled
+        # The mandated search-results table is part of the standardized formal
+        # output, so it ignores the tool-card toggle and only bows to a tight
+        # max_tokens budget where it would crowd out the answer itself.
+        table_allowed = content_budget is None or content_budget >= 2000
 
         async def checkpoint_cb(active_session, *, final=False, final_answer=None):
             await checkpoint_store.checkpoint_callback(
@@ -667,27 +668,27 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             "attachments": attachments,
             "caller_system": caller_system,
             "policy": policy,
-            "full_cards": full_cards,
             "cards_allowed": cards_allowed,
+            "table_allowed": table_allowed,
             "checkpoint_cb": checkpoint_cb,
             "finalize_checkpoint": finalize_checkpoint,
         }
 
     if not stream:
         agent_stack = _load_agent_stack()
-        chat_turn, render_skill_card, render_tool_card, resolve_full_card_tools, skill_display_title = agent_stack
+        chat_turn, render_skill_card, render_tool_card, render_search_table, skill_display_title = agent_stack
         execution = TurnExecutionContext.openai_api(
             soft_timeout_seconds=_API_SOFT_DEADLINE_SECONDS,
             hard_timeout_seconds=_API_HARD_DEADLINE_SECONDS,
         )
         try:
             async with asyncio.timeout(_API_HARD_DEADLINE_SECONDS):
-                prepared = await prepare(resolve_full_card_tools)
+                prepared = await prepare()
                 session = prepared["session"]
                 policy = prepared["policy"]
                 thinking_parts: list[str] = []
                 answer_parts: list[str] = []
-                block_parts: list[str] = []
+                block_parts: list[tuple[str, bool]] = []
                 artifact_kinds: set[str] = set()
                 result_files: list[dict] = []
                 tool_results: list[dict] = []
@@ -710,8 +711,8 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                     elif etype == "answer" and ev.get("is_delta"):
                         answer_parts.append(ev.get("content", ""))
                     elif etype == "skill_loaded" and policy.skill_card_enabled:
-                        block_parts.append(render_skill_card(
-                            skill_display_title(str(ev.get("name") or ""))))
+                        block_parts.append((render_skill_card(
+                            skill_display_title(str(ev.get("name") or ""))), False))
                     elif etype == "tool_result":
                         result = ev.get("result") or {}
                         tool = result.get("tool", "")
@@ -722,10 +723,18 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                             artifact_kinds.add(tool)
                         elif result.get("status") == "success":
                             result_files.extend(_tool_result_files(request, result))
-                        if prepared["cards_allowed"]:
-                            card = render_tool_card(tool, result, prepared["full_cards"])
+                        table = (render_search_table(result)
+                                 if tool == "search_papers" and result.get("status") != "error"
+                                 and prepared["table_allowed"] else None)
+                        if table:
+                            line = (render_tool_card(tool, result)
+                                    if prepared["cards_allowed"] else "")
+                            block_parts.append(
+                                (f"{line}\n\n{table}" if line else table, True))
+                        elif prepared["cards_allowed"]:
+                            card = render_tool_card(tool, result)
                             if card:
-                                block_parts.append(card)
+                                block_parts.append((card, False))
                     elif etype == "done":
                         done_event = ev
                     elif etype == "error":
@@ -744,10 +753,15 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 if block_parts:
                     card_share = content_budget * 0.6 if content_budget is not None else None
                     while block_parts and card_share is not None and \
-                            sum(len(b) for b in block_parts) + 8 > card_share:
-                        block_parts.pop()
+                            sum(len(b) for b, _ in block_parts) + 8 > card_share:
+                        for i in range(len(block_parts) - 1, -1, -1):
+                            if not block_parts[i][1]:
+                                block_parts.pop(i)
+                                break
+                        else:
+                            break
                     if block_parts:
-                        prefix = "\n\n".join(block_parts) + "\n\n"
+                        prefix = "\n\n".join(b for b, _ in block_parts) + "\n\n"
                 content = prefix + answer
                 if content_budget is not None and len(content) > content_budget:
                     content = content[:content_budget]
@@ -866,12 +880,12 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         # role_first performs the heavy import in a worker after the role frame;
         # other modes already loaded above (normally a prewarm cache hit).
         stack = agent_stack or await _load_agent_stack_async(threaded=True)
-        loaded_chat_turn, render_skill_card, render_tool_card, resolve_full_card_tools, skill_display_title = stack
+        loaded_chat_turn, render_skill_card, render_tool_card, render_search_table, skill_display_title = stack
         state: dict = {}
 
         async def produce() -> None:
             try:
-                prepared = await prepare(resolve_full_card_tools)
+                prepared = await prepare()
                 state.update(prepared)
                 async for ev in _chat_turn_stream(
                     loaded_chat_turn,
@@ -919,12 +933,12 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             content_parts.append(piece)
             return frame({"content": piece})
 
-        def emit_block(text: str) -> str:
+        def emit_block(text: str, *, required: bool = False) -> str:
             nonlocal card_spent, blocks_emitted
             if not text:
                 return ""
             card_budget = None if content_budget is None else int(content_budget * 0.6)
-            if card_budget is not None and card_spent + len(text) > card_budget:
+            if not required and card_budget is not None and card_spent + len(text) > card_budget:
                 return ""
             card_spent += len(text)
             separator = "" if not blocks_emitted else "\n---\n\n"
@@ -965,8 +979,16 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                     artifact_kinds.add(tool)
                 elif result.get("status") == "success":
                     result_files.extend(_tool_result_files(request, result))
+                table = (render_search_table(result)
+                         if tool == "search_papers" and result.get("status") != "error"
+                         and state.get("table_allowed") else None)
+                if table:
+                    line = (render_tool_card(tool, result)
+                            if state.get("cards_allowed") else "")
+                    block = f"{line}\n\n{table}" if line else table
+                    return emit_block(block, required=True) or None
                 if state.get("cards_allowed"):
-                    card = render_tool_card(tool, result, state.get("full_cards") or frozenset())
+                    card = render_tool_card(tool, result)
                     if card:
                         return emit_block(card) or None
                 return None

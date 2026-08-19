@@ -5,15 +5,16 @@ defines no structured content, HTML, WebView or tool-call display: the only
 rich surfaces are ``delta.reasoning`` (thinking fold), ``delta.content``
 (plain text — the model's own answers are already markdown) and
 ``x_soda.attachments`` (downloadable file cards).  These renderers emulate
-the self-hosted frontend's tool cards as compact markdown blocks inserted
-when a tool completes, before the final answer — mirroring the web layout
-where cards sit above the reply.
+tool feedback as compact markdown blocks inserted when a tool completes,
+before the final answer — mirroring the web layout where cards sit above
+the reply.
 
-Degradation-first style: bold headers and lists (readable even when the
-host renders plain text), emoji icons mirroring the frontend TOOL_META,
-top-N truncation, and a hard per-card length cap.  Every renderer is a
-pure function over ``ToolResult.to_dict()`` payloads and must degrade to
-None / a one-liner on missing fields — never raise.
+Context-first style: the echoed assistant content returns as next-turn
+context, so every tool card is exactly ONE status line; detailed listings
+live in ``render_search_table`` (the mandated full paper listing for
+search_papers) or in file attachments.  Every renderer is a pure function
+over ``ToolResult.to_dict()`` payloads and must degrade to None / a
+one-liner on missing fields — never raise.
 """
 from __future__ import annotations
 
@@ -42,30 +43,7 @@ _TOOL_META: dict[str, tuple[str, str]] = {
     "use_skill": ("📘", "技能"),
 }
 
-# Default "core" display preset: these tools get full markdown cards,
-# everything else gets a one-line summary card.
-CORE_CARD_TOOLS: frozenset[str] = frozenset({
-    "search_papers", "research_map", "reading_path", "deep_read",
-    "explain_element", "field_census", "write_review", "citation_export",
-})
-
-ALL_CARD_TOOLS: frozenset[str] = frozenset(_TOOL_META) - {"use_skill"}
-
-
-def resolve_full_card_tools(preset: str, enabled_tools=()) -> frozenset[str]:
-    """Map an admin display-policy preset to the effective full-card set."""
-    if preset == "all":
-        return ALL_CARD_TOOLS
-    if preset == "custom":
-        return frozenset(str(t) for t in enabled_tools) & ALL_CARD_TOOLS
-    if preset == "off":
-        return frozenset()
-    return CORE_CARD_TOOLS
-
 MAX_CARD_CHARS = 1200
-_SEARCH_TOP_N = 8
-_DEEP_READ_TOP_N = 3
-_PATH_TOP_N = 10
 
 _FULLTEXT_EMOJI = {"available": "🟢", "unavailable": "⚪", "unknown": "🟡"}
 
@@ -111,192 +89,87 @@ def skill_display_title(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Full cards (core preset)
+# One-line status cards (every known tool)
 # ---------------------------------------------------------------------------
 
-def _card_search_papers(result: dict) -> str:
+def _line_search_papers(result: dict) -> str:
     papers = [p for p in (result.get("papers") or []) if isinstance(p, dict)]
-    candidates = result.get("candidates") or []
+    candidates = [p for p in (result.get("candidates") or []) if isinstance(p, dict)]
     if not papers and not candidates:
         return ""
-    lines: list[str] = [
-        f"**🔎 文献检索 · 核心集 {len(papers)} 篇 / 候选 {len(candidates)} 篇**", ""
-    ]
-    for i, p in enumerate(papers[:_SEARCH_TOP_N], 1):
-        year = p.get("year") or "n.d."
-        cites = p.get("citation_count") or 0
-        badge = _FULLTEXT_EMOJI.get(str(p.get("fulltext_status") or ""), "🟡")
-        lines.append(f"{i}. {badge} **{_short(p.get('title'), 80)}**（{year}，被引 {cites}）")
-    if len(papers) > _SEARCH_TOP_N:
-        lines.append(f"…等共 {len(papers)} 篇核心集论文")
-    avail = result.get("fulltext_core_available")
-    target = result.get("fulltext_core_target")
-    legend = "🟢 全文可取 · 🟡 待验证 · ⚪ 仅摘要"
-    if isinstance(avail, int) and isinstance(target, int):
-        legend += f" · 核心层全文保障 {avail}/{target}"
-    lines += ["", f"*{legend}*"]
-    for notice in result.get("source_notices") or []:
-        if notice:
-            lines.append(f"> ⚠️ {_short(notice, 180)}")
-    return "\n".join(lines)
+    return f"**🔎 文献检索 · 核心集 {len(papers)} 篇 / 候选 {len(candidates)} 篇**"
 
 
-def _card_research_map(result: dict) -> str:
+def _line_research_map(result: dict) -> str:
     graph = result.get("graph") or {}
     nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
     edges = graph.get("edges") or []
     clusters = [c for c in (result.get("clusters") or []) if isinstance(c, dict)]
     if not nodes and not clusters:
         return ""
-    n_cite = sum(1 for e in edges if isinstance(e, dict) and e.get("type") == "cites")
-    lines = [f"**🗺️ 研究地图 · {len(nodes)} 篇论文 / {len(clusters)} 个主题簇 / "
-             f"{len(edges)} 条关联（引用 {n_cite}）**", ""]
-    if clusters:
-        parts = []
-        for c in clusters[:6]:
-            n_papers = len(c.get("papers") or [])
-            parts.append(f"**{_short(c.get('label'), 24)}**（{n_papers} 篇）")
-        lines.append("- 主题簇：" + "、".join(parts))
-    years = sorted({int(n.get("year") or 0) for n in nodes if n.get("year")})
-    if years:
-        span = str(years[0]) if len(years) == 1 else f"{years[0]}–{years[-1]}"
-        lines.append(f"- 时间跨度：{span}")
-    n_found = sum(1 for n in nodes if n.get("role") == "foundational")
-    if n_found:
-        lines.append(f"- 奠基性论文 {n_found} 篇（谱系图见附件图片）")
-    return "\n".join(lines)
+    return (f"**🗺️ 研究地图 · {len(nodes)} 篇论文 / {len(clusters)} 个主题簇 / "
+            f"{len(edges)} 条关联**")
 
 
-def _card_reading_path(result: dict) -> str:
+def _line_reading_path(result: dict) -> str:
     path = [p for p in (result.get("path") or []) if isinstance(p, dict)]
     if not path:
         return ""
-    lines = [f"**🧭 推荐阅读路径 · {len(path)} 篇**", ""]
-    for i, p in enumerate(path[:_PATH_TOP_N], 1):
-        role = _short(p.get("role"), 6) or "参考"
-        reason = f" — {_short(p.get('reason'), 60)}" if p.get("reason") else ""
-        lines.append(f"{i}. 【{role}】**{_short(p.get('title'), 70)}**{reason}")
-    return "\n".join(lines)
+    return f"**🧭 推荐阅读路径 · {len(path)} 篇**"
 
 
-_DEEP_FIELDS = (
-    ("research_problem", "研究问题"),
-    ("methodology", "方法"),
-    ("key_findings", "主要发现"),
-)
-
-
-def _card_deep_read(result: dict) -> str:
-    summaries = result.get("summaries") or {}
-    if not isinstance(summaries, dict):
-        summaries = {}
+def _line_deep_read(result: dict) -> str:
     full_ids = set(result.get("full_text_paper_ids") or [])
     fallback = result.get("abstract_fallback_papers") or []
-    entries = [s for s in summaries.values() if isinstance(s, dict)]
-    if not entries and not full_ids and not fallback:
+    if not full_ids and not fallback:
         return ""
-    head = (f"**📖 深度阅读 · {len(full_ids)} 篇全文级 / "
-            f"{len(fallback)} 篇摘要级**")
-    lines = [head]
-    for s in entries[:_DEEP_READ_TOP_N]:
-        lines.append("")
-        lines.append(f"**{_short(s.get('title'), 70)}**")
-        for field, label in _DEEP_FIELDS:
-            if s.get(field):
-                lines.append(f"- {label}：{_short(s.get(field), 100)}")
-    if len(entries) > _DEEP_READ_TOP_N:
-        lines.append(f"\n…等共 {len(entries)} 篇结构化摘要，可指定论文继续追问")
-    return "\n".join(lines)
+    return f"**📖 深度阅读 · {len(full_ids)} 篇全文级 / {len(fallback)} 篇摘要级**"
 
 
-def _card_explain_element(result: dict) -> str:
+def _line_explain_element(result: dict) -> str:
     element = result.get("element")
     if not isinstance(element, dict) or not element.get("element_id"):
         return ""
-    kind = str(element.get("kind") or "")
-    label = _KIND_LABEL.get(kind, "元素")
-    caption = _short(element.get("caption"), 70)
-    head = f"**🔍 {label}解读{(' · ' + caption) if caption else ''}**"
-    understanding = element.get("understanding") or {}
-    lines = [head]
-    if kind == "table":
-        markdown = str((element.get("docling_extract") or {}).get("markdown") or "").strip()
-        if markdown:
-            lines += ["", f"```\n{markdown[:800]}\n```"]
-    elif kind == "formula":
-        latex = str((element.get("docling_extract") or {}).get("latex")
-                    or understanding.get("latex") or "").strip()
-        if latex:
-            lines += ["", "```latex", latex[:400], "```"]
-    if isinstance(understanding, dict) and understanding.get("description"):
-        lines += ["", _short(understanding.get("description"), 260)]
-    page = element.get("page")
-    if page:
-        lines.append(f"\n*位于第 {page} 页，原图见附件图片*")
-    return "\n".join(lines)
+    label = _KIND_LABEL.get(str(element.get("kind") or ""), "元素")
+    caption = _short(element.get("caption"), 40)
+    return f"**🔍 {label}解读{(' · ' + caption) if caption else ''}**"
 
 
-def _card_field_census(result: dict) -> str:
+def _line_field_census(result: dict) -> str:
     yearly = [y for y in (result.get("yearly") or []) if isinstance(y, dict)]
     if not yearly:
         return ""
-    lines = ["**📊 领域普查**", ""]
-    tail = yearly[-6:]
-    lines.append("- 年度趋势：" + " → ".join(
-        f"{_short(y.get('key') or y.get('name'), 6)}: {y.get('count', 0)}" for y in tail))
-    for field, label in (("top_authors", "高产作者"),
-                         ("top_institutions", "高产机构"),
-                         ("top_venues", "主要期刊")):
-        rows = [r for r in (result.get(field) or []) if isinstance(r, dict)][:5]
-        if rows:
-            lines.append(f"- {label}：" + "、".join(
-                f"{_short(r.get('name'), 20)}（{r.get('count', 0)}）" for r in rows))
-    lines.append("\n*趋势图见附件图片*")
-    return "\n".join(lines)
+    return "**📊 领域普查完成**"
 
 
-def _card_write_review(result: dict) -> str:
+def _line_write_review(result: dict) -> str:
     review = str(result.get("literature_review") or "").strip()
     if not review:
         return ""
     n_chars = result.get("review_chars") or len(review)
-    return "\n".join([
-        f"**📝 文献综述已生成 · {n_chars} 字**", "",
-        _short(review, 300),
-        "", "*全文见附件 Markdown 文件*",
-    ])
+    return f"**📝 文献综述已生成 · {n_chars} 字**"
 
 
-def _card_citation_export(result: dict) -> str:
+def _line_citation_export(result: dict) -> str:
     citations = str(result.get("citations") or "").strip()
     if not citations:
         return ""
     fmt = "GB/T 7714" if result.get("format") == "gbt7714" else "BibTeX"
     count = result.get("count") or ""
-    return "\n".join([
-        f"**📑 参考文献导出 · {fmt} · {count} 篇**", "",
-        "```",
-        citations[:700],
-        "```",
-        "", "*完整文件见附件，可直接导入 LaTeX / Zotero*",
-    ])
+    return f"**📑 参考文献导出 · {fmt} · {count} 篇**"
 
 
-_FULL_CARDS = {
-    "search_papers": _card_search_papers,
-    "research_map": _card_research_map,
-    "reading_path": _card_reading_path,
-    "deep_read": _card_deep_read,
-    "explain_element": _card_explain_element,
-    "field_census": _card_field_census,
-    "write_review": _card_write_review,
-    "citation_export": _card_citation_export,
+_COMPACT_CARDS = {
+    "search_papers": _line_search_papers,
+    "research_map": _line_research_map,
+    "reading_path": _line_reading_path,
+    "deep_read": _line_deep_read,
+    "explain_element": _line_explain_element,
+    "field_census": _line_field_census,
+    "write_review": _line_write_review,
+    "citation_export": _line_citation_export,
 }
 
-
-# ---------------------------------------------------------------------------
-# One-line summary cards (every non-core tool)
-# ---------------------------------------------------------------------------
 
 def _one_liner(tool: str, result: dict) -> str:
     if result.get("status") == "error":
@@ -308,19 +181,16 @@ def _one_liner(tool: str, result: dict) -> str:
     return f"{mark}{tool_label(tool)}{suffix}" if mark else f"**{tool_label(tool)}**{suffix}"
 
 
-def render_tool_card(tool: str, result: dict, full_cards: frozenset[str] | set[str]) -> str | None:
-    """Render one tool result as a markdown card; None when nothing to show.
-
-    ``full_cards`` is the admin-configured set of tools that get full cards
-    (core preset by default); every other known tool degrades to a one-liner.
-    """
+def render_tool_card(tool: str, result: dict) -> str | None:
+    """Render one tool result as a single-line status card; None for unknown tools."""
     try:
-        renderer = _FULL_CARDS.get(tool)
-        if renderer is not None and tool in full_cards and result.get("status") != "error":
-            card = renderer(result)
-            if card:
+        renderer = _COMPACT_CARDS.get(tool)
+        if result.get("status") != "error" and renderer is not None:
+            line = renderer(result)
+            if line:
+                mark = _status_mark(result)
+                card = f"{mark}{line}" if mark else line
                 return card[:MAX_CARD_CHARS]
-            return _one_liner(tool, result)
         if tool in _TOOL_META:
             return _one_liner(tool, result)
         return None
@@ -329,6 +199,63 @@ def render_tool_card(tool: str, result: dict, full_cards: frozenset[str] | set[s
             return _one_liner(tool, result)
         except Exception:  # noqa: BLE001
             return None
+
+
+# ---------------------------------------------------------------------------
+# Search result table (the mandated full listing, 清小搭 channel only)
+# ---------------------------------------------------------------------------
+
+def _table_cell(text: Any, limit: int) -> str:
+    return _short(text, limit).replace("|", "\\|")
+
+
+def _paper_link(p: dict) -> str:
+    doi = str(p.get("doi") or "").strip()
+    if doi:
+        if not doi.startswith("http"):
+            doi = f"https://doi.org/{doi}"
+        return f"[DOI]({doi})"
+    urls = p.get("urls")
+    if isinstance(urls, dict):
+        for value in urls.values():
+            value = str(value or "").strip()
+            if value:
+                return f"[来源]({value})"
+    return "—"
+
+
+def _fulltext_cell(p: dict) -> str:
+    badge = _FULLTEXT_EMOJI.get(str(p.get("fulltext_status") or ""), "🟡")
+    pdf = str(p.get("pdf_url") or "").strip()
+    return f"[{badge}]({pdf})" if pdf else badge
+
+
+def render_search_table(result: dict) -> str | None:
+    """Full paper listing for search_papers as one markdown table.
+
+    Covers every core-layer and candidate-layer paper with year, citations,
+    verified full-text availability and source links; None when the result
+    carries no papers at all (the caller degrades to the status line).
+    """
+    try:
+        papers = [p for p in (result.get("papers") or []) if isinstance(p, dict)]
+        candidates = [p for p in (result.get("candidates") or []) if isinstance(p, dict)]
+        rows = [(p, "核心") for p in papers] + [(p, "候选") for p in candidates]
+        if not rows:
+            return None
+        lines = [
+            "| 分层 | 标题 | 年份 | 被引 | 全文 | 链接 |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for p, layer in rows:
+            year = p.get("year") or "—"
+            cites = "—" if p.get("citation_count") is None else p.get("citation_count")
+            lines.append(
+                f"| {layer} | {_table_cell(p.get('title'), 60)} | {year} | {cites} "
+                f"| {_fulltext_cell(p)} | {_paper_link(p)} |")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 — display only, never fail a turn
+        return None
 
 
 # ---------------------------------------------------------------------------

@@ -303,7 +303,7 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb) -> 
         papers=[p.to_dict() for p in session.papers],
         candidates=[{"id": p.id, "title": p.title, "year": p.year,
                      "citation_count": p.citation_count, "source": p.source,
-                     "urls": p.urls, "pdf_url": p.pdf_url,
+                     "urls": p.urls, "pdf_url": p.pdf_url, "doi": p.doi,
                      "fulltext_status": normalize_fulltext_status(p.fulltext_status)}
                     for p in session.candidates],
     )

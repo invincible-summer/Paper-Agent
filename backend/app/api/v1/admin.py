@@ -383,8 +383,7 @@ def post_auth_settings_test_email(body: AuthTestEmailRequest,
 class DisplayPolicyUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     expected_version: int = Field(gt=0)
-    preset: Literal["core", "all", "custom", "off"] | None = None
-    enabled_tools: list[str] | None = None
+    tool_cards_enabled: bool | None = None
     skill_card_enabled: bool | None = None
 
     def changes(self) -> dict:
@@ -402,15 +401,9 @@ async def get_display_policy(authorization: str | None = Header(None)) -> dict:
     _administrator(authorization)
     from dataclasses import asdict
 
-    from tools.export.cards import ALL_CARD_TOOLS, CORE_CARD_TOOLS
-
     def _load() -> dict:
         store = _api_storage_store(); store.initialize()
-        return {
-            "policy": asdict(store.get_display_policy()),
-            "tools": sorted(ALL_CARD_TOOLS),
-            "core_tools": sorted(CORE_CARD_TOOLS),
-        }
+        return {"policy": asdict(store.get_display_policy())}
 
     return await run_cpu_bound(_load)
 
@@ -422,22 +415,10 @@ async def put_display_policy(body: DisplayPolicyUpdate,
     from dataclasses import asdict
 
     from core.api_storage_store import PolicyVersionConflict
-    from tools.export.cards import ALL_CARD_TOOLS
     changes = body.changes()
-    if "enabled_tools" in changes:
-        unknown = sorted(set(changes["enabled_tools"]) - ALL_CARD_TOOLS)
-        if unknown:
-            raise HTTPException(422, f"未知工具：{', '.join(unknown)}")
 
     def _update() -> dict:
         store = _api_storage_store(); store.initialize()
-        if changes.get("preset") == "custom":
-            current = store.get_display_policy()
-            effective = changes.get("enabled_tools", current.enabled_tools)
-            if not effective:
-                raise HTTPException(
-                    422, "custom 预设需要至少选择一个工具（或改用 off）"
-                )
         try:
             updated = store.update_display_policy(
                 changes, expected_version=body.expected_version,
