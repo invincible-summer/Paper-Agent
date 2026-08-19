@@ -248,7 +248,7 @@ def test_schema_v6_migrates_display_policy_preset_to_toggle(tmp_path: Path):
 
 
 
-def test_schema_v7_adds_research_map_render_strategy(tmp_path: Path):
+def test_schema_v7_migrates_to_v9_historical_svg_markdown(tmp_path: Path):
     context = StorageContext.openai_api(root_dir=tmp_path / "api")
     store = ApiStorageStore(context)
     store.initialize()
@@ -266,8 +266,7 @@ def test_schema_v7_adds_research_map_render_strategy(tmp_path: Path):
         """)
         conn.execute(
             "INSERT INTO api_display_policy SELECT id, tool_cards_enabled, "
-            "skill_card_enabled, 7, 'v7-admin', 456.0 FROM api_display_policy_v7"
-        )
+            "skill_card_enabled, 7, 'v7-admin', 456.0 FROM api_display_policy_v7")
         conn.execute("DROP TABLE api_display_policy_v7")
         conn.execute("UPDATE api_schema_meta SET schema_version=7 WHERE id=1")
         conn.commit()
@@ -275,13 +274,45 @@ def test_schema_v7_adds_research_map_render_strategy(tmp_path: Path):
     store.initialize()
     policy = store.get_display_policy()
     assert store.schema_version() == SCHEMA_VERSION
-    assert policy.research_map_render_strategy == "legacy_svg"
+    assert policy.research_map_svg_enabled and policy.research_map_markdown_enabled
+    assert not policy.research_map_mermaid_enabled and not policy.research_map_html_enabled
     assert policy.version == 7 and policy.updated_by == "v7-admin"
+
+
+@pytest.mark.parametrize("strategy, markdown", [
+    ("legacy_svg", True), ("pretty_svg", False), ("pretty_svg_markdown", True),
+])
+def test_schema_v8_strategy_migrates_to_v9(tmp_path: Path, strategy: str, markdown: bool):
+    context = StorageContext.openai_api(root_dir=tmp_path / strategy)
+    store = ApiStorageStore(context)
+    store.initialize()
     with store.connect() as conn:
-        columns = {row[1] for row in conn.execute(
-            "PRAGMA table_info(api_display_policy)"
-        ).fetchall()}
-    assert "research_map_render_strategy" in columns
+        conn.execute("ALTER TABLE api_display_policy RENAME TO api_display_policy_v9")
+        conn.execute("""
+            CREATE TABLE api_display_policy (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                tool_cards_enabled INTEGER NOT NULL,
+                skill_card_enabled INTEGER NOT NULL,
+                research_map_render_strategy TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                updated_by TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO api_display_policy VALUES(1, 0, 1, ?, 9, 'v8-admin', 789.0)",
+            (strategy,))
+        conn.execute("DROP TABLE api_display_policy_v9")
+        conn.execute("UPDATE api_schema_meta SET schema_version=8 WHERE id=1")
+        conn.commit()
+    store.initialize()
+    policy = store.get_display_policy()
+    assert policy.research_map_svg_enabled is True
+    assert policy.research_map_markdown_enabled is markdown
+    assert policy.research_map_mermaid_enabled is False
+    assert policy.research_map_html_enabled is False
+    assert policy.version == 9 and policy.updated_by == "v8-admin"
+
 
 def test_policy_upload_limit_validation(tmp_path: Path):
     store = ApiStorageStore(StorageContext.openai_api(root_dir=tmp_path / "api"))

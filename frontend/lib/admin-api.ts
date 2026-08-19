@@ -198,15 +198,13 @@ export async function cleanupWebPaperCache(): Promise<{ deleted: boolean; files:
   return parseResponse(res);
 }
 
-export type ResearchMapRenderStrategy =
-  | "legacy_svg"
-  | "pretty_svg"
-  | "pretty_svg_markdown";
-
 export interface ApiDisplayPolicy {
   tool_cards_enabled: boolean;
   skill_card_enabled: boolean;
-  research_map_render_strategy: ResearchMapRenderStrategy;
+  research_map_svg_enabled: boolean;
+  research_map_mermaid_enabled: boolean;
+  research_map_html_enabled: boolean;
+  research_map_markdown_enabled: boolean;
   version: number;
   updated_by: string;
   updated_at: number;
@@ -269,7 +267,9 @@ export async function updateDisplayPolicy(
   expectedVersion: number,
   changes: Partial<Pick<
     ApiDisplayPolicy,
-    "tool_cards_enabled" | "skill_card_enabled" | "research_map_render_strategy"
+    "tool_cards_enabled" | "skill_card_enabled" | "research_map_svg_enabled"
+    | "research_map_mermaid_enabled" | "research_map_html_enabled"
+    | "research_map_markdown_enabled"
   >>,
 ): Promise<{ policy: ApiDisplayPolicy }> {
   const res = await fetch(`${BASE}/display-policy`, {

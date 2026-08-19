@@ -14,8 +14,9 @@ Beyond L0:
   - multimodal input: content arrays with text / file (downloaded, parsed,
     RAG-indexed) / image_url / input_audio (reserved MediaAdapter, honest
     degradation on the current text-only model);
-  - x_soda.attachments: research reports and vector maps generated this turn
-    are attached as downloadable Markdown/SVG files (stop frame / response top-level);
+  - x_soda.attachments: research-map SVG/HTML/Markdown and other artifacts
+    generated this turn are attached (stop frame / response top-level); Mermaid
+    remains ordinary assistant content rather than an attachment;
   - markdown card emulation: tool results render as compact markdown cards
     (tools/export/cards.py) inserted into delta.content when a tool
     completes, before the final answer — mirroring the self-hosted frontend
@@ -458,7 +459,9 @@ def _usage_of(done_event: dict | None, est_prompt: int = 0, est_completion: int 
 
 def _reports_for(
     request: Request, session, kinds: set[str], *,
-    research_map_render_strategy: str = "legacy_svg",
+    research_map_svg_enabled: bool = True,
+    research_map_html_enabled: bool = False,
+    research_map_markdown_enabled: bool = False,
 ) -> list[dict]:
     if not kinds:
         return []
@@ -466,7 +469,9 @@ def _reports_for(
     return [
         att for rec in write_reports(
             session, kinds,
-            research_map_render_strategy=research_map_render_strategy,
+            research_map_svg_enabled=research_map_svg_enabled,
+            research_map_html_enabled=research_map_html_enabled,
+            research_map_markdown_enabled=research_map_markdown_enabled,
         )
         if (att := _shape_attachment(request, rec)) is not None
     ]
@@ -718,7 +723,7 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 policy = prepared["policy"]
                 thinking_parts: list[str] = []
                 answer_parts: list[str] = []
-                block_parts: list[tuple[str, bool]] = []
+                block_parts: list[tuple[str, bool, str]] = []
                 artifact_kinds: set[str] = set()
                 result_files: list[dict] = []
                 tool_results: list[dict] = []
@@ -742,7 +747,7 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                         answer_parts.append(ev.get("content", ""))
                     elif etype == "skill_loaded" and policy.skill_card_enabled:
                         block_parts.append((render_skill_card(
-                            skill_display_title(str(ev.get("name") or ""))), False))
+                            skill_display_title(str(ev.get("name") or ""))), False, "card"))
                     elif etype == "tool_result":
                         result = ev.get("result") or {}
                         tool = result.get("tool", "")
@@ -760,11 +765,17 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                             line = (render_tool_card(tool, result)
                                     if prepared["cards_allowed"] else "")
                             block_parts.append(
-                                (f"{line}\n\n{table}" if line else table, True))
+                                (f"{line}\n\n{table}" if line else table, True, "table"))
                         elif prepared["cards_allowed"]:
                             card = render_tool_card(tool, result)
                             if card:
-                                block_parts.append((card, False))
+                                block_parts.append((card, False, "card"))
+                        if tool == "research_map" and result.get("status") == "success" \
+                                and policy.research_map_mermaid_enabled:
+                            from tools.export.report import render_research_map_mermaid
+                            mermaid = render_research_map_mermaid(session)
+                            if mermaid:
+                                block_parts.append((mermaid, False, "mermaid"))
                     elif etype == "done":
                         done_event = ev
                     elif etype == "error":
@@ -782,16 +793,21 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 prefix = ""
                 if block_parts:
                     card_share = content_budget * 0.6 if content_budget is not None else None
-                    while block_parts and card_share is not None and \
-                            sum(len(b) for b, _ in block_parts) + 8 > card_share:
-                        for i in range(len(block_parts) - 1, -1, -1):
-                            if not block_parts[i][1]:
-                                block_parts.pop(i)
-                                break
-                        else:
-                            break
-                    if block_parts:
-                        prefix = "\n\n".join(b for b, _ in block_parts) + "\n\n"
+                    selected_blocks: list[str] = []
+                    block_spent = 0
+                    omitted = "研究图谱 Mermaid 正文因 max_tokens 预算不足已整块省略；附件仍按展示策略生成。"
+                    for block, required, kind in block_parts:
+                        candidate = block
+                        if kind == "mermaid" and card_share is not None and \
+                                block_spent + len(candidate) > card_share:
+                            candidate, required = omitted, True
+                        if not required and card_share is not None and \
+                                block_spent + len(candidate) > card_share:
+                            continue
+                        selected_blocks.append(candidate)
+                        block_spent += len(candidate)
+                    if selected_blocks:
+                        prefix = "\n\n".join(selected_blocks) + "\n\n"
                 content = prefix + answer
                 if content_budget is not None and len(content) > content_budget:
                     content = content[:content_budget]
@@ -816,7 +832,9 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 attachments_out = _dedupe_attachments(
                     _reports_for(
                         request, session, artifact_kinds,
-                        research_map_render_strategy=policy.research_map_render_strategy,
+                        research_map_svg_enabled=policy.research_map_svg_enabled,
+                        research_map_html_enabled=policy.research_map_html_enabled,
+                        research_map_markdown_enabled=policy.research_map_markdown_enabled,
                     )
                     + result_files
                     + _extra_attachments(request, session, tool_results)
@@ -979,6 +997,20 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             blocks_emitted = True
             return emit_content(separator + text + "\n\n")
 
+        def emit_mermaid(text: str) -> str:
+            """Emit a complete Mermaid block or a short omission notice."""
+            if not text:
+                return ""
+            notice = "研究图谱 Mermaid 正文因 max_tokens 预算不足已整块省略；附件仍按展示策略生成。"
+            separator_len = 0 if not blocks_emitted else len("\n---\n\n")
+            card_budget = None if content_budget is None else int(content_budget * 0.6)
+            enough_optional = (
+                (card_budget is None or card_spent + len(text) <= card_budget)
+                and (content_budget is None
+                     or content_sent + separator_len + len(text) + 2 <= content_budget)
+            )
+            return emit_block(text) if enough_optional else emit_block(notice, required=True)
+
         def handle(ev: dict) -> str | None:
             nonlocal done_event, finished, terminal_emitted
             etype = ev.get("type")
@@ -1016,16 +1048,22 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 table = (render_search_table(result)
                          if tool == "search_papers" and result.get("status") != "error"
                          and state.get("table_allowed") else None)
+                out = ""
                 if table:
                     line = (render_tool_card(tool, result)
                             if state.get("cards_allowed") else "")
                     block = f"{line}\n\n{table}" if line else table
-                    return emit_block(block, required=True) or None
-                if state.get("cards_allowed"):
+                    out += emit_block(block, required=True)
+                elif state.get("cards_allowed"):
                     card = render_tool_card(tool, result)
                     if card:
-                        return emit_block(card) or None
-                return None
+                        out += emit_block(card)
+                policy = state.get("policy")
+                if tool == "research_map" and result.get("status") == "success" \
+                        and policy is not None and policy.research_map_mermaid_enabled:
+                    from tools.export.report import render_research_map_mermaid
+                    out += emit_mermaid(render_research_map_mermaid(state["session"]))
+                return out or None
             if etype == "done":
                 done_event = ev
                 finished = True
@@ -1127,7 +1165,9 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 attachments_out = _dedupe_attachments(
                     _reports_for(
                         request, session, artifact_kinds,
-                        research_map_render_strategy=state["policy"].research_map_render_strategy,
+                        research_map_svg_enabled=state["policy"].research_map_svg_enabled,
+                        research_map_html_enabled=state["policy"].research_map_html_enabled,
+                        research_map_markdown_enabled=state["policy"].research_map_markdown_enabled,
                     )
                     + result_files
                     + _extra_attachments(request, session, tool_results)

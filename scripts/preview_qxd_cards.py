@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Local visual preview of the 清小搭 (/v1) markdown cards and SVG artifacts.
 
-Renders every card renderer + both SVG generators with representative
+Renders every card renderer + the canonical research-map SVG with representative
 payloads into data/preview/ so the 清小搭-side look can be iterated on
 without a deployment. Development-machine convenience only — never shipped
 or deployed.
@@ -25,7 +25,7 @@ from tools.export.cards import (  # noqa: E402
     render_tool_card,
     skill_display_title,
 )
-from tools.export.report import render_research_map_svg  # noqa: E402
+from tools.export.report import render_pretty_research_map_svg  # noqa: E402
 
 
 def _papers(n, prefix, start_year=2018):
@@ -164,7 +164,7 @@ def main() -> None:
     (out_dir / "qxd_cards_preview.md").write_text(md, encoding="utf-8")
 
     (out_dir / "research_graph_preview.svg").write_text(
-        render_research_map_svg(_Session()), encoding="utf-8")
+        render_pretty_research_map_svg(_Session()), encoding="utf-8")
     census_payload = next(p for k, p in SAMPLES if k == "field_census")
     (out_dir / "field_census_preview.svg").write_text(
         render_field_census_svg(census_payload, title="多模态大模型的高效推理"),

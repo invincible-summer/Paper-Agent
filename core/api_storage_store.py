@@ -16,17 +16,13 @@ from typing import Any, Iterator, Mapping
 
 from core.storage_context import StorageContext, StoragePathError
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 MIN_API_UPLOAD_BYTES = 1 * 1024 * 1024
 MAX_API_UPLOAD_BYTES = 200 * 1024 * 1024
 DEFAULT_API_UPLOAD_BYTES = MAX_API_UPLOAD_BYTES
 
 DISPLAY_POLICY_CACHE_TTL_SECONDS = 5.0
-RESEARCH_MAP_RENDER_STRATEGIES = frozenset({
-    "legacy_svg", "pretty_svg", "pretty_svg_markdown",
-})
-
 
 class ApiStorageError(RuntimeError):
     pass
@@ -44,12 +40,15 @@ class ApiDisplayPolicy:
     delta.content (the mandated search-results table and file attachments
     stay on regardless of this switch).
     skill_card_enabled: emit the in-content skill-loading line.
-    research_map_render_strategy: choose the legacy or optimized SVG artifact
-    set for research maps generated through the /v1 channel.
+    research_map_*_enabled: independently select SVG attachment, Mermaid
+    content, self-contained HTML attachment, and Markdown relation listing.
     """
     tool_cards_enabled: bool = True
     skill_card_enabled: bool = True
-    research_map_render_strategy: str = "legacy_svg"
+    research_map_svg_enabled: bool = True
+    research_map_mermaid_enabled: bool = False
+    research_map_html_enabled: bool = False
+    research_map_markdown_enabled: bool = False
     version: int = 1
     updated_by: str = "bootstrap"
     updated_at: float = 0.0
@@ -283,12 +282,14 @@ CREATE TABLE IF NOT EXISTS api_display_policy (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     tool_cards_enabled INTEGER NOT NULL DEFAULT 1 CHECK (tool_cards_enabled IN (0, 1)),
     skill_card_enabled INTEGER NOT NULL DEFAULT 1 CHECK (skill_card_enabled IN (0, 1)),
-    research_map_render_strategy TEXT NOT NULL DEFAULT 'legacy_svg'
-        CHECK (research_map_render_strategy IN
-               ('legacy_svg', 'pretty_svg', 'pretty_svg_markdown')),
+    research_map_svg_enabled INTEGER NOT NULL DEFAULT 1 CHECK (research_map_svg_enabled IN (0, 1)),
+    research_map_mermaid_enabled INTEGER NOT NULL DEFAULT 0 CHECK (research_map_mermaid_enabled IN (0, 1)),
+    research_map_html_enabled INTEGER NOT NULL DEFAULT 0 CHECK (research_map_html_enabled IN (0, 1)),
+    research_map_markdown_enabled INTEGER NOT NULL DEFAULT 0 CHECK (research_map_markdown_enabled IN (0, 1)),
     version INTEGER NOT NULL CHECK (version > 0),
     updated_by TEXT NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    CHECK (research_map_svg_enabled + research_map_mermaid_enabled + research_map_html_enabled >= 1)
 );
 
 CREATE TABLE IF NOT EXISTS api_secrets (
@@ -339,12 +340,16 @@ class ApiStorageStore:
                 str(column[1])
                 for column in conn.execute("PRAGMA table_info(api_display_policy)").fetchall()
             }
-            if "preset" in display_columns:
+            new_display_columns = {
+                "research_map_svg_enabled", "research_map_mermaid_enabled",
+                "research_map_html_enabled", "research_map_markdown_enabled",
+            }
+            if not new_display_columns.issubset(display_columns):
                 display_policy_changed = True
-                # v7: one-line status cards replace the preset system. Rebuild the
-                # single-row table, mapping the legacy preset onto one boolean;
-                # the optimistic-lock version is preserved (same policy as v6).
-                conn.execute("ALTER TABLE api_display_policy RENAME TO api_display_policy_v6")
+                # v9 replaces the runtime renderer enum with four independent
+                # booleans. Rebuilding removes the old column and installs the
+                # cross-column "at least one graph" constraint.
+                conn.execute("ALTER TABLE api_display_policy RENAME TO api_display_policy_pre_v9")
                 conn.execute(
                     "CREATE TABLE api_display_policy ("
                     "id INTEGER PRIMARY KEY CHECK (id = 1), "
@@ -352,38 +357,56 @@ class ApiStorageStore:
                     "CHECK (tool_cards_enabled IN (0, 1)), "
                     "skill_card_enabled INTEGER NOT NULL DEFAULT 1 "
                     "CHECK (skill_card_enabled IN (0, 1)), "
-                    "research_map_render_strategy TEXT NOT NULL DEFAULT 'legacy_svg' "
-                    "CHECK (research_map_render_strategy IN "
-                    "('legacy_svg', 'pretty_svg', 'pretty_svg_markdown')), "
+                    "research_map_svg_enabled INTEGER NOT NULL DEFAULT 1 "
+                    "CHECK (research_map_svg_enabled IN (0, 1)), "
+                    "research_map_mermaid_enabled INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK (research_map_mermaid_enabled IN (0, 1)), "
+                    "research_map_html_enabled INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK (research_map_html_enabled IN (0, 1)), "
+                    "research_map_markdown_enabled INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK (research_map_markdown_enabled IN (0, 1)), "
                     "version INTEGER NOT NULL CHECK (version > 0), "
-                    "updated_by TEXT NOT NULL, "
-                    "updated_at REAL NOT NULL)"
+                    "updated_by TEXT NOT NULL, updated_at REAL NOT NULL, "
+                    "CHECK (research_map_svg_enabled + research_map_mermaid_enabled + "
+                    "research_map_html_enabled >= 1))"
                 )
-                conn.execute(
-                    "INSERT INTO api_display_policy(id, tool_cards_enabled, "
-                    "skill_card_enabled, research_map_render_strategy, version, "
-                    "updated_by, updated_at) "
-                    "SELECT id, CASE WHEN preset = 'off' THEN 0 ELSE 1 END, "
-                    "skill_card_enabled, 'legacy_svg', version, updated_by, updated_at "
-                    "FROM api_display_policy_v6"
-                )
-                conn.execute("DROP TABLE api_display_policy_v6")
-                display_columns = {
-                    str(column[1])
-                    for column in conn.execute(
-                        "PRAGMA table_info(api_display_policy)"
-                    ).fetchall()
-                }
-            if "research_map_render_strategy" not in display_columns:
-                display_policy_changed = True
-                # v8: old databases keep the historical renderer until an
-                # administrator explicitly opts into a new attachment style.
-                conn.execute(
-                    "ALTER TABLE api_display_policy ADD COLUMN "
-                    "research_map_render_strategy TEXT NOT NULL DEFAULT 'legacy_svg' "
-                    "CHECK (research_map_render_strategy IN "
-                    "('legacy_svg', 'pretty_svg', 'pretty_svg_markdown'))"
-                )
+                if "preset" in display_columns:
+                    # Pre-v7 presets had no map selector and therefore used the
+                    # historical SVG + Markdown pair.
+                    conn.execute(
+                        "INSERT INTO api_display_policy(id, tool_cards_enabled, "
+                        "skill_card_enabled, research_map_svg_enabled, "
+                        "research_map_mermaid_enabled, research_map_html_enabled, "
+                        "research_map_markdown_enabled, version, updated_by, updated_at) "
+                        "SELECT id, CASE WHEN preset = 'off' THEN 0 ELSE 1 END, "
+                        "skill_card_enabled, 1, 0, 0, 1, version, updated_by, updated_at "
+                        "FROM api_display_policy_pre_v9"
+                    )
+                elif "research_map_render_strategy" in display_columns:
+                    # v8 enum migration: legacy_svg and pretty_svg_markdown
+                    # retain Markdown; pretty_svg remains SVG-only.
+                    conn.execute(
+                        "INSERT INTO api_display_policy(id, tool_cards_enabled, "
+                        "skill_card_enabled, research_map_svg_enabled, "
+                        "research_map_mermaid_enabled, research_map_html_enabled, "
+                        "research_map_markdown_enabled, version, updated_by, updated_at) "
+                        "SELECT id, tool_cards_enabled, skill_card_enabled, 1, 0, 0, "
+                        "CASE WHEN research_map_render_strategy IN "
+                        "('legacy_svg', 'pretty_svg_markdown') THEN 1 ELSE 0 END, "
+                        "version, updated_by, updated_at FROM api_display_policy_pre_v9"
+                    )
+                else:
+                    # v7 databases had the two card toggles only and used the
+                    # historical SVG + Markdown output implicitly.
+                    conn.execute(
+                        "INSERT INTO api_display_policy(id, tool_cards_enabled, "
+                        "skill_card_enabled, research_map_svg_enabled, "
+                        "research_map_mermaid_enabled, research_map_html_enabled, "
+                        "research_map_markdown_enabled, version, updated_by, updated_at) "
+                        "SELECT id, tool_cards_enabled, skill_card_enabled, 1, 0, 0, 1, "
+                        "version, updated_by, updated_at FROM api_display_policy_pre_v9"
+                    )
+                conn.execute("DROP TABLE api_display_policy_pre_v9")
             if previous_version < 4:
                 # v4: public PDF retention is shortened to 3 days. Shrink any
                 # existing rows that were written with the old 30-day policy;
@@ -437,8 +460,10 @@ class ApiStorageStore:
             display_insert = conn.execute(
                 "INSERT OR IGNORE INTO api_display_policy"
                 "(id, tool_cards_enabled, skill_card_enabled, "
-                "research_map_render_strategy, version, updated_by, updated_at) "
-                "VALUES(1, 1, 1, 'legacy_svg', 1, 'bootstrap', ?)",
+                "research_map_svg_enabled, research_map_mermaid_enabled, "
+                "research_map_html_enabled, research_map_markdown_enabled, "
+                "version, updated_by, updated_at) "
+                "VALUES(1, 1, 1, 1, 0, 0, 0, 1, 'bootstrap', ?)",
                 (now,),
             )
             display_policy_changed = display_policy_changed or display_insert.rowcount == 1
@@ -562,12 +587,14 @@ class ApiStorageStore:
     _DISPLAY_COLUMNS = {
         "tool_cards_enabled": "tool_cards_enabled",
         "skill_card_enabled": "skill_card_enabled",
-        "research_map_render_strategy": "research_map_render_strategy",
+        "research_map_svg_enabled": "research_map_svg_enabled",
+        "research_map_mermaid_enabled": "research_map_mermaid_enabled",
+        "research_map_html_enabled": "research_map_html_enabled",
+        "research_map_markdown_enabled": "research_map_markdown_enabled",
     }
 
     def get_display_policy(self) -> ApiDisplayPolicy:
-        """Current display policy; the default when the row is missing
-        (a turn must never fail because of a display-policy read)."""
+        """Current display policy with a five-second single-worker cache."""
         cache_key = str(self.db_path.resolve())
         cached = _display_policy_cache.get(cache_key)
         if cached is not None and time.monotonic() < cached[0]:
@@ -577,13 +604,13 @@ class ApiStorageStore:
         if row is None:
             policy = ApiDisplayPolicy()
         else:
-            strategy = str(row["research_map_render_strategy"] or "legacy_svg")
-            if strategy not in RESEARCH_MAP_RENDER_STRATEGIES:
-                strategy = "legacy_svg"
             policy = ApiDisplayPolicy(
                 tool_cards_enabled=bool(row["tool_cards_enabled"]),
                 skill_card_enabled=bool(row["skill_card_enabled"]),
-                research_map_render_strategy=strategy,
+                research_map_svg_enabled=bool(row["research_map_svg_enabled"]),
+                research_map_mermaid_enabled=bool(row["research_map_mermaid_enabled"]),
+                research_map_html_enabled=bool(row["research_map_html_enabled"]),
+                research_map_markdown_enabled=bool(row["research_map_markdown_enabled"]),
                 version=int(row["version"]),
                 updated_by=str(row["updated_by"]),
                 updated_at=float(row["updated_at"]),
@@ -596,11 +623,8 @@ class ApiStorageStore:
     def update_display_policy(
         self, changes: Mapping[str, Any], *, expected_version: int, updated_by: str
     ) -> ApiDisplayPolicy:
-        """Optimistic-lock update over the toggles and map renderer."""
-        allowed = {
-            "tool_cards_enabled", "skill_card_enabled",
-            "research_map_render_strategy",
-        }
+        """Optimistic-lock partial update over strict boolean display fields."""
+        allowed = set(self._DISPLAY_COLUMNS)
         unknown = set(changes) - allowed
         if unknown:
             raise ValueError(f"unsupported display policy fields: {', '.join(sorted(unknown))}")
@@ -611,31 +635,21 @@ class ApiStorageStore:
             raise ValueError("updated_by must be 1-128 characters")
         current = self.get_display_policy()
         merged = {
-            "tool_cards_enabled": changes.get(
-                "tool_cards_enabled", current.tool_cards_enabled),
-            "skill_card_enabled": changes.get(
-                "skill_card_enabled", current.skill_card_enabled),
-            "research_map_render_strategy": changes.get(
-                "research_map_render_strategy", current.research_map_render_strategy),
+            field: changes.get(field, getattr(current, field))
+            for field in self._DISPLAY_COLUMNS
         }
-        for field in ("tool_cards_enabled", "skill_card_enabled"):
-            if not isinstance(merged[field], bool):
+        for field, value in merged.items():
+            if not isinstance(value, bool):
                 raise ValueError(f"{field} must be a boolean")
-        strategy = merged["research_map_render_strategy"]
-        if not isinstance(strategy, str) or strategy not in RESEARCH_MAP_RENDER_STRATEGIES:
-            raise ValueError(
-                "research_map_render_strategy must be legacy_svg, pretty_svg "
-                "or pretty_svg_markdown"
-            )
+        if not any(merged[field] for field in (
+            "research_map_svg_enabled", "research_map_mermaid_enabled",
+            "research_map_html_enabled",
+        )):
+            raise ValueError("SVG、Mermaid、HTML 至少启用一种研究图谱输出")
         ordered = sorted(changes)
         assignments = [f"{self._DISPLAY_COLUMNS[column]} = ?" for column in ordered]
         now = time.time()
-        params: list[Any] = [
-            (1 if changes[column] else 0)
-            if column in {"tool_cards_enabled", "skill_card_enabled"}
-            else changes[column]
-            for column in ordered
-        ]
+        params: list[Any] = [1 if changes[column] else 0 for column in ordered]
         params.extend([actor, now, expected_version])
         with self.connect() as conn:
             cursor = conn.execute(

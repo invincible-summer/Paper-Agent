@@ -1510,7 +1510,7 @@ async def _tool_export_report(args: dict, session: ChatSession, progress_cb) -> 
         f.setdefault("url", f"/files/{f['fileName']}")
     names = "、".join(f.get("displayName") or f["fileName"] for f in files)
     return ok("export_report",
-              f"已导出 {len(files)} 个 markdown 文件：{names}。把下载链接发给用户。",
+              f"已导出 {len(files)} 个报告文件：{names}。把下载链接发给用户。",
               files=files)
 
 

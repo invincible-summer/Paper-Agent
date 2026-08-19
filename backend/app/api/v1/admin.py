@@ -387,9 +387,10 @@ class DisplayPolicyUpdate(BaseModel):
     expected_version: int = Field(gt=0)
     tool_cards_enabled: bool | None = None
     skill_card_enabled: bool | None = None
-    research_map_render_strategy: Literal[
-        "legacy_svg", "pretty_svg", "pretty_svg_markdown"
-    ] | None = None
+    research_map_svg_enabled: bool | None = None
+    research_map_mermaid_enabled: bool | None = None
+    research_map_html_enabled: bool | None = None
+    research_map_markdown_enabled: bool | None = None
 
     def changes(self) -> dict:
         return self.model_dump(exclude={"expected_version"}, exclude_none=True)

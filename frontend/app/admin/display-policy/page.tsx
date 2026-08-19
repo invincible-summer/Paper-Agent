@@ -10,7 +10,7 @@ import {
 } from "@/components/admin/AdminUI";
 import {
   AdminApiError, getDisplayPolicy, updateDisplayPolicy,
-  type ApiDisplayPolicy, type ResearchMapRenderStrategy,
+  type ApiDisplayPolicy,
 } from "@/lib/admin-api";
 import { useAuthStore } from "@/stores/auth";
 
@@ -35,13 +35,13 @@ const HELP: Record<string, HelpEntry> = {
     ],
   },
   researchMap: {
-    title: "引用关系图谱渲染策略",
+    title: "研究图谱组合输出",
     entries: [
-      ["兼容 SVG（原版）", "保持升级前的 Markdown 研究报告 + 原版静态 SVG 附件，适合旧客户端验证和一键回滚。"],
-      ["美化 SVG（推荐）", "只发送自包含的 image/svg+xml 矢量图；支持无损缩放，不依赖 Mermaid、JavaScript、外部字体或远程资源。"],
-      ["美化 SVG + Markdown", "除美化 SVG 外，再发送一份普通 Markdown 关系清单；即使客户端不预览 SVG，也能阅读论文、引用边和聚合节点明细。"],
-      ["生效范围", "只影响保存后新生成的 /v1 研究地图附件。历史附件与自有 Web 前端的交互式 GenealogyGraph 均不改变。"],
-      ["回滚", "重新选择“兼容 SVG（原版）”并保存即可；OpenAI 请求无需增加任何私有字段。"],
+      ["美化 SVG 附件", "自包含 image/svg+xml 矢量图，可无损缩放，不依赖 Mermaid、JavaScript、外部字体或远程资源。"],
+      ["正文 Mermaid", "实验性正文代码块；清小搭手册不承诺原生 Mermaid 执行，不支持时会显示源码。预算不足时整块省略。"],
+      ["可执行 HTML", "自包含 HTML 下载附件，提供筛选、平移缩放、边切换、详情和聚合节点展开；下载后在浏览器中执行。"],
+      ["附加 Markdown 说明", "独立的普通关系说明附件，包含主题摘要、论文、DOI/来源、引用边和聚合成员，不嵌入 Mermaid。"],
+      ["生效范围", "只影响保存后新生成的 /v1 研究地图；历史附件与自有 Web 前端的 GenealogyGraph 均不改变。"],
     ],
   },
   save: {
@@ -49,34 +49,10 @@ const HELP: Record<string, HelpEntry> = {
     entries: [
       ["乐观锁", "策略带版本号。若其他管理员刚保存过，本页保存会返回 409 冲突——刷新页面拿到最新版本后再修改。"],
       ["重置修改", "放弃当前未保存的改动，回到上次保存（或服务器上）的策略。"],
-      ["默认值", "首次部署默认开启工具状态行和技能行，并使用“兼容 SVG（原版）”，因此升级不会突然改变既有附件。"],
+      ["默认值", "首次部署默认开启工具状态行、技能行和美化 SVG；Mermaid、HTML、Markdown 默认关闭。旧配置会按原有语义迁移。"],
     ],
   },
 };
-
-const RENDER_STRATEGIES: Array<{
-  value: ResearchMapRenderStrategy;
-  label: string;
-  description: string;
-  recommended?: boolean;
-}> = [
-  {
-    value: "legacy_svg",
-    label: "兼容 SVG（原版）",
-    description: "保留原版 SVG 与 Markdown 研究报告；默认值，适合兼容验证与回滚。",
-  },
-  {
-    value: "pretty_svg",
-    label: "美化 SVG",
-    description: "自包含纯矢量图，可缩放且更接近自有前端视觉，不额外发送说明文件。",
-    recommended: true,
-  },
-  {
-    value: "pretty_svg_markdown",
-    label: "美化 SVG + Markdown",
-    description: "同时发送矢量图与论文/引用关系清单，适合下载、复制或 SVG 无法预览时阅读。",
-  },
-];
 
 export default function DisplayPolicyAdminPage() {
   const router = useRouter();
@@ -121,13 +97,32 @@ export default function DisplayPolicyAdminPage() {
     if (draft.skill_card_enabled !== policy.skill_card_enabled) {
       out.skill_card_enabled = draft.skill_card_enabled;
     }
-    if (draft.research_map_render_strategy !== policy.research_map_render_strategy) {
-      out.research_map_render_strategy = draft.research_map_render_strategy;
+    for (const key of [
+      "research_map_svg_enabled", "research_map_mermaid_enabled",
+      "research_map_html_enabled", "research_map_markdown_enabled",
+    ] as const) {
+      if (draft[key] !== policy[key]) out[key] = draft[key];
     }
     return out;
   }, [policy, draft]);
 
   const dirty = Object.keys(changes).length > 0;
+
+  const setMapToggle = (
+    key: "research_map_svg_enabled" | "research_map_mermaid_enabled"
+      | "research_map_html_enabled" | "research_map_markdown_enabled",
+    next: boolean,
+  ) => {
+    if (!draft) return;
+    const candidate = { ...draft, [key]: next };
+    if (!candidate.research_map_svg_enabled && !candidate.research_map_mermaid_enabled
+        && !candidate.research_map_html_enabled) {
+      setError("美化 SVG、正文 Mermaid、可执行 HTML 至少保留一种。");
+      return;
+    }
+    setError("");
+    setDraft(candidate);
+  };
 
   const save = async () => {
     if (!policy || !dirty) return;
@@ -175,41 +170,29 @@ export default function DisplayPolicyAdminPage() {
         </div>
       </AdminSection>
 
-      <AdminSection title="引用关系图谱渲染策略" icon={<ImageIcon className="h-5 w-5 text-accent" />}
-        info={<InfoButton onClick={() => setHelpItem(HELP.researchMap)} label="图谱渲染策略说明" />}>
-        <div className="space-y-3">
+      <AdminSection title="引用关系图谱组合输出" icon={<ImageIcon className="h-5 w-5 text-accent" />}
+        info={<InfoButton onClick={() => setHelpItem(HELP.researchMap)} label="图谱组合输出说明" />}>
+        <div className="space-y-4">
           <p className="text-sm text-muted">
-            仅控制后续 /v1 研究地图的文件附件。三种模式都使用清小搭附件协议；美化模式以
-            <code className="mx-1 rounded bg-surface-hover px-1.5 py-0.5 text-xs">image/svg+xml</code>
-            发送纯矢量图，不假设客户端支持 Mermaid 或可执行 HTML。
+            四个开关彼此独立。美化 SVG、正文 Mermaid、可执行 HTML 中至少启用一种；Markdown
+            是可单独关闭的附加说明，不承担唯一图形展示职责。
           </p>
-          <div className="grid gap-3 md:grid-cols-3">
-            {RENDER_STRATEGIES.map((item) => {
-              const selected = draft.research_map_render_strategy === item.value;
-              return (
-                <button key={item.value} type="button"
-                  aria-pressed={selected}
-                  onClick={() => setDraft({ ...draft, research_map_render_strategy: item.value })}
-                  className={`rounded-xl border p-4 text-left transition-colors ${
-                    selected
-                      ? "border-accent bg-accent/10 ring-1 ring-accent/30"
-                      : "border-border-light bg-surface hover:bg-surface-hover"
-                  }`}>
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="text-sm font-medium text-fg">{item.label}</span>
-                    {item.recommended && (
-                      <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent">推荐</span>
-                    )}
-                  </div>
-                  <p className="mt-2 text-xs leading-5 text-muted">{item.description}</p>
-                </button>
-              );
-            })}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <AdminToggle checked={draft.research_map_svg_enabled} label="美化 SVG 附件"
+              onChange={(next) => setMapToggle("research_map_svg_enabled", next)} />
+            <AdminToggle checked={draft.research_map_mermaid_enabled} label="正文 Mermaid（实验性）"
+              onChange={(next) => setMapToggle("research_map_mermaid_enabled", next)} />
+            <AdminToggle checked={draft.research_map_html_enabled} label="可执行 HTML 附件"
+              onChange={(next) => setMapToggle("research_map_html_enabled", next)} />
+            <AdminToggle checked={draft.research_map_markdown_enabled} label="附加 Markdown 说明"
+              onChange={(next) => setMapToggle("research_map_markdown_enabled", next)} />
           </div>
-          <p className="text-xs text-muted">
-            当前选择：{RENDER_STRATEGIES.find((item) => item.value === draft.research_map_render_strategy)?.label}
-            。保存后从下一轮 /v1 请求开始生效；选择“兼容 SVG（原版）”即可回滚。
-          </p>
+          <div className="grid gap-2 text-xs leading-5 text-muted sm:grid-cols-2">
+            <p>SVG：自包含矢量图；Mermaid：不支持原生执行时显示源码，预算不足会整块省略。</p>
+            <p>HTML：清小搭提供下载卡片，下载后在浏览器执行，不在主站同源页面内联。</p>
+            <p>Markdown：普通关系清单，不嵌 Mermaid，可复制论文、DOI/来源和聚合成员。</p>
+            <p>保存后从下一轮 /v1 请求开始生效；历史附件与 Web 端 GenealogyGraph 不变。</p>
+          </div>
         </div>
       </AdminSection>
     </div>

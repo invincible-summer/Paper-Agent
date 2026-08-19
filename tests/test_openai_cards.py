@@ -21,7 +21,7 @@ from tools.export.cards import (  # noqa: E402
     render_tool_card,
     skill_display_title,
 )
-from tools.export.report import render_research_map_svg  # noqa: E402
+from tools.export.report import render_pretty_research_map_svg  # noqa: E402
 
 
 @pytest.fixture
@@ -278,32 +278,31 @@ def _map_with_counts(n_2024_cluster2: int):
 
 
 def test_research_map_svg_structure_and_legend():
-    svg = render_research_map_svg(_FakeSession(_map_with_counts(2)))
+    svg = render_pretty_research_map_svg(_FakeSession(_map_with_counts(2)))
     assert svg.startswith("<svg")
-    assert "研究谱系 ·" in svg and "3 个主题簇" in svg
+    assert "引用关系图谱 ·" in svg and "3 个主题簇" in svg
     assert "基础模型" in svg and "热点" in svg          # cluster lane labels
-    assert "光环 = 奠基性论文" in svg and "引用关系" in svg  # legend
-    assert "语义相似" in svg
-    # foundational halo + citation-tier radii present
-    assert 'opacity="0.22"' in svg
-    assert 'r="13"' in svg and 'r="10"' in svg and 'r="7"' in svg
+    assert "奠基性论文" in svg and "直接引用" in svg  # legend
+    assert "语义关联" in svg
+    assert 'stroke-dasharray="3 2"' in svg
+    assert 'preserveAspectRatio="xMidYMid meet"' in svg
 
 
 def test_research_map_svg_aggregates_dense_buckets():
-    svg = render_research_map_svg(_FakeSession(_map_with_counts(5)))
+    svg = render_pretty_research_map_svg(_FakeSession(_map_with_counts(5)))
     assert ">+5</text>" in svg          # 5 papers in one (cluster, year) bucket
 
 
 def test_research_map_svg_escapes_titles():
     data = _map_with_counts(1)
     data["graph"]["nodes"][0]["title"] = "<b>注入&测试</b>"
-    svg = render_research_map_svg(_FakeSession(data))
+    svg = render_pretty_research_map_svg(_FakeSession(data))
     assert "<b>注入" not in svg
     assert "&lt;b&gt;注入&amp;测试" in svg
 
 
 def test_research_map_svg_empty_graph():
-    assert render_research_map_svg(_FakeSession({})) == ""
+    assert render_pretty_research_map_svg(_FakeSession({})) == ""
 
 
 def test_generated_svgs_are_valid_xml():
@@ -311,7 +310,7 @@ def test_generated_svgs_are_valid_xml():
     content once broke the whole attachment in Chromium hosts)."""
     import xml.etree.ElementTree as ET
 
-    ET.fromstring(render_research_map_svg(_FakeSession(_map_with_counts(2))))
+    ET.fromstring(render_pretty_research_map_svg(_FakeSession(_map_with_counts(2))))
     census = {
         "yearly": [{"key": 2023, "name": "2023", "count": 900},
                    {"key": 2024, "name": "2024", "count": 1200}],
@@ -333,14 +332,17 @@ def test_display_policy_store_roundtrip(tmp_path):
     assert store.schema_version() == SCHEMA_VERSION
     policy = store.get_display_policy()
     assert policy.tool_cards_enabled and policy.skill_card_enabled
-    assert policy.research_map_render_strategy == "legacy_svg"
+    assert policy.research_map_svg_enabled is True
+    assert policy.research_map_mermaid_enabled is False
+    assert policy.research_map_html_enabled is False
+    assert policy.research_map_markdown_enabled is False
 
     updated = store.update_display_policy(
-        {"tool_cards_enabled": False, "research_map_render_strategy": "pretty_svg"},
+        {"tool_cards_enabled": False, "research_map_html_enabled": True,
+         "research_map_svg_enabled": False},
         expected_version=1, updated_by="tester")
     assert updated.tool_cards_enabled is False and updated.version == 2
-    assert updated.research_map_render_strategy == "pretty_svg"
-    assert store.get_display_policy().tool_cards_enabled is False
+    assert updated.research_map_html_enabled and not updated.research_map_svg_enabled
 
     with pytest.raises(PolicyVersionConflict):
         store.update_display_policy({"skill_card_enabled": False},
@@ -349,13 +351,12 @@ def test_display_policy_store_roundtrip(tmp_path):
         store.update_display_policy({"tool_cards_enabled": "yes"},
                                     expected_version=2, updated_by="tester")
     with pytest.raises(ValueError):
-        store.update_display_policy({"nope": 1}, expected_version=2, updated_by="tester")
-    for invalid in ("", "mermaid", 1, None):
-        with pytest.raises(ValueError):
-            store.update_display_policy(
-                {"research_map_render_strategy": invalid},
-                expected_version=2, updated_by="tester",
-            )
+        store.update_display_policy({"nope": True}, expected_version=2, updated_by="tester")
+    with pytest.raises(ValueError, match="至少"):
+        store.update_display_policy(
+            {"research_map_html_enabled": False, "research_map_svg_enabled": False,
+             "research_map_mermaid_enabled": False},
+            expected_version=2, updated_by="tester")
 
 
 def test_display_policy_cache_expires_and_admin_update_invalidates(tmp_path, monkeypatch):
@@ -371,22 +372,18 @@ def test_display_policy_cache_expires_and_admin_update_invalidates(tmp_path, mon
     first = store.get_display_policy()
 
     with store.connect() as conn:
-        conn.execute(
-            "UPDATE api_display_policy SET research_map_render_strategy='pretty_svg' "
-            "WHERE id=1"
-        )
+        conn.execute("UPDATE api_display_policy SET research_map_html_enabled=1 WHERE id=1")
         conn.commit()
     assert store.get_display_policy() is first
     clock[0] += storage.DISPLAY_POLICY_CACHE_TTL_SECONDS + 0.1
-    assert store.get_display_policy().research_map_render_strategy == "pretty_svg"
+    assert store.get_display_policy().research_map_html_enabled is True
 
     current = store.get_display_policy()
     updated = store.update_display_policy(
-        {"research_map_render_strategy": "pretty_svg_markdown"},
-        expected_version=current.version, updated_by="admin",
-    )
-    assert updated.research_map_render_strategy == "pretty_svg_markdown"
-    assert store.get_display_policy().research_map_render_strategy == "pretty_svg_markdown"
+        {"research_map_markdown_enabled": True},
+        expected_version=current.version, updated_by="admin")
+    assert updated.research_map_markdown_enabled is True
+    assert store.get_display_policy().research_map_markdown_enabled is True
 
 
 @pytest.mark.anyio
@@ -396,36 +393,32 @@ async def test_display_policy_admin_routes(client, monkeypatch):
     got = await client.get("/api/v1/admin/display-policy")
     assert got.status_code == 200
     body = got.json()
-    assert body["policy"]["tool_cards_enabled"] is True
-    assert body["policy"]["skill_card_enabled"] is True
-    assert body["policy"]["research_map_render_strategy"] == "legacy_svg"
-    assert "tools" not in body and "core_tools" not in body
+    assert body["policy"]["research_map_svg_enabled"] is True
+    assert body["policy"]["research_map_mermaid_enabled"] is False
+    assert body["policy"]["research_map_html_enabled"] is False
+    assert body["policy"]["research_map_markdown_enabled"] is False
 
     put = await client.put("/api/v1/admin/display-policy", json={
         "expected_version": body["policy"]["version"],
         "tool_cards_enabled": False, "skill_card_enabled": False,
-        "research_map_render_strategy": "pretty_svg_markdown"})
+        "research_map_svg_enabled": False, "research_map_mermaid_enabled": True,
+        "research_map_html_enabled": True, "research_map_markdown_enabled": True})
     assert put.status_code == 200
     updated = put.json()["policy"]
-    assert updated["tool_cards_enabled"] is False
-    assert updated["skill_card_enabled"] is False
-    assert updated["research_map_render_strategy"] == "pretty_svg_markdown"
+    assert updated["research_map_mermaid_enabled"] is True
+    assert updated["research_map_html_enabled"] is True
+    assert updated["research_map_markdown_enabled"] is True
 
     conflict = await client.put("/api/v1/admin/display-policy", json={
         "expected_version": body["policy"]["version"], "tool_cards_enabled": True})
     assert conflict.status_code == 409
-
     bad_type = await client.put("/api/v1/admin/display-policy", json={
-        "expected_version": updated["version"], "tool_cards_enabled": "yes"})
+        "expected_version": updated["version"], "research_map_svg_enabled": "yes"})
     assert bad_type.status_code == 422
-
-    bad_strategy = await client.put("/api/v1/admin/display-policy", json={
-        "expected_version": updated["version"],
-        "research_map_render_strategy": "mermaid",
-    })
-    assert bad_strategy.status_code == 422
-
+    all_off = await client.put("/api/v1/admin/display-policy", json={
+        "expected_version": updated["version"], "research_map_svg_enabled": False,
+        "research_map_mermaid_enabled": False, "research_map_html_enabled": False})
+    assert all_off.status_code == 422
     extra = await client.put("/api/v1/admin/display-policy", json={
-        "expected_version": updated["version"], "unknown": True,
-    })
+        "expected_version": updated["version"], "unknown": True})
     assert extra.status_code == 422

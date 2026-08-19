@@ -378,7 +378,7 @@ async def test_stream_role_frame_is_first_even_on_immediate_error(client, monkey
 
 
 @pytest.mark.anyio
-async def test_research_map_stream_emits_markdown_and_svg_attachments(client, monkeypatch, tmp_path):
+async def test_research_map_stream_default_emits_svg_attachment(client, monkeypatch, tmp_path):
     import tools.export.report as report
     from core.session_memory import get_memory
 
@@ -413,13 +413,13 @@ async def test_research_map_stream_emits_markdown_and_svg_attachments(client, mo
                                 "messages": [{"role": "user", "content": "生成地图"}]})
     frames = _parse_sse(resp.text)
     attachments = frames[-1]["x_soda"]["attachments"]
-    assert {item["mimeType"] for item in attachments} == {"text/markdown", "image/svg+xml"}
-    assert {item["fileType"] for item in attachments} == {"text", "image"}
+    assert {item["mimeType"] for item in attachments} == {"image/svg+xml"}
+    assert {item["fileType"] for item in attachments} == {"image"}
     assert all(item["fileUrl"].startswith("http://testserver/files/") for item in attachments)
 
 
 @pytest.mark.anyio
-async def test_research_map_nonstream_emits_markdown_and_svg_attachments(client, monkeypatch, tmp_path):
+async def test_research_map_nonstream_default_emits_svg_attachment(client, monkeypatch, tmp_path):
     import tools.export.report as report
     from core.session_memory import get_memory
 
@@ -445,75 +445,84 @@ async def test_research_map_nonstream_emits_markdown_and_svg_attachments(client,
     resp = await _post(client, {"user": "map-attachment-test-nonstream",
                                 "messages": [{"role": "user", "content": "生成地图"}]})
     attachments = resp.json()["x_soda"]["attachments"]
-    assert {item["mimeType"] for item in attachments} == {"text/markdown", "image/svg+xml"}
+    assert {item["mimeType"] for item in attachments} == {"image/svg+xml"}
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("stream", "strategy", "expected_mimes"),
+    ("stream", "changes", "expected_mimes", "has_mermaid"),
     [
-        (True, "legacy_svg", ["text/markdown", "image/svg+xml"]),
-        (False, "pretty_svg", ["image/svg+xml"]),
-        (True, "pretty_svg_markdown", ["text/markdown", "image/svg+xml"]),
+        (True, {"research_map_svg_enabled": True,
+                "research_map_mermaid_enabled": True,
+                "research_map_html_enabled": True,
+                "research_map_markdown_enabled": True},
+         ["text/markdown", "image/svg+xml", "text/html"], True),
+        (False, {"research_map_svg_enabled": False,
+                 "research_map_mermaid_enabled": True,
+                 "research_map_html_enabled": False,
+                 "research_map_markdown_enabled": False}, [], True),
+        (True, {"research_map_svg_enabled": False,
+                "research_map_mermaid_enabled": False,
+                "research_map_html_enabled": True,
+                "research_map_markdown_enabled": True},
+         ["text/markdown", "text/html"], False),
     ],
 )
-async def test_research_map_attachment_strategy_protocol(
-    client, monkeypatch, tmp_path, stream, strategy, expected_mimes,
+async def test_research_map_combination_protocol(
+    client, monkeypatch, tmp_path, stream, changes, expected_mimes, has_mermaid,
 ):
     from core.session_memory import get_memory
 
     get_memory()._store.clear()
-    _set_display_policy(tmp_path, research_map_render_strategy=strategy)
+    _set_display_policy(tmp_path, **changes)
 
     async def map_turn(user_message, session, progress_cb, attachments=None, regenerate=False):
         session.topic = "策略地图"
         session.map_data = {
             "clusters": [{"id": 0, "label": "主题"}], "timeline": [], "landscape": "",
-            "graph": {
-                "nodes": [
-                    {"id": "p1", "title": "P1", "year": 2020, "cluster": 0,
-                     "citation_count": 10, "role": "foundational", "layer": "core"},
-                    {"id": "p2", "title": "P2", "year": 2022, "cluster": 0,
-                     "citation_count": 1, "role": "", "layer": "core"},
-                ],
-                "edges": [{"source": "p2", "target": "p1", "type": "cites"}],
-            },
+            "graph": {"nodes": [
+                {"id": "p1", "title": "P1", "year": 2020, "cluster": 0,
+                 "citation_count": 10, "role": "foundational", "layer": "core"},
+                {"id": "p2", "title": "P2", "year": 2022, "cluster": 0,
+                 "citation_count": 1, "role": "", "layer": "core"},
+            ], "edges": [{"source": "p2", "target": "p1", "type": "cites"}]},
         }
         yield {"type": "tool_result", "result": {
             "tool": "research_map", "status": "success", "data": {}}}
         yield {"type": "answer", "content": "地图完成", "is_delta": True}
         yield {"type": "done", "thinking": "", "answer": "地图完成",
-               "tool_calls": [], "trace_id": "map-strategy", "usage": {
+               "tool_calls": [], "trace_id": "map-combination", "usage": {
                    "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
 
     monkeypatch.setattr(orch, "chat_turn", map_turn)
-    resp = await _post(client, {
-        "stream": stream, "user": f"map-strategy-{stream}-{strategy}",
-        "messages": [{"role": "user", "content": "生成地图"}],
-    })
+    resp = await _post(client, {"stream": stream, "user": f"map-combo-{stream}-{has_mermaid}",
+                                "messages": [{"role": "user", "content": "生成地图"}]})
     if stream:
         assert resp.text.rstrip().endswith("data: [DONE]")
         frames = _parse_sse(resp.text)
         assert sum(frame["choices"][0]["finish_reason"] == "stop" for frame in frames) == 1
-        payload = frames[-1]
+        payload, content = frames[-1], _content_of(frames)
     else:
         payload = resp.json()
-        assert payload["choices"][0]["message"]["content"].endswith("地图完成")
-    attachments = payload["x_soda"]["attachments"]
+        content = payload["choices"][0]["message"]["content"]
+    assert ("```mermaid" in content) is has_mermaid
+    assert content.endswith("地图完成")
+    attachments = payload.get("x_soda", {}).get("attachments", [])
     assert [item["mimeType"] for item in attachments] == expected_mimes
-    assert [item["fileType"] for item in attachments] == [
-        "text" if mime == "text/markdown" else "image" for mime in expected_mimes
-    ]
-    assert all(item["fileUrl"].startswith("http://testserver/files/") for item in attachments)
-
+    assert all(item["mimeType"] != "text/x-mermaid" for item in attachments)
     for item in attachments:
+        expected_type = "image" if item["mimeType"] == "image/svg+xml" else "text"
+        assert item["fileType"] == expected_type
         downloaded = await client.get(item["fileUrl"])
         assert downloaded.status_code == 200
         assert downloaded.headers["content-type"].split(";", 1)[0] == item["mimeType"]
-        if item["mimeType"] == "image/svg+xml" and strategy != "legacy_svg":
+        if item["mimeType"] == "image/svg+xml":
             assert 'preserveAspectRatio="xMidYMid meet"' in downloaded.text
-        if item["mimeType"] == "text/markdown" and strategy == "pretty_svg_markdown":
+        if item["mimeType"] == "text/markdown":
             assert "## 引用与语义关系" in downloaded.text
+        if item["mimeType"] == "text/html":
+            assert "attachment" in downloaded.headers["content-disposition"].lower()
+            assert "Content-Security-Policy" in downloaded.text
 
 
 def test_attachment_shape_encodes_and_deduplicates(monkeypatch):
@@ -976,3 +985,35 @@ async def test_stream_role_frame_precedes_slow_turn_preparation(monkeypatch):
             pass
     assert preparation_started.is_set()
     assert preparation_cancelled.is_set()
+
+@pytest.mark.anyio
+async def test_mermaid_budget_omits_whole_block_and_keeps_answer(client, monkeypatch, tmp_path):
+    from core.session_memory import get_memory
+
+    get_memory()._store.clear()
+    _set_display_policy(tmp_path, research_map_mermaid_enabled=True)
+
+    async def map_turn(user_message, session, progress_cb, attachments=None, regenerate=False):
+        session.topic = "预算地图"
+        session.map_data = {
+            "clusters": [{"id": 0, "label": "主题"}],
+            "graph": {"nodes": [
+                {"id": f"p{i}", "title": "很长的论文标题" * 5, "year": 2000 + i,
+                 "cluster": 0, "citation_count": i, "layer": "core"}
+                for i in range(8)
+            ], "edges": [{"source": f"p{i}", "target": f"p{i - 1}", "type": "cites"}
+                         for i in range(1, 8)]},
+        }
+        yield {"type": "tool_result", "result": {
+            "tool": "research_map", "status": "success", "data": {}}}
+        yield {"type": "answer", "content": "最终回答", "is_delta": True}
+        yield {"type": "done", "thinking": "", "answer": "最终回答",
+               "tool_calls": [], "trace_id": "map-budget", "usage": {}}
+
+    monkeypatch.setattr(orch, "chat_turn", map_turn)
+    resp = await _post(client, {"stream": True, "max_tokens": 30, "user": "map-budget",
+                                "messages": [{"role": "user", "content": "生成地图"}]})
+    content = _content_of(_parse_sse(resp.text))
+    assert "```mermaid" not in content
+    assert "Mermaid 正文因 max_tokens 预算不足已整块省略" in content
+    assert content.endswith("最终回答")

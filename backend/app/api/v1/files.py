@@ -22,6 +22,7 @@ _CONTENT_TYPES = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".tex": "application/x-tex",
     ".svg": "image/svg+xml",
+    ".html": "text/html; charset=utf-8",
 }
 
 

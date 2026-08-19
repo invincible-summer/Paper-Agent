@@ -33,11 +33,11 @@ def _map_session() -> ChatSession:
 def test_research_map_svg_is_portable_and_escaped():
     session = _map_session()
     session.topic = "A & B <graph>"
-    svg = report.render_research_map_svg(session)
+    svg = report.render_pretty_research_map_svg(session)
     assert svg.startswith('<svg xmlns="http://www.w3.org/2000/svg"')
     assert "A &amp; B &lt;graph&gt;" in svg
     assert "Paper One" in svg and "Paper Two" in svg
-    assert "<line" in svg and "<circle" in svg
+    assert "<path" in svg and "<rect" in svg
 
 
 def test_write_reports_emits_markdown_and_svg(tmp_path, monkeypatch):

@@ -284,7 +284,7 @@ Skill = 目录 + `SKILL.md`（YAML frontmatter：name/version/description/**requ
 
 ### 4.7 格式检查与文稿导出（`tools/writing/format_check.py` + `manuscript_export.py`）
 
-`check_format` 同为零 LLM 确定性工具，双模式：纯文本模式（图表编号连续性/正文引用、引用风格混用、GB/T 7714 类型标识命中率、关键词数量、多级标题断号）与 LaTeX 模式（自动识别，查 `\cite` 无参考文献块、`\ref` 无 `\label`、abstract 环境）。`spec` 参数接收用户粘贴的格式要求原文，关键词规则引擎映射可文本化检查项（摘要字数/关键词个数/正文规模/GB/T 7714）逐条对照；字体/行距/页边距等排版项**诚实降级**为"需 Word/LaTeX 人工核对"清单。`export_manuscript` 把写作产物（初稿/润色稿/修改清单）的 markdown 转为 docx（python-docx：标题/列表/加粗/表格）、tex（ctexart 中文可编译）或 md，写入 `data/exports/`。`GET /files/{filename}` 仅接受 basename 及 `.md/.txt/.docx/.tex` 白名单，使用 `FileResponse` 返回正确 MIME 和 RFC 5987 兼容的 UTF-8 `Content-Disposition`，因此长中文 DOCX 文件名也可直接下载；清小搭渠道经 x_soda 附件通道下发（§7.5）。
+`check_format` 同为零 LLM 确定性工具，双模式：纯文本模式（图表编号连续性/正文引用、引用风格混用、GB/T 7714 类型标识命中率、关键词数量、多级标题断号）与 LaTeX 模式（自动识别，查 `\cite` 无参考文献块、`\ref` 无 `\label`、abstract 环境）。`spec` 参数接收用户粘贴的格式要求原文，关键词规则引擎映射可文本化检查项（摘要字数/关键词个数/正文规模/GB/T 7714）逐条对照；字体/行距/页边距等排版项**诚实降级**为"需 Word/LaTeX 人工核对"清单。`export_manuscript` 把写作产物（初稿/润色稿/修改清单）的 markdown 转为 docx（python-docx：标题/列表/加粗/表格）、tex（ctexart 中文可编译）或 md，写入 `data/exports/`。`GET /files/{filename}` 仅接受 basename 及 `.md/.txt/.docx/.tex/.svg/.html` 白名单，使用 `FileResponse` 返回正确 MIME 和 RFC 5987 兼容的 UTF-8 `Content-Disposition`，因此长中文 DOCX 文件名也可直接下载；清小搭渠道经 x_soda 附件通道下发（§7.5）。
 
 ### 4.4 对话 SSE 事件
 
@@ -416,15 +416,15 @@ HTTP(S) URL 逐 redirect 做 SSRF/公网地址校验并流式写入 0600 temp，
 
 ### 7.5 文件产物输出（`x_soda.attachments`）
 
-本轮成功调用 research_map/write_review 时，`tools/export/report.py` 写入 API 独立 export artifact；research_map 同时产出 Markdown 结构化报告和静态 SVG 谱系图（标题块/彩色簇泳道标签/被引三档节点/奠基光环/`+N` 聚合桶/年份网格/图例，与前端 `GenealogyGraph` 同布局规则），write_review 产出 Markdown。非流式挂响应顶层、流式挂 stop 帧：`{fileUrl, fileName, fileType, mimeType, fileSize}`（4 必填+size，image 类自动补可选 `previewUrl`）。展示名与物理 hash 路径分离，每次导出产生唯一 public alias；fileUrl 由请求 base URL 拼 `/files/{alias}`，清小搭负责转存。`/files` 先解析未过期 API alias，再回退 web exports；过期 API alias 固定 404。此外，`data.files` 型工具结果（export_report / export_manuscript）在当轮同样转换为附件下发——写作产物导出在清小搭侧也是可下载文件卡片。
+本轮成功调用 research_map/write_review 时，`tools/export/report.py` 写入 API 独立 export artifact；research_map 先构建共享的确定性研究图谱视图，再按 `/admin/display-policy` 的四个开关输出美化 SVG、可下载自包含 HTML 和/或 Markdown 关系说明。正文 Mermaid 不进入 artifact，而是在研究地图状态行后、最终回答前作为完整 fenced `flowchart LR` 源码块进入 assistant content。SVG 使用标题块/彩色簇泳道标签/年份分组/奠基与候选标记/`+N` 聚合桶/关系图例，与前端 `GenealogyGraph` 共享节点关系语义；HTML 使用 CSP、内联 CSS/数据/原生 JavaScript，支持筛选、平移缩放、边切换、节点详情和聚合成员展开，下载后才执行。Markdown 列出主题摘要、论文、DOI/来源、引用边和聚合成员且不嵌 Mermaid。非流式附件挂响应顶层，流式只挂唯一 stop 帧：`{fileUrl, fileName, fileType, mimeType, fileSize}`（4 必填+size，image 类自动补可选 `previewUrl`）；展示名与物理 hash 路径分离，每次导出产生唯一 public alias；fileUrl 由请求 base URL 拼 `/files/{alias}`，清小搭负责转存。`/files` 先解析未过期 API alias，再回退 web exports；过期 API alias 固定 404，`.html` 与 SVG 一样受 basename/MIME 白名单保护且以 attachment 下载。此外，`data.files` 型工具结果（export_report / export_manuscript）在当轮同样转换为附件下发——显式 `export_report` 不读取展示策略，固定导出美化 SVG + Markdown。
 
 三类工具结果还会追加**当轮即时附件**（`openai_compat._extra_attachments`，均走同一 export artifact 管道与 24h TTL）：`explain_element` 的图/表裁剪图 PNG（落盘位置按 `settings.reader.assets_dir` 解析，且重新校验该文档属于当前会话的元素 scope，会话隔离红线在附件层二次生效）；`citation_export` 的 `.bib`/`.txt` 引用文件；`field_census` 的纯 SVG 趋势图（年度折线 + 高产作者/机构横条，`tools/export/cards.py::render_field_census_svg`）。
 
-协议边界必须明确：`openai-compatible-agent-integration-guide.md` 只定义正文/推理增量和 `x_soda.attachments`，没有任意 React 工具卡或交互图谱组件协议。因此自有前端的 `SearchResultCard`、`ResearchMapCard`、`GenealogyGraph` 等不能原样出现在清小搭；清小搭接收 Agent 的自然语言总结、一行式工具状态行与检索结果表格（§7.7）、附件文件卡和静态 SVG 图。筛选、缩放、节点详情及“深问这篇”等交互继续由本项目 `/chat` 提供，不发送私有未声明字段冒充兼容能力。
+协议边界必须明确：`openai-compatible-agent-integration-guide.md` 只定义正文/推理增量和 `x_soda.attachments`，没有任意 React 工具卡或交互图谱组件协议。因此自有前端的 `SearchResultCard`、`ResearchMapCard`、`GenealogyGraph` 等不能原样出现在清小搭；清小搭接收 Agent 的自然语言总结、一行式工具状态行与检索结果表格（§7.7）、正文 Mermaid 源码块及附件文件卡。主站内的 `GenealogyGraph` 交互仍只由本项目 `/chat` 提供；可下载 HTML 是普通附件，下载后在独立浏览器页面执行，不发送私有未声明字段冒充兼容能力。
 
 ### 7.6 生命周期、磁盘压力与 API Trace
 
-默认保留：session/upload 7 天、export 24 小时、public PDF 3 天（过期即清理，后续 deep_read 自动重新下载提取）、语义/视觉缓存 90 天、Trace off；API 单文件上限默认 200 MiB。`api_storage_policy.max_upload_bytes` 使用同一乐观锁更新，管理员页面以 MiB 输入并由后端强制校验 1–200 MiB，保存后立即影响后续请求，不删除或重处理既有文件。`state.db` schema 迁移在初始化时进行：v6 用受检 `ALTER TABLE` 为旧库补 `max_upload_bytes` 列和 200 MiB 默认值，v7 重建 `api_display_policy` 为双开关形状，v8 幂等补充研究地图渲染枚举并以 `legacy_svg` 回填旧行（见 §7.7）；均不改变旧 policy 的版本号或冲突语义。
+默认保留：session/upload 7 天、export 24 小时、public PDF 3 天（过期即清理，后续 deep_read 自动重新下载提取）、语义/视觉缓存 90 天、Trace off；API 单文件上限默认 200 MiB。`api_storage_policy.max_upload_bytes` 使用同一乐观锁更新，管理员页面以 MiB 输入并由后端强制校验 1–200 MiB，保存后立即影响后续请求，不删除或重处理既有文件。`state.db` schema 迁移在初始化时进行：v6 用受检 `ALTER TABLE` 为旧库补 `max_upload_bytes` 列和 200 MiB 默认值，v7 重建 `api_display_policy` 为双开关形状，v8 曾加入研究地图渲染枚举，v9 重建该表为四个研究图谱布尔开关（见 §7.7）；迁移均保留旧 policy 的乐观锁版本与审计字段。
 
 hourly cleanup 只在 API 根目录内执行过期、孤立对账和压力清理。75% 清过期并告警；85% 连续清理公共/生成/向量/视觉等可重建数据，不提前删除未过期私有上传；95% 默认 `pause_heavy`（上传、下载、deep_read、OCR、VLM、导出暂停，文字聊天继续），管理员可经预览和二次确认改为 `emergency_evict`；98% 强制暂停文件重任务，不可关闭。in-flight、`protected_until` 和一小时内未完成登记文件受保护。
 
@@ -438,11 +438,18 @@ API Trace 与 web Trace 独立：off 只写匿名请求/错误/Token/耗时聚�
 
 **检索结果规范化表格**：`search_papers` 成功后，通道层用 `render_search_table` 确定性地生成完整论文清单 markdown 表格（列：分层（核心/候选）/标题（截 60 字符、转义管道符）/年份/被引/全文（🟢/🟡/⚪，有 `pdf_url` 时徽章带 PDF 链接）/链接（DOI 优先，无 DOI 取 `urls` 来源页，再无则 —）），与状态行同块插在回答之前。表格是规范化正式输出：由代码保证存在（不依赖模型自觉），不受工具状态行开关控制，仅在 `max_tokens` 派生的 content 预算 < 2000 字符时让位给回答本身；流式路径经 `emit_block(required=True)` 绕过 60% 卡片份额，非流式路径的尾部裁剪只丢弃可选状态行、绝不丢表格块。候选集精简 dict 补带 `doi` 字段以保证链接列数据完整。
 
-策略存于 `data/openai_api/state.db` 的 `api_display_policy` 单行表（schema v8，乐观锁版本并发）：`tool_cards_enabled`（一行式工具状态行开关）、`skill_card_enabled`（正文技能行开关；思考折叠提示始终保留）以及严格枚举 `research_map_render_strategy`。枚举值为 `legacy_svg`、`pretty_svg`、`pretty_svg_markdown`；默认 `legacy_svg`，因此旧部署升级后仍输出既有 Markdown 研究报告 + 原版 SVG。v7 迁移重建旧 preset 表，v8 对缺列数据库执行幂等 `ALTER TABLE` 并回填 `legacy_svg`，两者均保留乐观锁版本。读路径使用进程内 5 秒缓存；管理员更新成功后主动失效缓存，因此下一轮 `/v1` 请求立即看到新策略，读取失败则降级到默认而不让对话回合失败。管理员经 `/api/v1/admin/display-policy`（GET/PUT，复用 `_administrator` 鉴权、严格 Pydantic 枚举与 `expected_version` 乐观锁）和前端 `/admin/display-policy` 页面配置；未知值、空字符串、非字符串与额外字段均返回 422。关闭工具状态行后，思考折叠中的进度提示、检索表格与文件附件均不受影响。
+策略存于 `data/openai_api/state.db` 的 `api_display_policy` 单行表（schema v9，乐观锁版本并发）。除 `tool_cards_enabled`、`skill_card_enabled` 外，研究图谱使用四个严格布尔字段：`research_map_svg_enabled`、`research_map_mermaid_enabled`、`research_map_html_enabled`、`research_map_markdown_enabled`。后端在合并部分更新后再次校验 SVG / Mermaid / HTML 至少一个为 `true`；Markdown 完全独立。新安装默认仅启用 SVG。v9 迁移保持版本号、更新人和更新时间不变，并按旧策略语义映射：历史兼容输出与“美化 SVG + Markdown”迁为 SVG + Markdown，“美化 SVG”迁为仅 SVG，Mermaid / HTML 均默认关闭。运行时不再接受旧枚举。读路径继续使用进程内 5 秒缓存，管理员更新成功后立即失效；读取失败降级到安全默认而不让对话回合失败。管理 API 使用严格 Pydantic、额外字段拒绝与 `expected_version` 乐观锁，前端也阻止关闭最后一种图形输出。
 
-研究地图附件只在 `/v1` 通道按上述策略选择，Web 通道继续使用 React `GenealogyGraph`，数据结构不变。`legacy_svg` 调用原 `render_research_map_svg()`；`pretty_svg` 调用独立的美化渲染器并只输出一个 SVG；`pretty_svg_markdown` 再输出一份普通 Markdown 关系说明。SVG 仍经 `x_soda.attachments` 发送为 `fileType: image` / `mimeType: image/svg+xml`，Markdown 为 `fileType: text` / `mimeType: text/markdown`；非流式挂响应顶层，流式仅挂唯一 stop 帧并随后发送 `[DONE]`。美化 SVG 是纯矢量、自包含文档：固定坐标系 `viewBox`、`width=100%`、`preserveAspectRatio=xMidYMid meet`，内部样式且无 JavaScript、外部 CSS、外部字体、远程图片或滤镜；标题、主题、年份、DOI 等动态文本全部 XML 转义。布局按主题簇与年份确定性排序，密集 `(主题, 年份)` 桶折叠为聚合节点，主题过多时归并到稳定的“其他主题”泳道，年份标签抽稀；引用/语义边分别使用实线实心箭头和虚线空心箭头，奠基论文、候选层、聚合节点也使用边框/形状而非只靠颜色区分。Markdown 不含 Mermaid，列出图例、主题摘要、论文 DOI/来源、关系边和聚合成员，因此 SVG 无法预览时仍可读。附件继续走 API 私有 export 生命周期与 `/files/{alias}` 公共短期别名，字节不写入 Checkpoint。
+`tools/export/report.py` 先构建共享、确定性的研究图谱视图模型：统一规范主题簇、年份、奠基/候选层、密集桶聚合、边去重和安全文本，然后由所有格式读取同一模型。Web 通道仍使用原有 React `GenealogyGraph`，数据结构与交互不变。`/v1` 可同时输出：
 
-`scripts/preview_qxd_cards.py` 在本地把全部状态行、检索表格与两张 SVG 渲染到 `data/preview/`（gitignored）供部署前目检，不参与部署。
+- **美化 SVG 附件**：`fileType: image` / `mimeType: image/svg+xml`，纯矢量、自包含，固定 `viewBox`、`width=100%`、`preserveAspectRatio=xMidYMid meet`，无 JavaScript、外部 CSS、远程图片或外部字体；动态文本均 XML 转义。
+- **正文 Mermaid**：确定性的 fenced `mermaid` / `flowchart LR` 块，按主题子图组织，引用边为实线、语义边为虚线，使用聚合节点且不生成 `click` 等可执行指令。它在研究地图状态行之后、最终回答之前进入 assistant content 和下一轮回显；标准客户端不渲染时显示源码。该可选块使用 60% content 预算，预算不足时不截断代码块，而替换为一行省略提示。
+- **交互 HTML 附件**：`fileType: text` / `mimeType: text/html`，内联 CSS、JSON 数据和原生 JavaScript，支持平移缩放、主题筛选、引用/语义边切换、节点详情与聚合成员展开。文档包含严格 CSP，不加载 CDN、字体、图片或第三方脚本，不发起网络请求，也不访问 Cookie、localStorage 或后端 API。JSON 使用安全序列化，动态详情通过 `textContent` 写入。`/files` 将 `.html` 加入 MIME 白名单并始终以 `Content-Disposition: attachment` 下载，主站不内联执行。
+- **Markdown 关系说明附件**：`fileType: text` / `mimeType: text/markdown`，包含主题摘要、论文、DOI/来源、引用/语义边与聚合成员，不嵌 Mermaid，可独立开启或关闭。
+
+SVG、HTML、Markdown 附件在非流式响应顶层 `x_soda.attachments` 或流式唯一 stop 帧中出现，随后仍只发送一次 `[DONE]`；Mermaid 从不进入附件。所有 API 文件继续走私有 export 生命周期和短期公共别名，字节不写入 Checkpoint。显式 `export_report` 固定输出美化 SVG + Markdown，不读取管理员展示策略，从而保持 Web 端和主动导出的行为稳定。
+
+`scripts/preview_qxd_cards.py` 在本地把全部状态行、检索表格与 SVG 渲染到 `data/preview/`（gitignored）供部署前目检，不参与部署。
 
 ### 7.8 其他契约
 
