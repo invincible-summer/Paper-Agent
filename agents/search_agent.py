@@ -59,6 +59,13 @@ _UNDERSTAND_TIMEOUT_SECONDS = 10.0
 _SEARCH_TAIL_RESERVE_SECONDS = 8.0
 _PROBE_TAIL_RESERVE_SECONDS = 3.0
 _PROBE_MIN_SECONDS = 2.0
+# With force_fulltext_probe, retrieval/rerank stop at a pre-probe deadline so
+# the probe always gets its slice; this caps how much can be carved out of the
+# retrieval phase on the default 45 s tool budget.
+_FORCE_PROBE_RESERVE_CAP_SECONDS = 12.0
+# Retrieval keeps at least this much on top of the tail reserve even when the
+# forced-probe reservation wants more (tiny tool budgets degrade gracefully).
+_FORCE_PROBE_MIN_RETRIEVAL_SECONDS = 5.0
 
 
 def _lang_instruction(language: str) -> str:
@@ -387,13 +394,34 @@ async def search_agent(state: ResearchState, progress_callback=None, invocation_
     policy = get_paper_search_policy()
     storage_context = state.get("storage_context")
     enabled = [k for k, v in policy.sources.items() if v]
+    # Optional probe-time reservation: with force_fulltext_probe the probe must
+    # run even when slow sources would otherwise eat the whole tool budget, so
+    # retrieval and rerank stop early at a pre-probe deadline instead.
+    force_probe = (policy.force_fulltext_probe and policy.verify_fulltext
+                   and policy.fulltext_verify_timeout_seconds > 0
+                   and policy.paper_fetch_mode != "disabled")
+    probe_reserve = 0.0
+    pre_probe_deadline = deadline
+    if force_probe:
+        probe_reserve = min(
+            float(policy.fulltext_verify_timeout_seconds),
+            _FORCE_PROBE_RESERVE_CAP_SECONDS,
+            max(0.0, remaining_budget() - _SEARCH_TAIL_RESERVE_SECONDS
+                - _FORCE_PROBE_MIN_RETRIEVAL_SECONDS),
+        )
+        pre_probe_deadline = deadline - probe_reserve - _PROBE_TAIL_RESERVE_SECONDS
+        if probe_reserve > 0.0:
+            report(f"已预留 {probe_reserve:.0f} 秒用于全文可获取性探测")
+    retrieval_deadline = deadline - _SEARCH_TAIL_RESERVE_SECONDS
+    if probe_reserve > 0.0:
+        retrieval_deadline = min(retrieval_deadline, pre_probe_deadline)
     try:
         manager = SearchManager(
             enabled_sources=enabled,
             results_per_source=s.search.results_per_source,
             search_deadline_seconds=min(
                 float(policy.search_deadline_seconds),
-                max(5.0, remaining_budget() - _SEARCH_TAIL_RESERVE_SECONDS)),
+                max(5.0, retrieval_deadline - time.monotonic())),
             per_source_timeout_seconds=policy.per_source_timeout_seconds,
             routing_mode=policy.routing_mode,
         )
@@ -407,7 +435,7 @@ async def search_agent(state: ResearchState, progress_callback=None, invocation_
     try:
         all_papers = await manager.search_all(
             plan["queries"], progress_callback=report, route_hints=route_hints,
-            topic=topic, deadline=deadline - _SEARCH_TAIL_RESERVE_SECONDS)
+            topic=topic, deadline=retrieval_deadline)
     except TypeError:
         # Compatibility for injected extension/test managers with the legacy signature.
         all_papers = await manager.search_all(plan["queries"], progress_callback=report)
@@ -429,10 +457,14 @@ async def search_agent(state: ResearchState, progress_callback=None, invocation_
     # short, use the deterministic no-embedding scorer rather than risking
     # that local model loading consumes the outer timeout.
     query_text = f"{plan['research_goal']}\n{topic}"
-    if remaining_budget() >= 6.0:
+    if (remaining_budget() >= 6.0
+            and (probe_reserve <= 0.0 or time.monotonic() < pre_probe_deadline)):
         report("语义相关性重排（本地嵌入）...")
         try:
             rerank_timeout = max(0.1, remaining_budget() - 2.0)
+            if probe_reserve > 0.0:
+                rerank_timeout = min(
+                    rerank_timeout, max(0.1, pre_probe_deadline - time.monotonic()))
             scored = await asyncio.wait_for(
                 run_cpu_bound(rerank_papers, copy.deepcopy(all_papers), query_text),
                 timeout=rerank_timeout,
@@ -474,7 +506,14 @@ async def search_agent(state: ResearchState, progress_callback=None, invocation_
         # outer deadline after retrieval has already succeeded.
         probe_budget = min(float(policy.fulltext_verify_timeout_seconds),
                            remaining_budget() - _PROBE_TAIL_RESERVE_SECONDS)
-        if probe_budget >= _PROBE_MIN_SECONDS:
+        probe_floor = _PROBE_MIN_SECONDS
+        if force_probe and probe_budget < _PROBE_MIN_SECONDS and remaining_budget() > 2.0:
+            # Forced mode keeps a floor: a sub-minimum probe still resolves
+            # cached statuses instantly, so run instead of skipping while any
+            # usable time remains.
+            probe_budget = max(probe_budget, 1.0)
+            probe_floor = 1.0
+        if probe_budget >= probe_floor:
             from tools.pdf.availability import verify_papers_fulltext
 
             report("探测各论文 OA 全文可获取性（只读取 PDF 文件头，不下载全文）...")

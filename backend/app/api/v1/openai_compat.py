@@ -1011,19 +1011,40 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             )
             return emit_block(text) if enough_optional else emit_block(notice, required=True)
 
+        # Clients concatenate delta.reasoning chunks verbatim, so distinct
+        # reasoning segments need explicit separators: model thinking and each
+        # tool module become their own paragraphs, progress notices inside a
+        # module get one line each.
+        last_reasoning_kind: list[str | None] = [None]
+
+        def emit_reasoning(text: str, kind: str) -> str:
+            if not text:
+                return ""
+            last = last_reasoning_kind[0]
+            if last is None:
+                separator = ""
+            elif kind == "thinking":
+                separator = "" if last == "thinking" else "\n\n"
+            elif kind == "module":
+                separator = "\n\n"
+            else:  # "line"
+                separator = "\n" if last in ("module", "line") else "\n\n"
+            last_reasoning_kind[0] = kind
+            return frame({"reasoning": separator + text})
+
         def handle(ev: dict) -> str | None:
             nonlocal done_event, finished, terminal_emitted
             etype = ev.get("type")
             if etype == "thinking" and ev.get("is_delta"):
-                return frame({"reasoning": ev.get("content", "")})
+                return emit_reasoning(ev.get("content", ""), "thinking") or None
             if etype == "answer" and ev.get("is_delta"):
                 return emit_content(ev.get("content", "")) or None
             if etype == "tool_progress":
                 text = str(ev.get("message") or "").strip()
-                return frame({"reasoning": text}) if text else None
+                return emit_reasoning(text, "line") or None
             if etype == "skill_loaded":
                 title = skill_display_title(str(ev.get("name") or ""))
-                out = frame({"reasoning": f"📘 已加载技能《{title}》，按其工作流执行…"})
+                out = emit_reasoning(f"📘 已加载技能《{title}》，按其工作流执行…", "module")
                 policy = state.get("policy")
                 if policy is not None and policy.skill_card_enabled:
                     out += emit_block(render_skill_card(title))
@@ -1032,9 +1053,9 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 name = ev.get("name", "")
                 if name == "use_skill":
                     return None
-                return frame({"reasoning": _tool_progress_text(name, ev.get("args") or {})})
+                return emit_reasoning(_tool_progress_text(name, ev.get("args") or {}), "module") or None
             if etype == "tool_warning":
-                return frame({"reasoning": f"注意：{ev.get('warning', '')}"})
+                return emit_reasoning(f"注意：{ev.get('warning', '')}", "line") or None
             if etype == "tool_result":
                 result = ev.get("result") or {}
                 tool = result.get("tool", "")
@@ -1139,7 +1160,7 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                             "本轮已达到平台交互时限，耗时步骤已安全停止。"
                             "请缩小任务范围或在下一轮继续。"
                         )
-                        yield frame({"reasoning": "已到达本轮时间预算，正在安全收尾…"})
+                        yield emit_reasoning("已到达本轮时间预算，正在安全收尾…", "module")
                         out = emit_content(deadline_text)
                         if out:
                             yield out
@@ -1148,7 +1169,7 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                     if await request.is_disconnected():
                         execution.cancel()
                         break
-                    yield frame({"reasoning": "仍在处理中，请稍候…"})
+                    yield emit_reasoning("仍在处理中，请稍候…", "line")
                     continue
                 if ev is None:
                     break

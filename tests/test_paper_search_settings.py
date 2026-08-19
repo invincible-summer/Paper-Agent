@@ -21,8 +21,24 @@ def test_initial_seed_and_idempotent_read(isolated):
     policy = store.get_paper_search_policy()
     assert policy.sources["core"] is False
     assert policy.search_deadline_seconds == 30
+    assert policy.force_fulltext_probe is True
     again = store.get_paper_search_policy()
     assert again == policy
+
+
+def test_force_fulltext_probe_update_roundtrip(isolated):
+    policy = store.get_paper_search_policy()
+    updated = store.update_paper_search_policy(
+        {"force_fulltext_probe": False},
+        expected_version=policy.version, updated_by="admin",
+    )
+    assert updated.force_fulltext_probe is False
+    assert store.get_paper_search_policy().force_fulltext_probe is False
+    restored = store.update_paper_search_policy(
+        {"force_fulltext_probe": True},
+        expected_version=updated.version, updated_by="admin",
+    )
+    assert restored.force_fulltext_probe is True
 
 
 def test_update_is_immediate_and_optimistically_locked(isolated):
@@ -90,3 +106,5 @@ def test_upgrade_keeps_new_sources_disabled(tmp_path, monkeypatch):
     for source in ("biorxiv","medrxiv","pubmed","datacite","dblp"):
         assert policy.sources[source] is False
     assert policy.routing_mode=="smart"
+    # the ALTER backfill upgrades existing installs to the forced-probe schedule
+    assert policy.force_fulltext_probe is True

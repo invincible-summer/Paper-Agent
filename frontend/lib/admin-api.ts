@@ -290,6 +290,7 @@ export interface PaperSearchPolicy {
   per_source_timeout_seconds: number;
   verify_fulltext: boolean;
   fulltext_verify_timeout_seconds: number;
+  force_fulltext_probe: boolean;
   paper_fetch_mode: PaperFetchMode;
   fetch_policy_disclosure: FetchPolicyDisclosure;
   routing_mode: PaperRoutingMode;
@@ -360,8 +361,8 @@ export async function updatePaperSearchPolicy(
   expectedVersion: number,
   changes: Partial<Pick<PaperSearchPolicy,
     "sources" | "search_deadline_seconds" | "per_source_timeout_seconds" |
-    "verify_fulltext" | "fulltext_verify_timeout_seconds" | "paper_fetch_mode" |
-    "fetch_policy_disclosure" | "routing_mode">>,
+    "verify_fulltext" | "fulltext_verify_timeout_seconds" | "force_fulltext_probe" |
+    "paper_fetch_mode" | "fetch_policy_disclosure" | "routing_mode">>,
 ): Promise<{ policy: PaperSearchPolicy }> {
   const res = await fetch(`${BASE}/paper-search/policy`, {
     method: "PUT",

@@ -451,6 +451,7 @@ class PaperSearchPolicyUpdate(BaseModel):
     per_source_timeout_seconds: int | None = Field(default=None, ge=3, le=30)
     verify_fulltext: bool | None = None
     fulltext_verify_timeout_seconds: int | None = Field(default=None, ge=0, le=30)
+    force_fulltext_probe: bool | None = None
     paper_fetch_mode: Literal["enabled", "explicit_only", "probe_only", "disabled"] | None = None
     fetch_policy_disclosure: Literal["affected_only", "silent"] | None = None
     routing_mode: Literal["smart", "all_enabled"] | None = None
@@ -518,6 +519,7 @@ def _paper_policy_payload() -> dict:
         "per_source_timeout_seconds": 12,
         "verify_fulltext": True,
         "fulltext_verify_timeout_seconds": 30,
+        "force_fulltext_probe": True,
         "paper_fetch_mode": "enabled",
         "fetch_policy_disclosure": "affected_only",
         "routing_mode": "smart",
@@ -543,6 +545,7 @@ def _paper_policy_payload() -> dict:
             "per_source_timeout_seconds": 12,
             "verify_fulltext": True,
             "fulltext_verify_timeout_seconds": 30,
+            "force_fulltext_probe": True,
             "routing_mode": "smart",
         },
         "source_catalog": catalog_rows,

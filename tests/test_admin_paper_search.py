@@ -70,6 +70,18 @@ def test_policy_conflict_returns_409(env):
     assert exc.value.status_code == 409
 
 
+def test_force_fulltext_probe_roundtrip(env):
+    current = asyncio.run(admin_api.get_admin_paper_search_policy(env["admin"]))
+    assert current["policy"]["force_fulltext_probe"] is True
+    assert current["defaults"]["force_fulltext_probe"] is True
+    result = asyncio.run(admin_api.put_admin_paper_search_policy(
+        admin_api.PaperSearchPolicyUpdate(
+            expected_version=current["policy"]["version"], force_fulltext_probe=False),
+        env["admin"]))
+    assert result["policy"]["force_fulltext_probe"] is False
+    assert paper_store.get_paper_search_policy().force_fulltext_probe is False
+
+
 def test_connectivity_can_test_disabled_source(env, monkeypatch):
     version = paper_store.get_paper_search_policy().version
     asyncio.run(admin_api.put_admin_paper_search_policy(

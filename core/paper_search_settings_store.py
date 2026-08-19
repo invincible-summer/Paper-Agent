@@ -40,6 +40,7 @@ class PaperSearchPolicy:
     per_source_timeout_seconds: int = 12
     verify_fulltext: bool = True
     fulltext_verify_timeout_seconds: int = 30
+    force_fulltext_probe: bool = True
     paper_fetch_mode: str = "enabled"
     fetch_policy_disclosure: str = "affected_only"
     routing_mode: str = "smart"
@@ -70,6 +71,7 @@ def _connect() -> sqlite3.Connection:
                per_source_timeout_seconds INTEGER NOT NULL,
                verify_fulltext INTEGER NOT NULL,
                fulltext_verify_timeout_seconds INTEGER NOT NULL,
+               force_fulltext_probe INTEGER NOT NULL DEFAULT 1,
                paper_fetch_mode TEXT NOT NULL,
                fetch_policy_disclosure TEXT NOT NULL,
                routing_mode TEXT NOT NULL DEFAULT 'smart',
@@ -81,6 +83,10 @@ def _connect() -> sqlite3.Connection:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_search_policy)")}
     if "routing_mode" not in columns:
         conn.execute("ALTER TABLE paper_search_policy ADD COLUMN routing_mode TEXT NOT NULL DEFAULT 'smart'")
+    if "force_fulltext_probe" not in columns:
+        # Existing installs upgrade to the forced-probe schedule (the probe used
+        # to be silently dropped whenever retrieval ate the whole budget).
+        conn.execute("ALTER TABLE paper_search_policy ADD COLUMN force_fulltext_probe INTEGER NOT NULL DEFAULT 1")
     # Search itself has an invariant hard cap; older rows could previously hold
     # up to 120 seconds and must not keep five-minute tool turns alive.
     conn.execute("UPDATE paper_search_policy SET search_deadline_seconds = 30 WHERE search_deadline_seconds > 30")
@@ -135,6 +141,7 @@ def _seed() -> PaperSearchPolicy:
             verify_fulltext=bool(getattr(search, "verify_fulltext", True)),
             fulltext_verify_timeout_seconds=int(
                 getattr(search, "fulltext_verify_timeout_seconds", 30)),
+            force_fulltext_probe=bool(getattr(search, "force_fulltext_probe", True)),
         )
     except Exception:  # pragma: no cover - standalone recovery fallback
         return PaperSearchPolicy(sources=source_defaults())
@@ -176,6 +183,7 @@ def _row_to_policy(row) -> PaperSearchPolicy:
         per_source_timeout_seconds=int(row[2]),
         verify_fulltext=bool(row[3]),
         fulltext_verify_timeout_seconds=int(row[4]),
+        force_fulltext_probe=bool(row[11]),
         paper_fetch_mode=str(row[5]) if row[5] in FETCH_MODES else "enabled",
         fetch_policy_disclosure=str(row[6]) if row[6] in DISCLOSURE_MODES else "affected_only",
         routing_mode=str(row[7]) if row[7] in ROUTING_MODES else "smart",
@@ -194,23 +202,26 @@ def get_paper_search_policy() -> PaperSearchPolicy:
         row = conn.execute(
             "SELECT sources_json, search_deadline_seconds, per_source_timeout_seconds, "
             "verify_fulltext, fulltext_verify_timeout_seconds, paper_fetch_mode, "
-            "fetch_policy_disclosure, routing_mode, version, updated_by, updated_at "
+            "fetch_policy_disclosure, routing_mode, version, updated_by, updated_at, "
+            "force_fulltext_probe "
             "FROM paper_search_policy WHERE id = 1"
         ).fetchone()
         if row is None:
             seed = _seed()
             conn.execute(
-                "INSERT INTO paper_search_policy (id, sources_json, search_deadline_seconds, per_source_timeout_seconds, verify_fulltext, fulltext_verify_timeout_seconds, paper_fetch_mode, fetch_policy_disclosure, routing_mode, version, updated_by, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'bootstrap', ?)",
+                "INSERT INTO paper_search_policy (id, sources_json, search_deadline_seconds, per_source_timeout_seconds, verify_fulltext, fulltext_verify_timeout_seconds, paper_fetch_mode, fetch_policy_disclosure, routing_mode, force_fulltext_probe, version, updated_by, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'bootstrap', ?)",
                 (json.dumps(seed.sources, sort_keys=True), seed.search_deadline_seconds,
                  seed.per_source_timeout_seconds, int(seed.verify_fulltext),
                  seed.fulltext_verify_timeout_seconds, seed.paper_fetch_mode,
-                 seed.fetch_policy_disclosure, seed.routing_mode, now),
+                 seed.fetch_policy_disclosure, seed.routing_mode,
+                 int(seed.force_fulltext_probe), now),
             )
             conn.commit()
             row = conn.execute(
                 "SELECT sources_json, search_deadline_seconds, per_source_timeout_seconds, "
                 "verify_fulltext, fulltext_verify_timeout_seconds, paper_fetch_mode, "
-                "fetch_policy_disclosure, routing_mode, version, updated_by, updated_at "
+                "fetch_policy_disclosure, routing_mode, version, updated_by, updated_at, "
+                "force_fulltext_probe "
                 "FROM paper_search_policy WHERE id = 1"
             ).fetchone()
     finally:
@@ -240,8 +251,8 @@ def _validate(policy: PaperSearchPolicy) -> None:
 def update_paper_search_policy(changes: dict, *, expected_version: int, updated_by: str) -> PaperSearchPolicy:
     allowed = {
         "sources", "search_deadline_seconds", "per_source_timeout_seconds",
-        "verify_fulltext", "fulltext_verify_timeout_seconds", "paper_fetch_mode",
-        "fetch_policy_disclosure", "routing_mode",
+        "verify_fulltext", "fulltext_verify_timeout_seconds", "force_fulltext_probe",
+        "paper_fetch_mode", "fetch_policy_disclosure", "routing_mode",
     }
     unknown = sorted(set(changes) - allowed)
     if unknown:
@@ -262,12 +273,14 @@ def update_paper_search_policy(changes: dict, *, expected_version: int, updated_
             """UPDATE paper_search_policy SET sources_json = ?,
                    search_deadline_seconds = ?, per_source_timeout_seconds = ?,
                    verify_fulltext = ?, fulltext_verify_timeout_seconds = ?,
-                   paper_fetch_mode = ?, fetch_policy_disclosure = ?, routing_mode = ?,
+                   force_fulltext_probe = ?, paper_fetch_mode = ?, fetch_policy_disclosure = ?,
+                   routing_mode = ?,
                    version = version + 1, updated_by = ?, updated_at = ?
                WHERE id = 1 AND version = ?""",
             (json.dumps(candidate.sources, sort_keys=True), candidate.search_deadline_seconds,
              candidate.per_source_timeout_seconds, int(candidate.verify_fulltext),
-             candidate.fulltext_verify_timeout_seconds, candidate.paper_fetch_mode,
+             candidate.fulltext_verify_timeout_seconds, int(candidate.force_fulltext_probe),
+             candidate.paper_fetch_mode,
              candidate.fetch_policy_disclosure, candidate.routing_mode, updated_by, candidate.updated_at,
              int(expected_version)),
         )

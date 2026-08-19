@@ -260,6 +260,47 @@ async def test_stream_bridges_internal_progress(client, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_stream_reasoning_paragraph_separators(client, monkeypatch):
+    events = [
+        {"type": "step", "step": "thinking"},
+        {"type": "thinking", "content": "用户想找图结构学习文献，", "is_delta": True},
+        {"type": "thinking", "content": "先检索。", "is_delta": True},
+        {"type": "tool_start", "name": "search_papers", "args": {"topic": "gnn"}},
+        {"type": "tool_progress", "message": "理解研究意图、拆解研究方向..."},
+        {"type": "tool_progress", "message": "  → crossref ok（40 篇，1560ms）"},
+        {"type": "thinking", "content": "检索完成，现在汇报。", "is_delta": True},
+        {"type": "tool_start", "name": "deep_read", "args": {"paper_ids": ["p1"]}},
+        {"type": "tool_progress", "message": "下载 PDF 中..."},
+        {"type": "answer", "content": "结果", "is_delta": True},
+        {"type": "done", "thinking": "", "answer": "结果", "tool_calls": [],
+         "trace_id": "t", "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                                    "total_tokens": 2}},
+    ]
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(events))
+    resp = await _post(client, {"stream": True,
+                                "messages": [{"role": "user", "content": "gnn"}]})
+    reasonings = [
+        f["choices"][0]["delta"].get("reasoning")
+        for f in _parse_sse(resp.text)
+        if f["choices"][0]["delta"].get("reasoning")
+    ]
+    joined = "".join(reasonings)
+    # stream start has no leading separator; continuous thinking stays merged
+    assert joined.startswith("用户想找图结构学习文献，")
+    assert "先检索。" in reasonings[0]
+    # thinking -> tool module opens a new paragraph
+    assert "先检索。\n\n🔎 正在检索：gnn" in joined
+    # progress lines inside one module get one line each
+    assert "🔎 正在检索：gnn…\n理解研究意图、拆解研究方向..." in joined
+    assert "理解研究意图、拆解研究方向...\n→ crossref ok（40 篇，1560ms）" in joined
+    # model thinking resumes in its own paragraph after the module
+    assert "→ crossref ok（40 篇，1560ms）\n\n检索完成，现在汇报。" in joined
+    # the next tool module is again its own paragraph
+    assert "检索完成，现在汇报。\n\n📖 正在深读 1 篇论文…" in joined
+    assert "📖 正在深读 1 篇论文…\n下载 PDF 中..." in joined
+
+
+@pytest.mark.anyio
 async def test_stream_deadline_closes_protocol_and_cancels_producer(
         client, monkeypatch):
     import app.api.v1.openai_compat as compat

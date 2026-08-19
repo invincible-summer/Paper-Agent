@@ -63,6 +63,7 @@ class SearchConfig:
     per_source_timeout_seconds: float = 12.0         # 单条渠道查询时限
     verify_fulltext: bool = True                     # search_papers 探测 OA PDF 文件头
     fulltext_verify_timeout_seconds: float = 30.0    # 全文探测总时限（超时余下=unknown）
+    force_fulltext_probe: bool = True                # 时间不足时仍为探测预留预算（管理员可关）
     fulltext_status_ttl_days: int = 30               # 已验证状态的可复用天数
     sources: dict = field(default_factory=lambda: {
         "openalex": True,

@@ -58,6 +58,7 @@ const HELP: Record<string, HelpEntry> = {
     ["单渠道时限", "一条渠道查询超过该时间后取消，不拖住其他渠道。"],
     ["检索总时限", "可在 10–30 秒内调整；30 秒是硬上限，到期返回已经取得的部分结果。"],
     ["全文探测", "只读取 PDF 文件头，不下载全文；关闭后状态保持待验证。"],
+    ["强制全文探测", "开启后即使时间紧张也会为探测预留预算（最多压缩 12 秒的检索/重排时间），慢源不再把探测挤掉；关闭则回到“剩余时间不足即跳过探测”。探测总量仍受全文探测总时限和工具预算约束。"],
     ["推荐", "云服务器建议单源 12 秒、检索 30 秒、全文探测 30 秒。"],
   ] },
 };
@@ -317,6 +318,12 @@ export default function PaperSearchAdminPage() {
           <div className="flex items-center justify-between rounded-lg border border-border-light px-3 py-2 text-sm">
             <span>检索时验证 OA 全文</span><AdminToggle checked={draft.verify_fulltext} disabled={draft.paper_fetch_mode === "disabled"}
               onChange={(next) => setDraft({ ...draft, verify_fulltext: next })} />
+          </div>
+          <div className="flex items-center justify-between rounded-lg border border-border-light px-3 py-2 text-sm">
+            <span>时间不足时仍强制全文探测</span>
+            <AdminToggle checked={draft.force_fulltext_probe}
+              disabled={!draft.verify_fulltext || draft.paper_fetch_mode === "disabled"}
+              onChange={(next) => setDraft({ ...draft, force_fulltext_probe: next })} />
           </div>
         </div>
         <p className="mt-3 text-xs text-muted">熔断：连续 {data.breaker.threshold} 次明确失败后暂停 {data.breaker.cooldown_seconds} 秒，冷却后自动半开检测；也可在上方渠道卡内手动熔断或提前恢复。检索工具（search_papers）的单次调用总预算在「性能策略」页的工具时限预算中配置。</p>

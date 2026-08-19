@@ -317,8 +317,8 @@ topic (+conception)
 - **数据源与限流**（`tools/search/registry.py`、`tools/search/base.py::RateLimiter`）：来源集中登记协议、许可、路由标签、配置门禁和每轮查询预算。SearchManager 按来源创建一个批处理任务，而不是“来源×查询式”任务；arXiv 单连接/3 秒一次，PubMed 按 NCBI 3/10 RPS，OpenAIRE 按匿名/认证小时额度，其他源使用保守进程级 limiter。共享 `httpx.AsyncClient` 使用 `trust_env=False`。`SearchOutcome` 分别记录真实请求数、限流头、最终域名、重定向以及 queue/connect/read/network 耗时，并区分远端 timeout/429/schema/redirect/challenge 与本地 `local_budget_exhausted`；每源每轮只向熔断器提交一次结果。默认 smart 路由最多 4 个主渠道、2 个兜底渠道，学科、预印本、机构仓储和 dataset/software/report/thesis/DOI 意图使用不同的确定性矩阵。新 bioRxiv/medRxiv 使用官方 metadata API + 本地 FTS5，不抓网页；PubMed/DataCite/DBLP 为元数据源。全文只跟随明确 OA 链接；Crossref/DataCite/PubMed/DBLP 普通链接不构成 PDF 候选。详细许可见根目录 [Official_Paper_Platform_License_Description.md](../Official_Paper_Platform_License_Description.md)。
 - **去重**：DOI 精确 → 标题归一化精确/模糊（Jaccard≥0.95）→ 字段合并（摘要取长、被引取大、来源取并集）。
 - 搜索结果注入 LLM 上下文时用 `<search_results>` 定界标记（数据非指令）。
-- **部分成功优先**：来源 wave 使用同一绝对 deadline；到点取消未完成 task，但保留已完成来源。分层一完成就把核心/候选集发布为 session snapshot，后续全文探测和 SQLite/Chroma 增强都是可跳过步骤；外层 timeout 从 snapshot 组装 partial，而不是把已检索论文作废。
-- **全文状态不算命**：`paper.pdf_url` 只表示“源 API 提供了明确 PDF 候选”，绝不直接当作全文可获取。`tools/pdf/availability.py` 在检索完成前先探测源 PDF，只有源候选实际失败时才惰性查询 Unpaywall，避免对每篇已有直链的论文重复做 DOI 请求；随后只发 Range 请求读取前几 KB，确认 `%PDF-` 文件头，**不下载全文、不跑结构解析**。探测写入 `fulltext_status`（available/unavailable/unknown）到 SQLite `fulltext_status` 表（30 天 TTL，缓存命中免重复探测）。全文探测总预算硬上限 30 秒，且进一步钳制为 `search_papers` 工具预算的剩余时间（剩余不足 2 秒直接跳过探测，状态保持 unknown）。真正的全文下载与解析仍只在 deep_read / ask_papers 按需升级时发生，其结果回写同一状态字段。`research_map` 谱系图节点和前端检索卡片只显示这一已验证状态；unknown 显示“待验证”。
+- **部分成功优先**：来源 wave 使用同一绝对 deadline；到点取消未完成 task，但保留已完成来源。分层一完成就把核心/候选集发布为 session snapshot，后续全文探测和 SQLite/Chroma 增强都是可跳过步骤；外层 timeout 从 snapshot 组装 partial，而不是把已检索论文作废。默认开启的强制探测（`force_fulltext_probe`）会把“探测可跳过”收紧为“尽力必跑”：检索与嵌入重排提前在 pre-probe deadline 收口，为探测预留最多 12 秒。
+- **全文状态不算命**：`paper.pdf_url` 只表示“源 API 提供了明确 PDF 候选”，绝不直接当作全文可获取。`tools/pdf/availability.py` 在检索完成前先探测源 PDF，只有源候选实际失败时才惰性查询 Unpaywall，避免对每篇已有直链的论文重复做 DOI 请求；随后只发 Range 请求读取前几 KB，确认 `%PDF-` 文件头，**不下载全文、不跑结构解析**。探测写入 `fulltext_status`（available/unavailable/unknown）到 SQLite `fulltext_status` 表（30 天 TTL，缓存命中免重复探测）。全文探测总预算硬上限 30 秒，且进一步钳制为 `search_papers` 工具预算的剩余时间（剩余不足 2 秒直接跳过探测，状态保持 unknown；`force_fulltext_probe` 开启时剩余 2 秒以上仍以约 1 秒兜底执行，缓存命中的论文瞬时返回）。真正的全文下载与解析仍只在 deep_read / ask_papers 按需升级时发生，其结果回写同一状态字段。`research_map` 谱系图节点和前端检索卡片只显示这一已验证状态；unknown 显示“待验证”。
 
 ### 5.4 可靠性质检（`tools/search/integrity.py`，确定性 · 零 LLM）
 
@@ -386,7 +386,7 @@ topic (+conception)
 
 ### 7.1 真流式帧序
 
-role 帧 → `delta.reasoning`（provider 原生 reasoning、显式 `<thinking>`、工具调用前说明、带参 emoji 进度文案与 15s 心跳）→ `delta.content`（**Markdown 卡片块** 与 answer 增量，见 §7.7）→ stop 帧（finish_reason=stop/length + usage + x_soda）→ `data: [DONE]`。帧随 agent 事件即时转发（非跑完重放），流式层不改写 provider 原始 reasoning；`use_skill` 的公开工具开始/结果事件仍被忽略，但技能**新加载**成功会触发专用 `skill_loaded` 内部事件（只携带技能名），`/v1` 通道将其同时映射为思考折叠提示（`📘 已加载技能《标题》，按其工作流执行…`）与正文技能行（`━━ 📘 技能 · 标题 ━━`，可经展示策略关闭），web 通道原样转发该命名事件而前端忽略——自制前端行为不变。未产出内容即失败 → HTTP 5xx；流式中途出错 → stop 帧 + error 字段 + [DONE]。
+role 帧 → `delta.reasoning`（provider 原生 reasoning、显式 `<thinking>`、工具调用前说明、带参 emoji 进度文案与 15s 心跳）→ `delta.content`（**Markdown 卡片块** 与 answer 增量，见 §7.7）→ stop 帧（finish_reason=stop/length + usage + x_soda）→ `data: [DONE]`。帧随 agent 事件即时转发（非跑完重放），流式层不改写 provider 原始 reasoning；reasoning 各段之间由通道插入显式换行分隔（模型思考与每个工具模块之间空一行、模块内每条进度独占一行、思考恢复再起一段），客户端拼接 `delta.reasoning` 后仍是分段排版。`use_skill` 的公开工具开始/结果事件仍被忽略，但技能**新加载**成功会触发专用 `skill_loaded` 内部事件（只携带技能名），`/v1` 通道将其同时映射为思考折叠提示（`📘 已加载技能《标题》，按其工作流执行…`）与正文技能行（`━━ 📘 技能 · 标题 ━━`，可经展示策略关闭），web 通道原样转发该命名事件而前端忽略——自制前端行为不变。未产出内容即失败 → HTTP 5xx；流式中途出错 → stop 帧 + error 字段 + [DONE]。
 
 **alias 一致性不变量**：卡片块与技能行作为 `delta.content` 的一部分进入 `content_parts` 与 `finalize_turn` 的 `final_answer`，保证下一轮 `canonical_message_chain` 与清小搭回传的 assistant 内容逐字一致——否则跨轮会话续接会断裂。卡片与回答共享 `max_tokens*4` 内容预算，且卡片占比被硬性限制在 60% 以内；预算过小（<2000 字符）时直接跳过卡片。
 
@@ -586,7 +586,7 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 `tool_budget_policy` 是 `data/users.db` 中的单行管理员设置（5 秒读缓存、乐观锁、更新立即生效、无需重启），存放每个工具的预算覆盖、未列出工具的默认预算、整轮预留量和 `/v1` 整轮软时限。代码级默认（search_papers/research_map 45s、deep_read 75s、write_review 60s、reading_path 20s、field_census/integrity_sweep 35s、其余 30s、预留量 8s）定义在 `core/tool_budget_store.py::CODE_TOOL_BUDGETS`；单工具解析顺序为显式覆盖 → 代码默认 → 默认预算。`execute_tool` 读取该策略计算 preferred 超时与 `configured/effective/timeout_kind` 统计，策略读取失败回退代码默认。预算可调区间 5–105 秒（105 由清小搭网关 120 秒推导的 /v1 硬时限决定），预留量 2–30 秒，实际生效值 = min(工具预算, 整轮剩余 − 预留量)；超出 /v1 整轮软时限的部分仅在 Web 通道（240/300 秒）生效。管理页 `/admin/performance` 以按用途分组的中文名卡片呈现每个工具（名称、一句话用途、建议上限、代码默认、悬浮说明），并展示工具级熔断状态与一键恢复（`CircuitBreaker.snapshot/force_close`），解决连续 3 次超时后工具被锁 300 秒而管理员无从解除的问题。内部指令加载事件 `use_skill` 不在可调列表中。
 
-`search_papers` 内部各阶段共享同一工具预算而不是各自独立封顶：意图理解 LLM 10 秒子超时（超时回退原始主题平凡计划），检索 deadline = min(管理员检索总时限, 剩余−8s)，全文探测预算 = min(管理员探测时限, 剩余−3s)、剩余不足 2 秒直接跳过。“检索已成功却因后续探测段把整次调用拖过工具预算而作废”由此成为结构性不可能。
+`search_papers` 内部各阶段共享同一工具预算而不是各自独立封顶：意图理解 LLM 10 秒子超时（超时回退原始主题平凡计划），检索 deadline = min(管理员检索总时限, 剩余−8s)，全文探测预算 = min(管理员探测时限, 剩余−3s)、剩余不足 2 秒直接跳过。“检索已成功却因后续探测段把整次调用拖过工具预算而作废”由此成为结构性不可能。默认开启的 `force_fulltext_probe`（`paper_search_policy` 单行表、`/admin/paper-search` 可关）在此之上为探测预留预算：预留量 = min(管理员探测时限, 12 秒上限, 剩余−8−5)，检索与嵌入重排一律不越过 `pre_probe_deadline = 总 deadline − 预留量 − 3s`；探测入口在剩余 2 秒以上但预算不足 2 秒时仍以约 1 秒兜底执行（缓存命中瞬时返回），仅剩余 ≤2 秒才跳过。工具预算过小（<13 秒）时预留量自动收缩为 0，退化为普通钳制行为。
 
 
 ### 四档远程全文访问

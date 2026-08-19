@@ -27,6 +27,7 @@ search:
   per_source_timeout_seconds: 12    # 单条渠道查询时限
   verify_fulltext: true             # 检索时只探测 OA PDF 文件头（不下载全文）
   fulltext_verify_timeout_seconds: 30
+  force_fulltext_probe: true        # 时间不足时仍为全文探测预留预算（管理员可在 /admin/paper-search 关闭）
   fulltext_status_ttl_days: 30
   sources:
     openalex: true
