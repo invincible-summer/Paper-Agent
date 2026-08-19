@@ -467,6 +467,35 @@ class PaperSearchDiagnosticRequest(BaseModel):
 _PAPER_DIAGNOSTIC_SEMAPHORE = __import__("asyncio").Semaphore(1)
 
 
+def _source_suggestion(catalog_row: dict, runtime: dict,
+                       per_source_timeout_seconds: float) -> str:
+    """Circuit/config recommendation for one channel (empty string = healthy)."""
+    config = str(catalog_row.get("configuration_status") or "ready")
+    if config == "missing_api_key":
+        return "尚未配置 API Key：在 .env 补齐并重启后，该渠道才会参与检索。"
+    if config == "missing_contact_email":
+        return "尚未配置联系邮箱（.env 的 PAPER_PLATFORM_CONTACT_EMAIL）：补齐后该渠道才可用。"
+    state = str(runtime.get("state") or "closed")
+    if state == "open":
+        remaining = max(1, round(float(runtime.get("remaining_seconds") or 0)))
+        return f"已熔断，约 {remaining} 秒后自动半开复测；持续失败可临时关闭该渠道开关。"
+    if state == "half_open":
+        return "半开探测中，等待下一次检索结果确认恢复。"
+    error = str(runtime.get("last_error_code") or "")
+    if error == "rate_limited":
+        return "云服务器 IP 被限流：建议配置 API Key（如有）并降低调用频率，反复限流可临时关闭该渠道。"
+    if error in {"timeout", "connection_error"}:
+        return "跨境连接不稳定：可先手动熔断 300 秒再复测，仍失败建议临时关闭该渠道。"
+    if error in {"server_error", "schema_mismatch", "bot_challenge",
+                 "unexpected_redirect", "invalid_response"}:
+        return f"最近一次调用异常（{error}）：建议复测确认，连续 3 次异常会自动熔断。"
+    latency = runtime.get("last_latency_ms")
+    if isinstance(latency, (int, float)) and latency > per_source_timeout_seconds * 1000:
+        return (f"最近延迟 {int(latency)} ms 已超过单渠道时限 {per_source_timeout_seconds:.0f} 秒："
+                "检索时会被本地掐断，建议关闭该渠道或改善网络出口。")
+    return ""
+
+
 def _paper_policy_payload() -> dict:
     from dataclasses import asdict
 
@@ -489,6 +518,16 @@ def _paper_policy_payload() -> dict:
     }
     quick_sources = dict(policy.sources)
     quick_sources.update({"openalex": False, "semantic_scholar": False, "core": False})
+    catalog_rows = source_catalog()
+    catalog_by_id = {row["id"]: row for row in catalog_rows}
+    health = get_search_health_registry()
+    runtime_status = []
+    for name in SOURCE_IDS:
+        state = health.get(name)
+        state["suggestion"] = _source_suggestion(
+            catalog_by_id.get(name, {}), state,
+            per_source_timeout_seconds=float(policy.per_source_timeout_seconds))
+        runtime_status.append(state)
     return {
         "policy": asdict(policy),
         "defaults": defaults,
@@ -500,8 +539,8 @@ def _paper_policy_payload() -> dict:
             "fulltext_verify_timeout_seconds": 30,
             "routing_mode": "smart",
         },
-        "source_catalog": source_catalog(),
-        "runtime_status": [get_search_health_registry().get(name) for name in SOURCE_IDS],
+        "source_catalog": catalog_rows,
+        "runtime_status": runtime_status,
         "breaker": {"threshold": 3, "cooldown_seconds": 300},
     }
 
@@ -611,6 +650,200 @@ async def get_paper_search_diagnostics_latest(
     from core.paper_search_settings_store import get_latest_diagnostics
 
     return await run_cpu_bound(get_latest_diagnostics)
+
+
+class PaperSourceBreakerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    source: str = Field(min_length=1, max_length=40)
+    action: Literal["open", "close"]
+
+
+@router.post("/paper-search/breaker")
+def post_paper_search_breaker(body: PaperSourceBreakerRequest,
+                              authorization: str | None = Header(None)) -> dict:
+    """Manually trip or recover one source's circuit breaker."""
+    _administrator(authorization)
+    from core.paper_search_settings_store import get_paper_search_policy
+    from core.search_source_health import get_search_health_registry
+    from tools.search.registry import SOURCE_IDS
+
+    if body.source not in SOURCE_IDS:
+        raise HTTPException(404, f"未知论文渠道：{body.source}")
+    health = get_search_health_registry()
+    if body.action == "open":
+        health.force_open(body.source)
+    else:
+        health.force_close(body.source)
+    state = health.get(body.source)
+    state["suggestion"] = _source_suggestion(
+        {}, state,
+        per_source_timeout_seconds=float(get_paper_search_policy().per_source_timeout_seconds))
+    return {"source": body.source, "state": state}
+
+# ---------------------------------------------------------------------------
+# Runtime per-tool time budgets (工具时限预算)
+# ---------------------------------------------------------------------------
+
+# Rich admin catalog: labels mirror the chat tool cards
+# (tools/export/cards.py::_TOOL_META) so administrators never face a bare
+# tool id. ``use_skill`` is an internal instruction-loading event and stays
+# out of the tunable list.
+_TOOL_BUDGET_CATALOG: list[dict] = [
+    {"name": "search_papers", "label": "文献检索", "category": "检索与深读",
+     "description": "多源聚合检索论文并探测全文可获取性，含一次意图理解 LLM 调用；跨境网络慢时最耗时的工具，内部各阶段共享本预算。",
+     "recommended_max": 70},
+    {"name": "deep_read", "label": "深度阅读", "category": "检索与深读",
+     "description": "下载并解析 PDF 全文（结构解析/OCR/VLM 元素理解有缓存），生成结构化深读摘要；重任务，预算需要最大。",
+     "recommended_max": 90},
+    {"name": "ask_papers", "label": "论文问答", "category": "检索与深读",
+     "description": "基于会话内论文与 RAG 检索回答问题，可能触发按需全文升级；通常较快。",
+     "recommended_max": 45},
+    {"name": "research_map", "label": "研究地图", "category": "检索与深读",
+     "description": "对会话论文集聚类并构建研究图谱（可选 OpenAlex 引文增强），只处理已检索到的论文。",
+     "recommended_max": 60},
+    {"name": "reading_path", "label": "阅读路径", "category": "检索与深读",
+     "description": "为核心论文规划阅读顺序与依赖关系，以本地计算为主。",
+     "recommended_max": 30},
+    {"name": "write_review", "label": "文献综述", "category": "综述与写作",
+     "description": "撰写结构化文献综述，需要聚合多篇论文摘要并多轮生成，耗时随论文数量增长。",
+     "recommended_max": 75},
+    {"name": "citation_export", "label": "参考文献导出", "category": "导出与引用",
+     "description": "导出 BibTeX 参考文献文件，本地格式化，几乎不耗时。",
+     "recommended_max": 30},
+    {"name": "export_report", "label": "报告导出", "category": "导出与引用",
+     "description": "聚合会话研究成果导出 Markdown/DOCX 报告，含一次整理生成。",
+     "recommended_max": 45},
+    {"name": "export_manuscript", "label": "文稿导出", "category": "导出与引用",
+     "description": "把会话内容整理为 md/docx/tex 稿件并打包导出。",
+     "recommended_max": 45},
+    {"name": "bib_import", "label": "文献库导入", "category": "导出与引用",
+     "description": "解析用户上传的 BibTeX 并导入会话论文库，以本地解析为主。",
+     "recommended_max": 45},
+    {"name": "check_structure", "label": "结构体检", "category": "质量核查",
+     "description": "检查综述/报告的结构完整性，轻量 LLM 调用。",
+     "recommended_max": 30},
+    {"name": "check_format", "label": "格式检查", "category": "质量核查",
+     "description": "按目标期刊/会议格式检查文稿，轻量 LLM 调用。",
+     "recommended_max": 30},
+    {"name": "integrity_sweep", "label": "可靠性质检", "category": "质量核查",
+     "description": "核查综述中每条引文与真实论文的对应关系，需要批量检索校验。",
+     "recommended_max": 45},
+    {"name": "exhibit_index", "label": "图表导览", "category": "图表与领域分析",
+     "description": "为深读过的论文生成图表/公式元素索引（复用深读缓存）。",
+     "recommended_max": 45},
+    {"name": "explain_element", "label": "元素解读", "category": "图表与领域分析",
+     "description": "讲解单个图/表/公式元素，读取已缓存的元素详情，轻量。",
+     "recommended_max": 30},
+    {"name": "field_census", "label": "领域普查", "category": "图表与领域分析",
+     "description": "统计领域逐年发文与主题趋势并绘图，需要多轮检索聚合。",
+     "recommended_max": 45},
+]
+
+
+class ToolBudgetPolicyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_version: int = Field(gt=0)
+    budgets: dict[str, int] | None = None
+    default_budget_seconds: int | None = Field(default=None, ge=5, le=105)
+    reserve_seconds: int | None = Field(default=None, ge=2, le=30)
+
+    def changes(self) -> dict:
+        return self.model_dump(exclude={"expected_version"}, exclude_none=True)
+
+    @model_validator(mode="after")
+    def has_changes(self):
+        if not self.changes():
+            raise ValueError("至少提供一个工具时限修改字段")
+        return self
+
+
+class ToolBreakerRecoverRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    tool: str = Field(min_length=1, max_length=64)
+
+
+def _tool_budget_payload() -> dict:
+    from core.circuit_breaker import get_breaker
+    from core.tool_budget_store import (
+        CODE_TOOL_BUDGETS, get_tool_budget_policy, resolve_tool_budget,
+    )
+
+    policy = get_tool_budget_policy()
+    catalog = []
+    for entry in _TOOL_BUDGET_CATALOG:
+        name = entry["name"]
+        catalog.append({
+            **entry,
+            "default_seconds": float(CODE_TOOL_BUDGETS.get(name, policy.default_budget_seconds)),
+            "current_seconds": resolve_tool_budget(policy, name),
+            "overridden": name in policy.budgets,
+        })
+    return {
+        "policy": {
+            "budgets": dict(policy.budgets),
+            "default_budget_seconds": policy.default_budget_seconds,
+            "reserve_seconds": policy.reserve_seconds,
+            "version": policy.version,
+            "updated_by": policy.updated_by,
+            "updated_at": policy.updated_at,
+        },
+        "catalog": catalog,
+        "limits": {
+            "min_seconds": 5, "max_seconds": 105,
+            "min_reserve": 2, "max_reserve": 30,
+            "gateway_timeout_seconds": 120,
+            "api_turn_soft_seconds": 95, "api_turn_hard_seconds": 105,
+            "web_turn_soft_seconds": 240, "web_turn_hard_seconds": 300,
+        },
+        "breaker": {"threshold": 3, "cooldown_seconds": 300},
+        "breaker_states": get_breaker().snapshot(),
+    }
+
+
+@router.get("/tool-budgets")
+async def get_admin_tool_budgets(authorization: str | None = Header(None)) -> dict:
+    _administrator(authorization)
+    return await run_cpu_bound(_tool_budget_payload)
+
+
+@router.put("/tool-budgets")
+async def put_admin_tool_budgets(body: ToolBudgetPolicyUpdate,
+                                 authorization: str | None = Header(None)) -> dict:
+    admin = _administrator(authorization)
+    from core.tool_budget_store import (
+        ToolBudgetSettingsError, ToolBudgetVersionConflict, update_tool_budget_policy,
+    )
+
+    changes = body.changes()
+    if "budgets" in changes:
+        known = {entry["name"] for entry in _TOOL_BUDGET_CATALOG}
+        unknown = sorted(set(changes["budgets"]) - known)
+        if unknown:
+            raise HTTPException(422, f"未知工具：{', '.join(unknown)}")
+
+    def _update() -> dict:
+        try:
+            update_tool_budget_policy(
+                changes, expected_version=body.expected_version, updated_by=admin["id"])
+        except ToolBudgetVersionConflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        except ToolBudgetSettingsError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return _tool_budget_payload()
+
+    return await run_cpu_bound(_update)
+
+
+@router.post("/tool-budgets/breaker/recover")
+def post_tool_breaker_recover(body: ToolBreakerRecoverRequest,
+                              authorization: str | None = Header(None)) -> dict:
+    _administrator(authorization)
+    from core.circuit_breaker import get_breaker
+
+    breaker = get_breaker()
+    breaker.force_close(body.tool)
+    return {"tool": body.tool, "breaker_states": breaker.snapshot()}
+
 
 # ---------------------------------------------------------------------------
 # Runtime performance policy (startup warmup + research-map citations)

@@ -321,6 +321,7 @@ export interface PaperSourceRuntimeStatus {
   last_latency_ms: number | null;
   last_error_code: string | null;
   last_checked_at: number | null;
+  suggestion?: string;
 }
 
 export interface PaperSearchPolicyResponse {
@@ -386,6 +387,98 @@ export async function getLatestPaperDiagnostics(): Promise<{
 }> {
   const res = await fetch(`${BASE}/paper-search/diagnostics/latest`, {
     headers: authHeaders(), cache: "no-store",
+  });
+  return parseResponse(res);
+}
+
+export async function setPaperSourceBreaker(
+  source: string,
+  action: "open" | "close",
+): Promise<{ source: string; state: PaperSourceRuntimeStatus }> {
+  const res = await fetch(`${BASE}/paper-search/breaker`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ source, action }),
+  });
+  return parseResponse(res);
+}
+
+export interface ToolBudgetCatalogItem {
+  name: string;
+  label: string;
+  category: string;
+  description: string;
+  recommended_max: number;
+  default_seconds: number;
+  current_seconds: number;
+  overridden: boolean;
+}
+
+export interface ToolBudgetPolicyData {
+  budgets: Record<string, number>;
+  default_budget_seconds: number;
+  reserve_seconds: number;
+  version: number;
+  updated_by: string;
+  updated_at: number;
+}
+
+export interface ToolBudgetLimits {
+  min_seconds: number;
+  max_seconds: number;
+  min_reserve: number;
+  max_reserve: number;
+  gateway_timeout_seconds: number;
+  api_turn_soft_seconds: number;
+  api_turn_hard_seconds: number;
+  web_turn_soft_seconds: number;
+  web_turn_hard_seconds: number;
+}
+
+export interface ToolBreakerState {
+  tool: string;
+  state: "closed" | "open" | "half_open";
+  consecutive_failures: number;
+  remaining_seconds: number;
+}
+
+export interface ToolBudgetsResponse {
+  policy: ToolBudgetPolicyData;
+  catalog: ToolBudgetCatalogItem[];
+  limits: ToolBudgetLimits;
+  breaker: { threshold: number; cooldown_seconds: number };
+  breaker_states: Record<string, ToolBreakerState>;
+}
+
+export async function getToolBudgets(): Promise<ToolBudgetsResponse> {
+  const res = await fetch(`${BASE}/tool-budgets`, { headers: authHeaders(), cache: "no-store" });
+  return parseResponse(res);
+}
+
+export async function updateToolBudgets(
+  expectedVersion: number,
+  changes: {
+    budgets?: Record<string, number>;
+    default_budget_seconds?: number;
+    reserve_seconds?: number;
+  },
+): Promise<ToolBudgetsResponse> {
+  const res = await fetch(`${BASE}/tool-budgets`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ expected_version: expectedVersion, ...changes }),
+  });
+  return parseResponse(res);
+}
+
+export async function recoverToolBreaker(tool: string): Promise<{
+  tool: string;
+  breaker_states: Record<string, ToolBreakerState>;
+}> {
+  const res = await fetch(`${BASE}/tool-budgets/breaker/recover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ tool }),
   });
   return parseResponse(res);
 }

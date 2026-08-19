@@ -115,6 +115,29 @@ class SearchSourceHealthRegistry:
             self._states.clear()
             self._half_open_active.clear()
 
+    def force_open(self, source: str, seconds: float | None = None) -> None:
+        """Administrative trip: block this source for ``seconds`` (default
+        one cooldown window). Unlike organic failures this keeps
+        ``consecutive_failures`` untouched so the source recovers cleanly
+        after the window (or an explicit :meth:`force_close`)."""
+        with self._lock:
+            item = self._get(source)
+            item.state = "open"
+            item.open_until = time.time() + (
+                self.cooldown_seconds if seconds is None else max(1.0, float(seconds)))
+            item.last_checked_at = time.time()
+            self._half_open_active.discard(source)
+
+    def force_close(self, source: str) -> None:
+        """Administrative recovery: clear failures and any open window."""
+        with self._lock:
+            item = self._get(source)
+            item.state = "closed"
+            item.consecutive_failures = 0
+            item.open_until = 0.0
+            item.last_checked_at = time.time()
+            self._half_open_active.discard(source)
+
 
 GLOBAL_SEARCH_HEALTH = SearchSourceHealthRegistry()
 

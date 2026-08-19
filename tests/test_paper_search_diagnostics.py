@@ -91,3 +91,45 @@ def test_speed_test_rejects_unsafe_url(monkeypatch):
     result = asyncio.run(diagnostics._speed_test_url("arxiv", "http://127.0.0.1/a.pdf"))
     assert result["status"] == "failed"
     assert result["bytes_read"] == 0
+
+
+def test_connectivity_feeds_source_breaker(monkeypatch):
+    from core.search_source_health import SearchSourceHealthRegistry
+    from tools.search.base import SearchOutcome
+
+    registry = SearchSourceHealthRegistry()
+    monkeypatch.setattr(diagnostics, "get_search_health_registry", lambda: registry)
+
+    class OkBackend:
+        async def search_many(self, queries, limit):
+            return SearchOutcome("arxiv", [Paper(id="P", title="Paper", source="arxiv")],
+                                 "ok", http_status=200, request_count=1)
+
+    monkeypatch.setitem(diagnostics.BACKENDS, "arxiv", OkBackend())
+    rows = asyncio.run(diagnostics.run_connectivity(["arxiv"]))
+    assert rows[0]["status"] == "ok"
+    state = registry.get("arxiv")
+    assert state["state"] == "closed"
+    assert state["last_http_status"] == 200
+    assert state["consecutive_failures"] == 0
+
+    class FailingBackend:
+        async def search(self, query, limit):
+            raise RuntimeError("boom")
+
+    monkeypatch.setitem(diagnostics.BACKENDS, "arxiv", FailingBackend())
+    rows = asyncio.run(diagnostics.run_connectivity(["arxiv"]))
+    assert rows[0]["status"] == "connection_error"
+    state = registry.get("arxiv")
+    assert state["consecutive_failures"] == 1
+    assert state["last_error_code"] == "connection_error"
+
+
+def test_connectivity_skips_auxiliary_targets_in_health(monkeypatch):
+    from core.search_source_health import SearchSourceHealthRegistry
+
+    registry = SearchSourceHealthRegistry()
+    monkeypatch.setattr(diagnostics, "get_search_health_registry", lambda: registry)
+    rows = asyncio.run(diagnostics.run_connectivity(["doi"]))
+    assert rows[0]["source"] == "doi"
+    assert registry.snapshot() == []

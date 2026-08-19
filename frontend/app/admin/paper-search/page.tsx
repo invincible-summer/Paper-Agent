@@ -6,11 +6,11 @@ import {
   Activity, Check, Download, Gauge, Globe2, Loader2, RotateCcw, Save, Search,
 } from "lucide-react";
 import {
-  AdminHeader, AdminSection, AdminToggle, HelpModal, InfoButton, type HelpEntry,
+  AdminHeader, AdminSection, AdminToggle, ConfirmModal, HelpModal, InfoButton, type HelpEntry,
 } from "@/components/admin/AdminUI";
 import {
   AdminApiError, getLatestPaperDiagnostics, getPaperSearchPolicy,
-  runPaperConnectivity, runPaperDownloadTest, updatePaperSearchPolicy,
+  runPaperConnectivity, runPaperDownloadTest, setPaperSourceBreaker, updatePaperSearchPolicy,
   type FetchPolicyDisclosure, type PaperDiagnosticRun, type PaperFetchMode,
   type PaperSearchPolicy, type PaperSearchPolicyResponse,
 } from "@/lib/admin-api";
@@ -95,6 +95,8 @@ export default function PaperSearchAdminPage() {
   const [notice, setNotice] = useState("");
   const [connectSources, setConnectSources] = useState<string[]>([]);
   const [downloadTargets, setDownloadTargets] = useState<string[]>(["arxiv", "unpaywall"]);
+  const [breakerAction, setBreakerAction] = useState<{ source: string; display: string; action: "open" | "close" } | null>(null);
+  const [breakerBusy, setBreakerBusy] = useState(false);
 
   useEffect(() => { void useAuthStore.getState().hydrate(); }, []);
   const handleError = useCallback((err: unknown) => {
@@ -170,6 +172,20 @@ export default function PaperSearchAdminPage() {
     setter(values.includes(value) ? values.filter((item) => item !== value) : [...values, value]);
   };
 
+  const applyBreaker = async () => {
+    if (!breakerAction) return;
+    setBreakerBusy(true); setError(""); setNotice("");
+    try {
+      await setPaperSourceBreaker(breakerAction.source, breakerAction.action);
+      const refreshed = await getPaperSearchPolicy();
+      setData(refreshed);
+      setNotice(breakerAction.action === "open"
+        ? `已手动熔断 ${breakerAction.display}：300 秒内检索将跳过该渠道，可随时提前恢复。`
+        : `已恢复 ${breakerAction.display}：下一次检索会重新尝试该渠道。`);
+      setBreakerAction(null);
+    } catch (err) { handleError(err); } finally { setBreakerBusy(false); }
+  };
+
   if (!checked || loading) return <div className="flex min-h-screen items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>;
   if (!user || user.role !== "administrator") return <div className="p-8 text-center text-muted">仅管理员可访问。</div>;
   if (!data || !policy || !draft) return <div className="p-8 text-center text-error">{error || "设置加载失败"}</div>;
@@ -239,6 +255,16 @@ export default function PaperSearchAdminPage() {
                   <p>同步错误：{String(source.local_index_status.last_error || "无")}</p>
                 </div>}
                 <p className="mt-1 text-xs text-fg-secondary">HTTP {state?.last_http_status ?? "—"} · {state?.last_latency_ms ?? "—"} ms · {state?.last_error_code ? statusText(state.last_error_code) : "无异常"}</p>
+                {state?.suggestion && <p className="mt-1 text-xs text-amber-600">建议：{state.suggestion}</p>}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {state?.state === "open"
+                    ? <button type="button" onClick={() => setBreakerAction({ source: source.id, display: source.display_name, action: "close" })}
+                        title="立即清除熔断状态，下一次检索重新尝试该渠道"
+                        className="rounded-lg border border-accent/40 px-2.5 py-1 text-xs text-accent hover:bg-accent/10">提前恢复</button>
+                    : <button type="button" onClick={() => setBreakerAction({ source: source.id, display: source.display_name, action: "open" })}
+                        title="手动熔断 300 秒：检索将跳过该渠道，用于隔离持续超时或限流的渠道"
+                        className="rounded-lg border border-error/40 px-2.5 py-1 text-xs text-error hover:bg-error/10">熔断 300s</button>}
+                </div>
               </div>
               <AdminToggle checked={enabled} label={`${source.display_name} 检索`}
                 onChange={(next) => setDraft({ ...draft, sources: { ...draft.sources, [source.id]: next } })} />
@@ -293,7 +319,7 @@ export default function PaperSearchAdminPage() {
               onChange={(next) => setDraft({ ...draft, verify_fulltext: next })} />
           </div>
         </div>
-        <p className="mt-3 text-xs text-muted">熔断：连续 {data.breaker.threshold} 次明确失败后暂停 {data.breaker.cooldown_seconds} 秒，冷却后自动半开检测。</p>
+        <p className="mt-3 text-xs text-muted">熔断：连续 {data.breaker.threshold} 次明确失败后暂停 {data.breaker.cooldown_seconds} 秒，冷却后自动半开检测；也可在上方渠道卡内手动熔断或提前恢复。检索工具（search_papers）的单次调用总预算在「性能策略」页的工具时限预算中配置。</p>
       </AdminSection>
 
       <AdminSection title="连通性与真实检索检测" icon={<Activity className="h-5 w-5 text-accent" />}>
@@ -336,6 +362,16 @@ export default function PaperSearchAdminPage() {
       </div>
     </div>
     <HelpModal item={help} onClose={() => setHelp(null)} />
+    {breakerAction && <ConfirmModal
+      title={breakerAction.action === "open" ? "手动熔断渠道" : "恢复渠道"}
+      body={breakerAction.action === "open"
+        ? `确认熔断「${breakerAction.display}」？熔断期间（300 秒）普通检索将跳过该渠道，管理员检测不受影响；可随时点击「提前恢复」。`
+        : `确认恢复「${breakerAction.display}」？下一次检索会立即重新尝试该渠道；若故障未消除，连续失败会再次触发自动熔断。`}
+      danger={breakerAction.action === "open"}
+      confirmLabel={breakerAction.action === "open" ? "确认熔断" : "确认恢复"}
+      busy={breakerBusy}
+      onConfirm={() => void applyBreaker()}
+      onClose={() => setBreakerAction(null)} />}
   </main>;
 }
 

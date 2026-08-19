@@ -51,3 +51,17 @@ def test_fast_429_retry_wait_is_capped(monkeypatch):
 
     asyncio.run(run())
     assert waits == [2.0]
+
+
+def test_force_open_and_force_close(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("core.search_source_health.time.time", lambda: now[0])
+    health = SearchSourceHealthRegistry(threshold=3, cooldown_seconds=10)
+    health.force_open("openalex")
+    allowed, state, remaining = health.allow("openalex")
+    assert not allowed and state == "open" and remaining == 10
+    # A manual trip keeps the failure count untouched: recovery is clean.
+    assert health.get("openalex")["consecutive_failures"] == 0
+    health.force_close("openalex")
+    allowed, state, _ = health.allow("openalex")
+    assert allowed and state == "closed"

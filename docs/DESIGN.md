@@ -296,9 +296,9 @@ Skill = 目录 + `SKILL.md`（YAML frontmatter：name/version/description/**requ
 
 ```
 topic (+conception)
-  → ① 意图理解（1 次 LLM）：还原缩写/短主题 → research_goal
+  → ① 意图理解（1 次 LLM，10 秒子超时，超时回退原始主题）：还原缩写/短主题 → research_goal
       + 2-4 个子方向 × 中英检索式；JSON 容错解析，失败回退 [topic]
-  → ② SearchManager.search_all（启用源 × 查询并发，120s 全局 deadline，去重）
+  → ② SearchManager.search_all（启用源 × 查询并发，deadline = min(管理员检索总时限, 工具预算剩余−8s)，去重）
   → ③ 语义重排 rerank_papers：
       score = 0.55*cos(本地 MiniLM) + 0.20*log被引 + 0.15*时效 + 0.10*token重叠
       嵌入不可用时 0.65*token重叠 + 0.20*log被引 + 0.15*时效（降级链）
@@ -317,7 +317,7 @@ topic (+conception)
 - **数据源与限流**（`tools/search/registry.py`、`tools/search/base.py::RateLimiter`）：来源集中登记协议、许可、路由标签、配置门禁和每轮查询预算。SearchManager 按来源创建一个批处理任务，而不是“来源×查询式”任务；arXiv 单连接/3 秒一次，PubMed 按 NCBI 3/10 RPS，OpenAIRE 按匿名/认证小时额度，其他源使用保守进程级 limiter。共享 `httpx.AsyncClient` 使用 `trust_env=False`。`SearchOutcome` 分别记录真实请求数、限流头、最终域名、重定向以及 queue/connect/read/network 耗时，并区分远端 timeout/429/schema/redirect/challenge 与本地 `local_budget_exhausted`；每源每轮只向熔断器提交一次结果。默认 smart 路由最多 4 个主渠道、2 个兜底渠道，学科、预印本、机构仓储和 dataset/software/report/thesis/DOI 意图使用不同的确定性矩阵。新 bioRxiv/medRxiv 使用官方 metadata API + 本地 FTS5，不抓网页；PubMed/DataCite/DBLP 为元数据源。全文只跟随明确 OA 链接；Crossref/DataCite/PubMed/DBLP 普通链接不构成 PDF 候选。详细许可见根目录 [Official_Paper_Platform_License_Description.md](../Official_Paper_Platform_License_Description.md)。
 - **去重**：DOI 精确 → 标题归一化精确/模糊（Jaccard≥0.95）→ 字段合并（摘要取长、被引取大、来源取并集）。
 - 搜索结果注入 LLM 上下文时用 `<search_results>` 定界标记（数据非指令）。
-- **全文状态不算命**：`paper.pdf_url` 只表示“源 API 提供了明确 PDF 候选”，绝不直接当作全文可获取。`tools/pdf/availability.py` 在检索完成前先探测源 PDF，只有源候选实际失败时才惰性查询 Unpaywall，避免对每篇已有直链的论文重复做 DOI 请求；随后只发 Range 请求读取前几 KB，确认 `%PDF-` 文件头，**不下载全文、不跑结构解析**。探测写入 `fulltext_status`（available/unavailable/unknown）到 SQLite `fulltext_status` 表（30 天 TTL，缓存命中免重复探测）。全文探测总预算硬上限 30 秒。真正的全文下载与解析仍只在 deep_read / ask_papers 按需升级时发生，其结果回写同一状态字段。`research_map` 谱系图节点和前端检索卡片只显示这一已验证状态；unknown 显示“待验证”。
+- **全文状态不算命**：`paper.pdf_url` 只表示“源 API 提供了明确 PDF 候选”，绝不直接当作全文可获取。`tools/pdf/availability.py` 在检索完成前先探测源 PDF，只有源候选实际失败时才惰性查询 Unpaywall，避免对每篇已有直链的论文重复做 DOI 请求；随后只发 Range 请求读取前几 KB，确认 `%PDF-` 文件头，**不下载全文、不跑结构解析**。探测写入 `fulltext_status`（available/unavailable/unknown）到 SQLite `fulltext_status` 表（30 天 TTL，缓存命中免重复探测）。全文探测总预算硬上限 30 秒，且进一步钳制为 `search_papers` 工具预算的剩余时间（剩余不足 2 秒直接跳过探测，状态保持 unknown）。真正的全文下载与解析仍只在 deep_read / ask_papers 按需升级时发生，其结果回写同一状态字段。`research_map` 谱系图节点和前端检索卡片只显示这一已验证状态；unknown 显示“待验证”。
 
 ### 5.4 可靠性质检（`tools/search/integrity.py`，确定性 · 零 LLM）
 
@@ -562,7 +562,14 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 `SearchManager` 从管理员启用的 14 个元数据源中按 smart 路由选取最多 4+2 个渠道（或按管理员要求使用 `all_enabled`），并同时执行单条渠道时限（默认 12 秒）和全局检索硬时限（10–30 秒，默认及上限均为 30 秒）。总时限到达后取消并 drain 未完成任务，保留已返回论文继续去重和重排。主检索后端遇到 429 最多短重试一次，等待上限 2 秒，不再让云数据中心 IP 的持续限流占满整个 turn。
 
-每源维护单 worker 进程内健康状态：连续 3 次 429、超时、连接错误、5xx 或非法响应后熔断 300 秒；冷却后只放行一条 half-open 查询，成功关闭熔断，失败重新打开。HTTP 200 合法空结果、管理员关闭和缺少可选 key 不计入故障。管理员开关优先于熔断，熔断不会永久改写配置。
+每源维护单 worker 进程内健康状态：连续 3 次 429、超时、连接错误、5xx 或非法响应后熔断 300 秒；冷却后只放行一条 half-open 查询，成功关闭熔断，失败重新打开。HTTP 200 合法空结果、管理员关闭和缺少可选 key 不计入故障。管理员开关优先于熔断，熔断不会永久改写配置。管理员连通性检测的真实结果同样回写该健康注册表（辅助目标 unpaywall/doi 除外），因此检测会更新熔断视图；`force_open`/`force_close` 支持在 `/admin/paper-search` 渠道卡上一键手动熔断 300 秒或提前恢复，每渠道还显示综合配置状态、熔断态、最近错误与延迟得出的中文建议文案。
+
+### 运行时工具时限预算
+
+`tool_budget_policy` 是 `data/users.db` 中的单行管理员设置（5 秒读缓存、乐观锁、更新立即生效、无需重启），存放每个工具的预算覆盖、未列出工具的默认预算和整轮预留量。代码级默认（search_papers/research_map 45s、deep_read 75s、write_review 60s、reading_path 20s、field_census/integrity_sweep 35s、其余 30s、预留量 8s）定义在 `core/tool_budget_store.py::CODE_TOOL_BUDGETS`；单工具解析顺序为显式覆盖 → 代码默认 → 默认预算。`execute_tool` 读取该策略计算 preferred 超时与 `configured/effective/timeout_kind` 统计，策略读取失败回退代码默认。预算可调区间 5–105 秒（105 由清小搭网关 120 秒推导的 /v1 硬时限决定），预留量 2–30 秒，实际生效值 = min(工具预算, 整轮剩余 − 预留量)；超出 /v1 整轮软时限的部分仅在 Web 通道（240/300 秒）生效。管理页 `/admin/performance` 以按用途分组的中文名卡片呈现每个工具（名称、一句话用途、建议上限、代码默认、悬浮说明），并展示工具级熔断状态与一键恢复（`CircuitBreaker.snapshot/force_close`），解决连续 3 次超时后工具被锁 300 秒而管理员无从解除的问题。内部指令加载事件 `use_skill` 不在可调列表中。
+
+`search_papers` 内部各阶段共享同一工具预算而不是各自独立封顶：意图理解 LLM 10 秒子超时（超时回退原始主题平凡计划），检索 deadline = min(管理员检索总时限, 剩余−8s)，全文探测预算 = min(管理员探测时限, 剩余−3s)、剩余不足 2 秒直接跳过。“检索已成功却因后续探测段把整次调用拖过工具预算而作废”由此成为结构性不可能。
+
 
 ### 四档远程全文访问
 
@@ -587,4 +594,4 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 研究地图计算一次标题/摘要嵌入并同时用于聚类和语义边；地图簇标签、概述和领域脉络由注册 Prompt 的一次 utility 调用完成，和引文增强并发。所有增强步骤都可失败，结果仍为 success 并包含 `degraded`、各阶段状态、引文状态、缓存命中和 `stage_ms`。地图缓存指纹包含论文 id/标题/年份/引用数/全文状态、Prompt 版本和引文策略；新搜索会清空旧地图。
 
-Web 与 `/v1` 都传递 `TurnExecutionContext`。Web 使用 240 秒软时限和 300 秒硬时限；软时限正常收尾并保存，硬时限取消且不保存半轮历史。OpenAI 保持 95 秒软时限、105 秒硬时限和既有 SSE 帧序。`search_papers`、`research_map` 每轮最多实际开始一次；参数校验失败不占次数，工具耗尽自身预算和整轮剩余预算使用不同 `timeout_kind`，超时文案明确要求本轮不要再次调用该工具。
+Web 与 `/v1` 都传递 `TurnExecutionContext`。Web 使用 240 秒软时限和 300 秒硬时限；软时限正常收尾并保存，硬时限取消且不保存半轮历史。OpenAI 保持 95 秒软时限、105 秒硬时限和既有 SSE 帧序。`search_papers`、`research_map` 每轮最多实际开始一次；参数校验失败不占次数，工具耗尽自身预算和整轮剩余预算使用不同 `timeout_kind`，超时文案明确要求本轮不要再次调用该工具。工具自身预算与整轮预留量不再硬编码，由「运行时工具时限预算」的策略存储管理。

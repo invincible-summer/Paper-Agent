@@ -16,10 +16,12 @@ Pipeline (one LLM call total; reranking is local embeddings, zero API cost):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import re
+import time
 from datetime import datetime
 
 from langchain_core.messages import HumanMessage
@@ -47,6 +49,16 @@ _ABS_TAU = 0.35        # absolute score floor (embedding path)
 _REL_TAU = 0.45        # relative-to-top1 floor
 _ELBOW_DROP = 0.25     # relative score drop that marks the core/candidate cut
 
+# The understand-LLM call is the only stage without its own network budget;
+# a stalled provider must not eat the whole tool budget before retrieval
+# even starts. On timeout the raw topic is used directly.
+_UNDERSTAND_TIMEOUT_SECONDS = 10.0
+# Shares of the tool budget reserved for stages after retrieval (rerank is
+# CPU-bound; the probe stage clamps itself to whatever remains).
+_SEARCH_TAIL_RESERVE_SECONDS = 8.0
+_PROBE_TAIL_RESERVE_SECONDS = 3.0
+_PROBE_MIN_SECONDS = 2.0
+
 
 def _lang_instruction(language: str) -> str:
     return {"zh": "中文", "en": "English"}.get(language, "中英双语")
@@ -55,6 +67,14 @@ def _lang_instruction(language: str) -> str:
 # ---------------------------------------------------------------------------
 # ① Intent understanding
 # ---------------------------------------------------------------------------
+
+def _fallback_plan(topic: str) -> dict:
+    """Trivial plan over the raw topic (understand-LLM failed or timed out)."""
+    return {"research_goal": topic,
+            "sub_directions": [{"name": topic, "queries_en": [topic], "queries_zh": []}],
+            "queries": [topic], "disciplines": [], "query_intents": [],
+            "requested_sources": [], "requires_preprints": False, "requires_datasets": False}
+
 
 def parse_understanding(raw: str, topic: str) -> dict:
     """Tolerantly parse the understand-LLM's JSON output.
@@ -80,10 +100,7 @@ def parse_understanding(raw: str, topic: str) -> dict:
             except Exception:
                 data = None
     if not isinstance(data, dict):
-        return {"research_goal": topic,
-                "sub_directions": [{"name": topic, "queries_en": [topic], "queries_zh": []}],
-                "queries": [topic], "disciplines": [], "query_intents": [],
-                "requested_sources": [], "requires_preprints": False, "requires_datasets": False}
+        return _fallback_plan(topic)
 
     sub_directions = []
     queries: list[str] = []
@@ -321,9 +338,29 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
         if progress_callback:
             progress_callback(msg)
 
+    # All stages share the search_papers tool budget (admin-configurable in
+    # the tool-budget policy store) instead of each stage having its own
+    # worst case: 30 s retrieval + 30 s probing + LLM used to overflow the
+    # 45 s outer budget and void already-retrieved results.
+    started = time.monotonic()
+    try:
+        from core.tool_budget_store import get_tool_budget
+        total_budget = float(get_tool_budget("search_papers"))
+    except Exception:  # pragma: no cover - degraded-storage fallback
+        total_budget = 45.0
+
+    def remaining_budget() -> float:
+        return total_budget - (time.monotonic() - started)
+
     # ① Understand
     report("理解研究意图、拆解研究方向...")
-    plan = await _understand(topic, conception, language)
+    try:
+        plan = await asyncio.wait_for(
+            _understand(topic, conception, language),
+            timeout=_UNDERSTAND_TIMEOUT_SECONDS)
+    except TimeoutError:
+        plan = _fallback_plan(topic)
+        report("意图理解超时，已改用原始主题直接检索")
     state["research_goal"] = plan["research_goal"]
     state["sub_directions"] = plan["sub_directions"]
     state["search_queries"] = plan["queries"]
@@ -339,7 +376,9 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
         manager = SearchManager(
             enabled_sources=enabled,
             results_per_source=s.search.results_per_source,
-            search_deadline_seconds=policy.search_deadline_seconds,
+            search_deadline_seconds=min(
+                float(policy.search_deadline_seconds),
+                max(5.0, remaining_budget() - _SEARCH_TAIL_RESERVE_SECONDS)),
             per_source_timeout_seconds=policy.per_source_timeout_seconds,
             routing_mode=policy.routing_mode,
         )
@@ -387,22 +426,30 @@ async def search_agent(state: ResearchState, progress_callback=None) -> Research
     fulltext_statuses: dict[str, str] = {}
     if (policy.verify_fulltext and policy.fulltext_verify_timeout_seconds > 0
             and policy.paper_fetch_mode != "disabled" and (core or candidates)):
-        from tools.pdf.availability import verify_papers_fulltext
+        # The probe stage is a second network budget; clamp it to the tool
+        # budget still remaining so it can never push the whole call past the
+        # outer deadline after retrieval has already succeeded.
+        probe_budget = min(float(policy.fulltext_verify_timeout_seconds),
+                           remaining_budget() - _PROBE_TAIL_RESERVE_SECONDS)
+        if probe_budget >= _PROBE_MIN_SECONDS:
+            from tools.pdf.availability import verify_papers_fulltext
 
-        report("探测各论文 OA 全文可获取性（只读取 PDF 文件头，不下载全文）...")
-        try:
-            fulltext_statuses = await verify_papers_fulltext(
-                core + candidates,
-                storage_context=storage_context,
-                progress_callback=report,
-                timeout_seconds=policy.fulltext_verify_timeout_seconds,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("fulltext verification degraded to unknown: %s", e)
-        n_avail = sum(v == "available" for v in fulltext_statuses.values())
-        n_unavail = sum(v == "unavailable" for v in fulltext_statuses.values())
-        n_unknown = len(core) + len(candidates) - n_avail - n_unavail
-        report(f"全文探测完成：可获取 {n_avail} · 不可获取 {n_unavail} · 待验证 {n_unknown}")
+            report("探测各论文 OA 全文可获取性（只读取 PDF 文件头，不下载全文）...")
+            try:
+                fulltext_statuses = await verify_papers_fulltext(
+                    core + candidates,
+                    storage_context=storage_context,
+                    progress_callback=report,
+                    timeout_seconds=probe_budget,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("fulltext verification degraded to unknown: %s", e)
+            n_avail = sum(v == "available" for v in fulltext_statuses.values())
+            n_unavail = sum(v == "unavailable" for v in fulltext_statuses.values())
+            n_unknown = len(core) + len(candidates) - n_avail - n_unavail
+            report(f"全文探测完成：可获取 {n_avail} · 不可获取 {n_unavail} · 待验证 {n_unknown}")
+        else:
+            report("剩余时间不足，跳过全文探测（全文状态保持待验证）")
     state["fulltext_statuses"] = fulltext_statuses
 
     # ④.6 Best-effort readable core guarantee. Availability is authoritative

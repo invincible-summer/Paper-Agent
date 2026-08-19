@@ -5,11 +5,24 @@ import asyncio
 import threading
 import time
 
+import pytest
+
 from agents import tools_impl
 from agents.session import ChatSession
 from core.blocking import run_cpu_bound, run_io_bound
 from core.tool_protocol import ErrorCode, ok
 from core.turn_execution import TurnExecutionContext
+
+import core.tool_budget_store as budget_store
+
+
+@pytest.fixture(autouse=True)
+def _isolated_tool_budgets(tmp_path, monkeypatch):
+    """Keep execute_tool's runtime budget reads off any real database."""
+    monkeypatch.setattr(budget_store, "_DB_PATH", tmp_path / "users.db")
+    budget_store.reset_cache()
+    yield
+    budget_store.reset_cache()
 
 
 def test_io_lane_is_not_blocked_by_long_ml_job():

@@ -121,6 +121,29 @@ async def _resolve_fixed_endpoint(url:str,*,timeout:float=12.0)->dict:
     raise ValueError("too_many_redirects")
 
 
+def _note_source_health(items: list[dict]) -> None:
+    """Feed real connectivity outcomes into the per-source breaker registry.
+
+    ``note`` semantics: rate_limited/timeout/connection_error/server_error
+    count as breaker failures, 2xx as success, everything else is a neutral
+    diagnostic. Auxiliary targets (unpaywall/doi) are not retrieval sources
+    and are skipped, as are sources never actually probed (not_configured).
+    """
+    health = get_search_health_registry()
+    for item in items:
+        source = str(item.get("source") or "")
+        if source not in SOURCE_HOSTS or item.get("status") == "not_configured":
+            continue
+        status = item.get("http_status")
+        latency = item.get("latency_ms")
+        health.note(
+            source,
+            status=int(status) if isinstance(status, int) else None,
+            latency_ms=int(latency) if isinstance(latency, (int, float)) else None,
+            error_code=str(item["error_code"]) if item.get("error_code") else None,
+        )
+
+
 async def run_connectivity(sources:list[str]|None=None)->list[dict]:
     selected=_validate_sources(sources); settings=get_settings().search
     async def one(source:str)->dict:
@@ -225,7 +248,10 @@ async def run_connectivity(sources:list[str]|None=None)->list[dict]:
             return {**base,"status":"timeout","latency_ms":int((time.monotonic()-started)*1000),"error_code":"timeout"}
         except Exception:
             return {**base,"status":"connection_error","latency_ms":int((time.monotonic()-started)*1000),"error_code":"connection_error"}
-    return await asyncio.gather(*(one(source) for source in selected))
+    items = await asyncio.gather(*(one(source) for source in selected))
+    _note_source_health(items)
+    return items
+
 async def _candidate_for_target(target: str) -> str | None:
     if target == "doi":
         return "https://doi.org/10.1371/journal.pone.0000308"

@@ -22,21 +22,16 @@ from core.blocking import run_cpu_bound
 from core.circuit_breaker import get_breaker
 from core.llm import ainvoke_utility, get_llm
 from core.models import Paper
+from core.tool_budget_store import CODE_TOOL_BUDGETS, get_tool_budget, get_turn_reserve
 from core.tool_protocol import ErrorCode, ToolResult, err, ok, partial_result
 from core.turn_execution import TurnExecutionContext
 
 logger = logging.getLogger(__name__)
 
 
-_TOOL_BUDGETS: dict[str, float] = {
-    "search_papers": 45.0,
-    "research_map": 45.0,
-    "deep_read": 75.0,
-    "reading_path": 20.0,
-    "write_review": 60.0,
-    "field_census": 35.0,
-    "integrity_sweep": 35.0,
-}
+# Code-level defaults; runtime overrides live in the tool-budget policy store
+# (admin page /admin/performance) and win over these values per tool.
+_TOOL_BUDGETS: dict[str, float] = dict(CODE_TOOL_BUDGETS)
 
 # Compatibility alias for extensions that imported the old private name.
 _API_TOOL_TIMEOUTS = _TOOL_BUDGETS
@@ -160,9 +155,11 @@ async def execute_tool(
     try:
         timeout = None
         timeout_kind = "tool_budget"
+        preferred = _TOOL_BUDGETS.get(name, 30.0)
         if execution_context is not None:
+            preferred = float(get_tool_budget(name))
             timeout, timeout_kind = execution_context.timeout_for(
-                _TOOL_BUDGETS.get(name, 30.0), reserve=8.0)
+                preferred, reserve=float(get_turn_reserve()))
             execution_context.set_phase(f"tool:{name}")
         async with asyncio.timeout(timeout):
             result = await invoke_impl()
@@ -176,13 +173,13 @@ async def execute_tool(
             "当前轮不要再次调用该工具；请直接总结已有结果或在下一轮继续。"
         )
         logger.warning("tool_timeout name=%s timeout_kind=%s configured_timeout_ms=%s effective_timeout_ms=%s",
-                       name, timeout_kind, round(_TOOL_BUDGETS.get(name, 30.0) * 1000),
+                       name, timeout_kind, round(preferred * 1000),
                        round((timeout or 0) * 1000))
         if timeout_kind == "tool_budget":
             breaker.record_failure(name)
         timed_out = err(name, ErrorCode.TIMEOUT, message)
         timed_out.stats = {
-            "configured_timeout_ms": round(_TOOL_BUDGETS.get(name, 30.0) * 1000),
+            "configured_timeout_ms": round(preferred * 1000),
             "effective_timeout_ms": round((timeout or 0) * 1000),
             "timeout_kind": timeout_kind,
         }
@@ -193,7 +190,7 @@ async def execute_tool(
 
     if execution_context is not None:
         result.stats = {**(result.stats or {}),
-                        "configured_timeout_ms": round(_TOOL_BUDGETS.get(name, 30.0) * 1000),
+                        "configured_timeout_ms": round(preferred * 1000),
                         "effective_timeout_ms": round((timeout or 0) * 1000) if timeout is not None else None,
                         "timeout_kind": timeout_kind}
     if result.error_code == ErrorCode.TOOL_ERROR:

@@ -75,6 +75,39 @@ class CircuitBreaker:
             if s.consecutive_failures >= self.threshold:
                 s.open_until = time.time() + self.cooldown_s
 
+    def snapshot(self) -> dict[str, dict]:
+        """Read-only state of every tracked tool (admin display)."""
+        with self._lock:
+            now = time.time()
+            rows: dict[str, dict] = {}
+            for tool, s in self._states.items():
+                if s.open_until and now < s.open_until:
+                    state = "open"
+                elif s.consecutive_failures >= self.threshold:
+                    state = "half_open"
+                else:
+                    state = "closed"
+                rows[tool] = {
+                    "tool": tool,
+                    "state": state,
+                    "consecutive_failures": s.consecutive_failures,
+                    "remaining_seconds": round(max(0.0, s.open_until - now), 1),
+                }
+            return rows
+
+    def force_close(self, tool: str) -> bool:
+        """Administrative recovery: clear failures and any open window.
+
+        Returns False when the tool was never tracked (nothing to recover).
+        """
+        with self._lock:
+            s = self._states.get(tool)
+            if s is None:
+                return False
+            s.consecutive_failures = 0
+            s.open_until = 0.0
+            return True
+
     def guard(self, tool: str):
         """Return a CIRCUIT_OPEN ToolResult if the breaker is open, else None.
 
