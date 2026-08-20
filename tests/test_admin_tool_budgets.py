@@ -1,5 +1,4 @@
-"""Admin endpoints: per-tool budgets, tool-breaker recovery, source-breaker
-manual control and channel suggestions."""
+"""Admin endpoints: per-tool budgets, tool-breaker recovery and channel suggestions."""
 from __future__ import annotations
 
 import asyncio
@@ -105,41 +104,6 @@ def test_tool_breaker_recovery(env, monkeypatch):
     result = admin_api.post_tool_breaker_recover(
         admin_api.ToolBreakerRecoverRequest(tool="search_papers"), env["admin"])
     assert result["breaker_states"]["search_papers"]["state"] == "closed"
-
-
-def test_source_breaker_manual_control_and_suggestion(env, monkeypatch):
-    from core.search_source_health import SearchSourceHealthRegistry
-
-    registry = SearchSourceHealthRegistry()
-    monkeypatch.setattr(
-        "core.search_source_health.get_search_health_registry", lambda: registry)
-
-    result = admin_api.post_paper_search_breaker(
-        admin_api.PaperSourceBreakerRequest(source="arxiv", action="open"),
-        env["admin"])
-    assert result["state"]["state"] == "open"
-
-    data = asyncio.run(admin_api.get_admin_paper_search_policy(env["admin"]))
-    row = next(r for r in data["runtime_status"] if r["source"] == "arxiv")
-    assert row["state"] == "open"
-    assert "熔断" in row["suggestion"]
-
-    result = admin_api.post_paper_search_breaker(
-        admin_api.PaperSourceBreakerRequest(source="arxiv", action="close"),
-        env["admin"])
-    assert result["state"]["state"] == "closed"
-
-    data = asyncio.run(admin_api.get_admin_paper_search_policy(env["admin"]))
-    row = next(r for r in data["runtime_status"] if r["source"] == "arxiv")
-    assert row["state"] == "closed"
-    # A closed breaker with no history carries no suggestion noise.
-    assert row["suggestion"] == "" or "熔断" not in row["suggestion"]
-
-    with pytest.raises(HTTPException) as exc:
-        admin_api.post_paper_search_breaker(
-            admin_api.PaperSourceBreakerRequest(source="made_up", action="open"),
-            env["admin"])
-    assert exc.value.status_code == 404
 
 
 def test_old_policy_table_migrates_api_turn_soft_seconds(env, monkeypatch, tmp_path):

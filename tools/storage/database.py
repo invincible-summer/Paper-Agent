@@ -22,7 +22,11 @@ CREATE TABLE IF NOT EXISTS papers (
     language TEXT,
     citation_count INTEGER,
     abstract TEXT,
+    abstract_source TEXT,
+    abstract_policy_status TEXT,
+    abstract_policy_reason TEXT,
     pdf_url TEXT,
+    pdf_source TEXT,
     pdf_path TEXT,
     keywords TEXT,
     urls TEXT
@@ -127,6 +131,17 @@ class Database:
             self.conn.execute("ALTER TABLE papers ADD COLUMN last_seen TEXT")
         if "times_read" not in cols:
             self.conn.execute("ALTER TABLE papers ADD COLUMN times_read INTEGER DEFAULT 0")
+        provenance_columns = {
+            "abstract_source": "TEXT",
+            "abstract_policy_status": "TEXT DEFAULT 'available'",
+            "abstract_policy_reason": "TEXT",
+            "pdf_source": "TEXT",
+        }
+        for name, declaration in provenance_columns.items():
+            if name not in cols:
+                self.conn.execute(
+                    f"ALTER TABLE papers ADD COLUMN {name} {declaration}"
+                )
         now = datetime.datetime.utcnow().isoformat(timespec="seconds")
         # Backfill existing rows so first_seen/last_seen are never null.
         self.conn.execute(
@@ -143,8 +158,9 @@ class Database:
         self.conn.execute(
             """INSERT OR REPLACE INTO papers
             (id, title, authors, year, venue, doi, source, language,
-             citation_count, abstract, pdf_url, pdf_path, keywords, urls)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             citation_count, abstract, abstract_source, abstract_policy_status,
+             abstract_policy_reason, pdf_url, pdf_source, pdf_path, keywords, urls)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 paper.id,
                 paper.title,
@@ -156,7 +172,11 @@ class Database:
                 paper.language,
                 paper.citation_count,
                 paper.abstract,
+                paper.abstract_source,
+                paper.abstract_policy_status,
+                paper.abstract_policy_reason,
                 paper.pdf_url,
+                paper.pdf_source,
                 paper.pdf_path,
                 json.dumps(paper.keywords),
                 json.dumps(paper.urls),
@@ -457,7 +477,11 @@ def _row_to_paper(row: sqlite3.Row) -> Paper:
         language=row["language"] or "en",
         citation_count=row["citation_count"] or 0,
         abstract=row["abstract"] or "",
+        abstract_source=row["abstract_source"] or "",
+        abstract_policy_status=row["abstract_policy_status"] or "available",
+        abstract_policy_reason=row["abstract_policy_reason"] or "",
         pdf_url=row["pdf_url"],
+        pdf_source=row["pdf_source"] or "",
         pdf_path=row["pdf_path"],
         keywords=json.loads(row["keywords"]) if row["keywords"] else [],
         urls=json.loads(row["urls"]) if row["urls"] else {},

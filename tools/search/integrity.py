@@ -40,6 +40,11 @@ _arxiv_limiter = RateLimiter(max_concurrent=1, min_interval=3.0)
 _MAX_ARXIV_LOOKUPS = 5
 
 
+
+def _capability_allowed(source: str) -> bool:
+    from core.paper_search_settings_store import source_capability_enabled
+    return source_capability_enabled(source, "search")[0]
+
 def _norm_doi(doi: str | None) -> str:
     if not doi:
         return ""
@@ -114,7 +119,7 @@ def _arxiv_id(paper: Paper) -> str:
 # ---------------------------------------------------------------------------
 
 async def _openalex_lookup(client: httpx.AsyncClient, doi: str) -> dict | None:
-    if not getattr(get_settings().search, "openalex_api_key", ""):
+    if not _capability_allowed("openalex") or not getattr(get_settings().search, "openalex_api_key", ""):
         return None
     url = f"{_OPENALEX}/doi:{doi}"
     params = {"select": "id,is_retracted,is_paratext,merged_into", **_openalex_auth()}
@@ -130,6 +135,8 @@ async def _openalex_lookup(client: httpx.AsyncClient, doi: str) -> dict | None:
 
 
 async def _crossref_lookup(client: httpx.AsyncClient, doi: str) -> dict | None:
+    if not _capability_allowed("crossref"):
+        return None
     from tools.search.registry import contact_email
     email = contact_email(get_settings().search)
     params = {"mailto": email} if email else None
@@ -147,6 +154,8 @@ async def _crossref_lookup(client: httpx.AsyncClient, doi: str) -> dict | None:
 
 async def _arxiv_journal_ref(client: httpx.AsyncClient, arxiv_id: str) -> str:
     """Best-effort: read arXiv journal_ref for a preprint id (1 feedparser call)."""
+    if not _capability_allowed("arxiv"):
+        return ""
     import feedparser
     try:
         async with _arxiv_limiter:

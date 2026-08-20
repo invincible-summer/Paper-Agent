@@ -19,7 +19,16 @@ from tools.search.base import (
 from tools.search.http_client import get_search_http_client
 
 API_URL = "https://export.arxiv.org/api/query"
-_limiter = RateLimiter(max_concurrent=1, min_interval=3.0, source_name="arxiv", fast_fail_429=True)
+# The official arXiv API manual asks clients to wait at least three seconds
+# between repeated calls. Keep these constants testable and use one caller.
+ARXIV_MAX_CONCURRENT = 1
+ARXIV_MIN_INTERVAL_SECONDS = 3.0
+_limiter = RateLimiter(
+    max_concurrent=ARXIV_MAX_CONCURRENT,
+    min_interval=ARXIV_MIN_INTERVAL_SECONDS,
+    source_name="arxiv",
+    fast_fail_429=True,
+)
 
 
 def _quote_query(query: str) -> str:

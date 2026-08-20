@@ -21,6 +21,7 @@ from core.embeddings import embed_texts
 from core.blocking import run_cpu_bound
 from core.llm import ainvoke_utility, get_llm
 from core.models import Paper
+from core.paper_search_settings_store import paper_abstract_text
 from core.prompts.map_path import get_map_summary_prompt, get_reading_path_prompt
 from tools.retrieval.bm25 import tokenize
 
@@ -74,7 +75,7 @@ def cluster_papers(papers: list[Paper], sub_directions: list | None = None,
         try:
             vecs = vectors
             if vecs is None:
-                docs = [f"{p.title or ''}\n{(p.abstract or '')[:300]}" for p in papers]
+                docs = [f"{p.title or ''}\n{paper_abstract_text(p)[:300]}" for p in papers]
                 vecs = embed_fn(docs)
             if vecs is not None and len(vecs) == len(papers):
                 from sklearn.cluster import AgglomerativeClustering
@@ -199,7 +200,7 @@ def _fallback_graph(papers: list[Paper], cluster_of: dict[str, int], status: str
         "citation_count": p.citation_count or 0, "cluster": cluster_of.get(p.id, 0),
         "role": "", "layer": "core" if p.layer == "core" else "candidate",
         "authors": (p.authors or [])[:3], "url": _best_url(p),
-        "abstract": (p.abstract or "")[:200], "venue": p.venue or "",
+        "abstract": paper_abstract_text(p)[:200], "venue": p.venue or "",
         "fulltext": fulltext_available(p),
         "fulltext_status": normalize_fulltext_status(getattr(p, "fulltext_status", "")),
     } for p in papers]
@@ -228,7 +229,7 @@ async def build_research_map(papers: list[Paper], candidates: list[Paper],
     if len(all_papers) >= 2:
         try:
             report("计算一次语义向量，用于聚类和关系边...")
-            docs = [f"{p.title or ''}\n{(p.abstract or '')[:300]}" for p in all_papers]
+            docs = [f"{p.title or ''}\n{paper_abstract_text(p)[:300]}" for p in all_papers]
             async with asyncio.timeout(12.0):
                 vectors = await run_cpu_bound(embed_texts, docs)
             if not vectors or len(vectors) != len(all_papers):
@@ -284,7 +285,9 @@ async def build_research_map(papers: list[Paper], candidates: list[Paper],
     if summary_status != "available":
         degraded_reasons.append("summary_fallback")
     citation_status = graph.get("citation_enrichment_status", "unavailable")
-    if citation_status not in {"available", "no_doi", "disabled"}:
+    if citation_status not in {
+        "available", "no_doi", "disabled", "source_capability_disabled",
+    }:
         degraded_reasons.append(f"citation_{citation_status}")
     stage_ms["total"] = round((time.monotonic() - started) * 1000, 1)
     degraded = bool(degraded_reasons)

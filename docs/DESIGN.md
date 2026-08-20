@@ -314,7 +314,7 @@ topic (+conception)
 ```
 
 - 无 X/Y/Z 参数、无 Flash/Pro 模式——分层是确定性算法，不花 LLM。
-- **数据源与限流**（`tools/search/registry.py`、`tools/search/base.py::RateLimiter`）：来源集中登记协议、许可、路由标签、配置门禁和每轮查询预算。SearchManager 按来源创建一个批处理任务，而不是“来源×查询式”任务；arXiv 单连接/3 秒一次，PubMed 按 NCBI 3/10 RPS，OpenAIRE 按匿名/认证小时额度，其他源使用保守进程级 limiter。共享 `httpx.AsyncClient` 使用 `trust_env=False`。`SearchOutcome` 分别记录真实请求数、限流头、最终域名、重定向以及 queue/connect/read/network 耗时，并区分远端 timeout/429/schema/redirect/challenge 与本地 `local_budget_exhausted`；每源每轮只向熔断器提交一次结果。默认 smart 路由最多 4 个主渠道、2 个兜底渠道，学科、预印本、机构仓储和 dataset/software/report/thesis/DOI 意图使用不同的确定性矩阵。新 bioRxiv/medRxiv 使用官方 metadata API + 本地 FTS5，不抓网页；PubMed/DataCite/DBLP 为元数据源。全文只跟随明确 OA 链接；Crossref/DataCite/PubMed/DBLP 普通链接不构成 PDF 候选。详细许可见根目录 [Official_Paper_Platform_License_Description.md](../Official_Paper_Platform_License_Description.md)。
+- **数据源与限流**（`tools/search/registry.py`、`tools/search/base.py::RateLimiter`）：来源集中登记协议、许可、路由标签、配置门禁和每轮查询预算。SearchManager 按来源创建一个批处理任务，而不是“来源×查询式”任务；arXiv 单连接/3 秒一次，PubMed 按 NCBI 3/10 RPS，OpenAIRE 按匿名/认证小时额度，其他源使用保守进程级 limiter。共享 `httpx.AsyncClient` 使用 `trust_env=False`。`SearchOutcome` 分别记录真实请求数、限流头、最终域名、重定向以及 queue/connect/read/network 耗时，并区分远端 timeout/429/schema/redirect/challenge 与本地 `local_budget_exhausted`；来源级结果只写当轮诊断与路由记录，不维护临时熔断状态。默认 smart 路由最多 4 个主渠道、2 个兜底渠道，学科、预印本、机构仓储和 dataset/software/report/thesis/DOI 意图使用不同的确定性矩阵。新 bioRxiv/medRxiv 使用官方 metadata API + 本地 FTS5，不抓网页；PubMed/DataCite/DBLP 为元数据源。全文只跟随明确 OA 链接；Crossref/DataCite/PubMed/DBLP 普通链接不构成 PDF 候选。详细许可见根目录 [Official_Paper_Platform_License_Description.md](../Official_Paper_Platform_License_Description.md)。
 - **去重**：DOI 精确 → 标题归一化精确/模糊（Jaccard≥0.95）→ 字段合并（摘要取长、被引取大、来源取并集）。
 - 搜索结果注入 LLM 上下文时用 `<search_results>` 定界标记（数据非指令）。
 - **部分成功优先**：来源 wave 使用同一绝对 deadline；到点取消未完成 task，但保留已完成来源。分层一完成就把核心/候选集发布为 session snapshot，后续全文探测和 SQLite/Chroma 增强都是可跳过步骤；外层 timeout 从 snapshot 组装 partial，而不是把已检索论文作废。默认开启的强制探测（`force_fulltext_probe`）会把“探测可跳过”收紧为“尽力必跑”：检索与嵌入重排提前在 pre-probe deadline 收口，为探测预留最多 12 秒。
@@ -573,38 +573,44 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 ## 运行时论文渠道与远程全文策略
 
-论文检索的实时策略存放在 `data/users.db` 的 `paper_search_policy` 单行表中；`config/settings.yaml` 只负责首次种子。管理员通过独立页面 `/admin/paper-search` 修改后，约 5 秒缓存立即失效，下一次检索生效。策略使用版本乐观锁，不包含 API key、Authorization 或完整配置邮箱。
+论文检索的实时策略存放在 `data/users.db` 的 `paper_search_policy` 单行表中；`config/settings.yaml` 只负责首次种子。管理员通过 `/admin/paper-search` 修改后，5 秒读缓存立即失效，下一次检索生效。策略使用版本乐观锁，不包含 API key、Authorization、完整配置邮箱、摘要正文或 PDF 字节。
 
-`paper_search_policy.routing_mode` 默认为 `smart`，管理员可切换 `all_enabled`；新增来源在旧数据库迁移时默认关闭。`data/paper_source_catalog.db` 仅保存 bioRxiv/medRxiv 官方元数据和 FTS 索引；同步状态同时保存历史日期游标与页游标，版本 upsert 幂等。脚本 `scripts/sync_rxiv_metadata.py` 由 `deploy/systemd/paper-agent-rxiv-sync.timer` 周期执行，整个双源任务由全局预算和 systemd `RuntimeMaxSec` 共同限制在 15 分钟以内。
-### 快速部分结果与按源熔断
+### 平台能力矩阵与持久 gate
 
-`SearchManager` 从管理员启用的 14 个元数据源中按 smart 路由选取最多 4+2 个渠道（或按管理员要求使用 `all_enabled`），并同时执行单条渠道时限（默认 12 秒）和全局检索硬时限（10–30 秒，默认及上限均为 30 秒）。总时限到达后取消并 drain 未完成任务，保留已返回论文继续去重和重排。主检索后端遇到 429 最多短重试一次，等待上限 2 秒，不再让云数据中心 IP 的持续限流占满整个 turn。
+`capabilities_json` 为每个 `SOURCE_SPECS` 平台及辅助目标 Unpaywall、doi.org 保存 `search`、`abstract`、`fulltext` 三项能力；不适用项保持关闭且不计作异常，Unpaywall 的全文候选能力可独立开关。每项包含 `enabled`、`disabled_by`（administrator/diagnostic）、`reason_code/reason`、`disabled_at`、`last_checked_at`、`last_diagnostic_status`、`last_latency_ms`；全文另存 `last_kb_per_second`。旧 `sources_json` 仍作为搜索开关兼容投影：升级时只映射 `search.enabled`，不会意外启用旧安装中原本关闭的平台；摘要和全文按平台登记能力初始化。手动恢复清除当前关闭原因，但保留历史检测状态和指标。诊断成功绝不自动恢复。
 
-每源维护单 worker 进程内健康状态：连续 3 次 429、超时、连接错误、5xx 或非法响应后熔断 300 秒；冷却后只放行一条 half-open 查询，成功关闭熔断，失败重新打开。HTTP 200 合法空结果、管理员关闭和缺少可选 key 不计入故障。管理员开关优先于熔断，熔断不会永久改写配置。管理员连通性检测的真实结果同样回写该健康注册表（辅助目标 unpaywall/doi 除外），因此检测会更新熔断视图；`force_open`/`force_close` 支持在 `/admin/paper-search` 渠道卡上一键手动熔断 300 秒或提前恢复，每渠道还显示综合配置状态、熔断态、最近错误与延迟得出的中文建议文案。
+统一边界是 `source_capability_status` / `source_capability_enabled`。SearchManager 在创建异步任务之前同时检查静态配置 gate 和持久 `search` gate，并把未创建任务的平台及原因写入 `search_route.skipped`；搜索响应若来自 `abstract=false` 的平台，摘要在进入会话、向量、地图、综述和 RAG 上下文前被剥离。`PDFFetcher.candidate_urls`、`probe_pdf_url`、`verify_papers_fulltext`、`deep_read` 与 `_ensure_fulltext` 在 Unpaywall/doi.org 解析、PDF probe 或下载之前执行来源 `fulltext` gate；Unpaywall 自身的辅助全文能力另有最终 gate。已经通过 `%PDF-` 校验的本地缓存优先于远程 gate，上传附件不受平台策略影响。
 
-### 运行时工具时限预算
+来源级临时健康熔断已删除：不存在 `SearchSourceHealthRegistry`、closed/open/half-open、连续失败计数、300 秒冷却、自动半开、`force_open/force_close` 或 `/paper-search/breaker`。工具执行层的通用 `CircuitBreaker` 仍独立存在，只保护工具级连续 `TOOL_ERROR`，不改变任何论文平台能力。
 
-`tool_budget_policy` 是 `data/users.db` 中的单行管理员设置（5 秒读缓存、乐观锁、更新立即生效、无需重启），存放每个工具的预算覆盖、未列出工具的默认预算、整轮预留量和 `/v1` 整轮软时限。代码级默认（search_papers/research_map 45s、deep_read 75s、write_review 60s、reading_path 20s、field_census/integrity_sweep 35s、其余 30s、预留量 8s）定义在 `core/tool_budget_store.py::CODE_TOOL_BUDGETS`；单工具解析顺序为显式覆盖 → 代码默认 → 默认预算。`execute_tool` 读取该策略计算 preferred 超时与 `configured/effective/timeout_kind` 统计，策略读取失败回退代码默认。预算可调区间 5–105 秒（105 由清小搭网关 120 秒推导的 /v1 硬时限决定），预留量 2–30 秒，实际生效值 = min(工具预算, 整轮剩余 − 预留量)；超出 /v1 整轮软时限的部分仅在 Web 通道（240/300 秒）生效。管理页 `/admin/performance` 以按用途分组的中文名卡片呈现每个工具（名称、一句话用途、建议上限、代码默认、悬浮说明），并展示工具级熔断状态与一键恢复（`CircuitBreaker.snapshot/force_close`），解决连续 3 次超时后工具被锁 300 秒而管理员无从解除的问题。内部指令加载事件 `use_skill` 不在可调列表中。
+### 快速部分结果与路由
 
-`search_papers` 内部各阶段共享同一工具预算而不是各自独立封顶：意图理解 LLM 10 秒子超时（超时回退原始主题平凡计划），检索 deadline = min(管理员检索总时限, 剩余−8s)，全文探测预算 = min(管理员探测时限, 剩余−3s)、剩余不足 2 秒直接跳过。“检索已成功却因后续探测段把整次调用拖过工具预算而作废”由此成为结构性不可能。默认开启的 `force_fulltext_probe`（`paper_search_policy` 单行表、`/admin/paper-search` 可关）在此之上为探测预留预算：预留量 = min(管理员探测时限, 12 秒上限, 剩余−8−5)，检索与嵌入重排一律不越过 `pre_probe_deadline = 总 deadline − 预留量 − 3s`；探测入口在剩余 2 秒以上但预算不足 2 秒时仍以约 1 秒兜底执行（缓存命中瞬时返回），仅剩余 ≤2 秒才跳过。工具预算过小（<13 秒）时预留量自动收缩为 0，退化为普通钳制行为。
+SearchManager 仍按来源创建一个批处理任务，而不是“来源×查询式”任务；智能路由最多 4 个主渠道，结果不足且预算允许时最多 2 个兜底渠道。检索总时限固定不超过 30 秒，超时任务被取消并标记 `local_budget_exhausted`，该本地预算事件不会改写平台持久能力。配置缺失、license 未确认、联系邮箱缺失和 Rxiv 本地索引为空只作为静态/索引状态，不被误判为跨境网络故障。
 
+`tool_budget_policy` 是 `data/users.db` 中的单行管理员设置（5 秒读缓存、乐观锁、更新立即生效、无需重启），存放每个工具的预算覆盖、未列出工具的默认预算、整轮预留量和 `/v1` 整轮软时限。代码级默认与工具级通用熔断仍由 `core/tool_budget_store.py`、`core/circuit_breaker.py` 管理；`use_skill` 不在可调列表中。
+
+`search_papers` 内部各阶段共享同一工具预算：意图理解 LLM 10 秒子超时（超时回退原始主题计划），检索 deadline = min(管理员检索总时限, 剩余−8s)，全文探测预算 = min(管理员探测时限, 剩余−3s)。默认 `force_fulltext_probe` 会为探测预留最多 12 秒并让检索/重排提前在 pre-probe deadline 收口；能力 gate 关闭的平台不会消耗这部分网络预算。
 
 ### 四档远程全文访问
 
-`paper_fetch_mode` 的判定顺序为：管理员全文策略 → 来源开关 → 来源熔断 → 本地缓存 → 调用来源。
+全文访问判定顺序为：本地已验证缓存 → 全局 `paper_fetch_mode` → 来源 `fulltext` 能力 → OA 候选解析/probe/download。
 
 - `enabled`：允许 OA 候选解析、文件头探测、自动 `_ensure_fulltext` 和直接 `deep_read` 下载。
 - `explicit_only`：允许候选解析和文件头探测；直接 `deep_read` 可下载，自动全文升级不得下载。
 - `probe_only`：允许候选解析和轻量探测；所有普通用户路径禁止完整 PDF 下载。
 - `disabled`：禁止远程候选解析、Unpaywall/doi.org 全文解析、探测和下载。
 
-所有模式都优先复用已通过 `%PDF-` 校验的本地 PDF、已持久化结构和元素理解，策略切换不删除数据。来源开关关闭后不使用该来源的直接 PDF URL；Unpaywall/doi.org 作为独立 OA 辅助边界保留，除非全文总策略为 `disabled`。
+所有模式都可复用本地 PDF、结构和元素理解，策略切换不删除数据。`fetch_policy_disclosure=affected_only` 只在当前请求确实被限制时生成提示；`silent` 不向 web 进度、`/v1` reasoning、工具卡或正文注入管理员策略原因，但模型仍只接收真实可用的证据层级。
 
-`fetch_policy_disclosure=affected_only` 只在当前请求确实被限制时生成管理员策略提示；`silent` 不向 web 进度、`/v1` reasoning、工具卡或正文注入策略原因，但仍向模型提供真实证据层级，禁止把摘要冒充全文。原始 provider thinking 继续按既有不变量透传，不增加事后过滤器。
+### 统一管理员诊断
 
-### 管理员诊断
+管理员接口位于 `/api/v1/admin/paper-search/*`。`POST /diagnostics/capabilities` 支持完整检测全部平台、指定平台、选中平台或单项能力；关闭状态下管理员可强制检测。每个平台统一返回 `connectivity/search/abstract/fulltext`，辅助目标 Unpaywall、doi.org 的不适用项明确为灰色状态，Unpaywall 的全文能力与诊断历史同样持久化。每一行同时公开官方文档依据与诊断方法标识。诊断优先使用各平台官方文档规定的 API endpoint、参数、认证和响应 schema：真实搜索必须得到合法论文列表，摘要必须至少有一个非空样本且数据库只记录长度/样本 id，PDF 必须有有效字节和 `%PDF-`。官方不提供对应方法时才使用受控最小探测或返回 `not_applicable`，不会把 HTTP 200 当成能力成功。
 
-管理员接口位于 `/api/v1/admin/paper-search/*`。连通性检测使用固定查询，报告 HTTP 总延迟、真实结果数和可选 PDF 文件头探测，不伪造 DNS/TCP/TLS 分段。下载测速与连接检测分开，管理员可显式测试已关闭渠道或全文关闭状态；目标来自固定登记或经过 SSRF 校验的诊断候选，不接受任意 URL。测速优先 Range，最多读取 1 MiB、单项最多 20 秒、校验 `%PDF-`，不写生产 PDF 目录。数据库只保留最近一次完整连接/测速结果和最多 20 条摘要，不保存响应正文、完整 PDF 或秘密。
+自动关闭与诊断记录在 `BEGIN IMMEDIATE` 事务内完成；写库前只保留白名单标量指标，主动剥离未知字段：基础连通硬失败关闭三项适用能力，搜索/摘要/PDF 硬失败只关闭对应能力；慢速有效 PDF 只告警；配置缺失、`not_applicable` 和 Rxiv 本地索引为空不改开关。数据库保留最近 20 次消毒后的诊断，不保存完整响应正文、摘要正文、PDF 字节或秘密。
+
+OpenAIRE 使用 Graph API V3 research-products 官方路径；有 client credentials 时先走官方 OIDC token，无凭据时使用受限匿名路径。解析器明确接受 description 的字符串/列表/嵌套字典形态，并区分认证失败、限流、schema 变化、搜索空结果、摘要为空和无 PDF 候选。无 PDF 只影响全文能力，不连带关闭搜索或摘要。
+
+arXiv 的管理员测速、`probe_pdf_url` 分支和 `PDFFetcher` 真实下载共用 `tools/pdf/arxiv_wget.py`。包装器通过 `asyncio.create_subprocess_exec` 参数数组执行 `wget --user-agent=Lynx --tries=1`，不经过 shell；启动前限制 HTTP(S)、arXiv host、PDF path 并执行 SSRF/public-host 校验，设置有界 timeout/redirect/quota，超时 terminate/kill，校验大小和 `%PDF-`，最终无条件清理临时文件。轻探测/测速使用 Range 与读取上限，真实全文继续遵守 50 MiB 上限和 Web/API 各自存储边界。
 
 ## Runtime performance policy（2026-08）
 

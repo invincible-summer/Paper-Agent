@@ -98,6 +98,14 @@ async def _check_one(
     local_path = paper.pdf_path or ""
     if _local_pdf_is_ready(local_path):
         return (FULLTEXT_STATUS_AVAILABLE, "local_pdf_cached", local_path, candidate_url)
+    from core.paper_search_settings_store import (
+        paper_capability_source, source_capability_enabled,
+    )
+    allowed, _reason = source_capability_enabled(
+        paper_capability_source(paper, "fulltext"), "fulltext"
+    )
+    if not allowed:
+        return (FULLTEXT_STATUS_UNKNOWN, "source_capability_disabled", "", "")
 
     try:
         urls = await asyncio.wait_for(
@@ -110,8 +118,16 @@ async def _check_one(
         return (FULLTEXT_STATUS_UNKNOWN, "candidate_lookup_error", "", candidate_url)
 
     if not urls:
-        # No OA candidate at all (metadata + Unpaywall). This is a verified
-        # negative for the current record.
+        from core.paper_search_settings_store import source_capability_enabled
+        if paper.doi and not source_capability_enabled(
+            "unpaywall", "fulltext"
+        )[0]:
+            return (
+                FULLTEXT_STATUS_UNKNOWN, "unpaywall_capability_disabled",
+                "", candidate_url,
+            )
+        # No OA candidate at all after every allowed resolver ran. This is a
+        # verified negative for the current record.
         return (FULLTEXT_STATUS_UNAVAILABLE, "no_oa_url", "", candidate_url)
 
     reasons: list[str] = []
@@ -153,15 +169,21 @@ async def _check_one(
     # failed, so arXiv/repository-heavy searches do not spend their whole
     # availability budget on redundant DOI lookups.
     if paper.pdf_url and paper.doi and hasattr(fetcher, "_unpaywall_pdf_url"):
-        try:
-            fallback = await asyncio.wait_for(
-                fetcher._unpaywall_pdf_url(paper.doi), timeout=_PROBE_TIMEOUT_SECONDS
-            )
-        except asyncio.TimeoutError:
-            fallback = None; reasons.append("candidate_lookup_timeout"); transient_seen = True
-        except Exception as e:  # noqa: BLE001
-            logger.debug("Unpaywall fallback failed for %s: %s", paper.id, e)
-            fallback = None; reasons.append("candidate_lookup_error"); transient_seen = True
+        from core.paper_search_settings_store import source_capability_enabled
+        if not source_capability_enabled("unpaywall", "fulltext")[0]:
+            reasons.append("unpaywall_capability_disabled")
+            transient_seen = True
+            fallback = None
+        else:
+            try:
+                fallback = await asyncio.wait_for(
+                    fetcher._unpaywall_pdf_url(paper.doi), timeout=_PROBE_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                fallback = None; reasons.append("candidate_lookup_timeout"); transient_seen = True
+            except Exception as e:  # noqa: BLE001
+                logger.debug("Unpaywall fallback failed for %s: %s", paper.id, e)
+                fallback = None; reasons.append("candidate_lookup_error"); transient_seen = True
         if fallback and fallback not in urls:
             ok, reason, transient = await try_url(fallback)
             if ok:
@@ -185,6 +207,7 @@ async def verify_papers_fulltext(
     progress_callback: ProgressCallback | None = None,
     timeout_seconds: float | None = None,
     ttl_days: int = _DEFAULT_TTL_DAYS,
+    capability_skips: list[dict] | None = None,
 ) -> dict[str, str]:
     """Probe OA PDF availability for a paper set and persist the results.
 
@@ -217,8 +240,30 @@ async def verify_papers_fulltext(
     to_check: list[Paper] = []
     try:
         cached = db.get_fulltext_statuses([p.id for p in papers])
+        from core.paper_search_settings_store import (
+            paper_capability_source, source_capability_enabled,
+        )
         for paper in papers:
-            row = cached.get(paper.id)
+            # A verified local file remains usable after a platform is closed.
+            # Probe-only cache rows are network evidence, not local content, so
+            # never let them bypass a newly-disabled source/Unpaywall gate.
+            source_allowed = source_capability_enabled(
+                paper_capability_source(paper, "fulltext"), "fulltext"
+            )[0]
+            resolver_allowed = (
+                bool(paper.pdf_url)
+                or not paper.doi
+                or source_capability_enabled("unpaywall", "fulltext")[0]
+            )
+            cached_row = cached.get(paper.id)
+            cached_local_ready = bool(
+                cached_row and _local_pdf_is_ready(cached_row.get("pdf_path"))
+            )
+            row = (
+                cached_row
+                if cached_local_ready or (source_allowed and resolver_allowed)
+                else None
+            )
             if row and _checked_at_is_fresh(row.get("checked_at"), ttl_days) \
                     and _cached_row_applies(row, paper):
                 status = normalize_fulltext_status(row.get("status"))
@@ -250,6 +295,20 @@ async def verify_papers_fulltext(
             )
             paper.fulltext_status = status
             statuses[paper.id] = status
+            if capability_skips is not None and (
+                evidence == "source_capability_disabled"
+                or "unpaywall_capability_disabled" in evidence
+            ):
+                from core.paper_search_settings_store import (
+                    capability_skip_result, paper_capability_source,
+                )
+                source = (
+                    "unpaywall" if evidence == "unpaywall_capability_disabled"
+                    else paper_capability_source(paper, "fulltext")
+                )
+                skip = capability_skip_result(source, "fulltext")
+                skip.update({"paper_id": paper.id, "title": paper.title or paper.id})
+                capability_skips.append(skip)
             rows_to_save.append((paper.id, status, evidence, pdf_path, candidate_url))
             label = "可获取" if status == FULLTEXT_STATUS_AVAILABLE else (
                 "不可获取" if status == FULLTEXT_STATUS_UNAVAILABLE else "未验证")

@@ -17,6 +17,8 @@ class SourceSpec:
     supports_remote_search: bool = True
     supports_pdf_probe: bool = True
     supports_download_test: bool = True
+    supports_abstract: bool = True
+    supports_fulltext: bool = True
     default_enabled: bool = False
     max_queries_per_turn: int = 2
 
@@ -24,7 +26,7 @@ class SourceSpec:
 SOURCE_SPECS: dict[str, SourceSpec] = {
     "openalex": SourceSpec(
         "openalex", "OpenAlex", "综合学科元数据与引用图谱", "REST API",
-        "CC0 元数据；生产 API 需 Key", ("general", "cs", "medical", "physics", "humanities", "dataset"),
+        "CC0 元数据；官方 API 需 Key", ("general", "cs", "medical", "physics", "humanities", "dataset"),
         requires_key="OPENALEX_API_KEY", default_enabled=True,
     ),
     "semantic_scholar": SourceSpec(
@@ -40,7 +42,7 @@ SOURCE_SPECS: dict[str, SourceSpec] = {
     "crossref": SourceSpec(
         "crossref", "Crossref", "跨学科 DOI 元数据", "REST API",
         "开放 API；提交元数据许可不一", ("general", "cs", "medical", "physics", "humanities", "dataset"),
-        default_enabled=True,
+        default_enabled=True, supports_fulltext=False,
     ),
     "europepmc": SourceSpec(
         "europepmc", "Europe PMC", "生命科学、医学和预印本", "REST API",
@@ -66,27 +68,34 @@ SOURCE_SPECS: dict[str, SourceSpec] = {
     "biorxiv": SourceSpec(
         "biorxiv", "bioRxiv", "生命科学预印本本地元数据索引", "Official metadata API + SQLite FTS5",
         "公开 API；全文逐篇许可", ("biology", "medical", "preprint"),
-        supports_remote_search=False, supports_pdf_probe=False, supports_download_test=False,
+        supports_remote_search=False, supports_pdf_probe=True, supports_download_test=True,
+        supports_fulltext=True,
     ),
     "medrxiv": SourceSpec(
         "medrxiv", "medRxiv", "医学预印本本地元数据索引", "Official metadata API + SQLite FTS5",
         "公开 API；全文逐篇许可", ("medical", "preprint"),
-        supports_remote_search=False, supports_pdf_probe=False, supports_download_test=False,
+        supports_remote_search=False, supports_pdf_probe=True, supports_download_test=True,
+        supports_fulltext=True,
     ),
     "pubmed": SourceSpec(
         "pubmed", "PubMed", "NLM 权威生物医学文献索引", "NCBI E-utilities",
         "公开 API；记录/摘要可能受版权保护", ("medical", "biology"), default_enabled=False,
-        supports_pdf_probe=False, supports_download_test=False,
+        supports_pdf_probe=False, supports_download_test=False, supports_fulltext=False,
     ),
     "datacite": SourceSpec(
         "datacite", "DataCite", "数据集、软件、报告、学位论文和 DOI", "REST API",
         "元数据 CC0", ("dataset", "software", "report", "thesis", "general"),
         default_enabled=False, supports_pdf_probe=False, supports_download_test=False,
+        # DataCite's official DOI metadata schema permits Abstract descriptions,
+        # even though any given record may omit one.  Diagnose this separately
+        # from search rather than presenting the cell as unsupported.
+        supports_abstract=True, supports_fulltext=False,
     ),
     "dblp": SourceSpec(
         "dblp", "DBLP", "计算机科学出版物", "Publication Search API",
         "元数据 CC0", ("cs",), default_enabled=False,
         supports_pdf_probe=False, supports_download_test=False,
+        supports_abstract=False, supports_fulltext=False,
     ),
 }
 

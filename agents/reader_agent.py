@@ -31,6 +31,7 @@ from langchain_core.messages import HumanMessage
 from core.blocking import run_cpu_bound
 from core.config import get_settings
 from core.llm import get_llm
+from core.paper_search_settings_store import paper_abstract_text
 from core.models import FIELD_PROFILES, Paper, PaperSummary, Reference
 from core.multimodal import recover_scanned_pages, understand_elements
 from core.prompts.reader_prompts import build_extraction_prompt
@@ -118,7 +119,9 @@ async def reader_agent(
     read_mode = state.get("read_mode", read_mode)
     fetch_origin = state.get("fetch_origin", "automatic")
     from core.paper_search_settings_store import (
-        disclose_fetch_policy, get_paper_search_policy, remote_download_allowed,
+        capability_skip_result, disclose_fetch_policy, get_paper_search_policy,
+        paper_capability_source, remote_download_allowed,
+        source_capability_enabled,
     )
     fetch_policy = get_paper_search_policy()
     remote_fetch_blocked = (read_mode == "full" and
@@ -139,6 +142,21 @@ async def reader_agent(
             paper.pdf_path = pdf_paths.get(paper.id)
 
         n_with_pdf = len(pdf_paths)
+        capability_skips: list[dict] = []
+        for paper in papers_to_process:
+            if getattr(paper, "pdf_path", None):
+                continue
+            allowed, reason = source_capability_enabled(
+                paper_capability_source(paper, "fulltext"),
+                "fulltext", fetch_policy,
+            )
+            if not allowed:
+                skip = capability_skip_result(
+                    paper_capability_source(paper, "fulltext"), "fulltext", reason
+                )
+                skip.update({"paper_id": paper.id, "title": paper.title or paper.id})
+                capability_skips.append(skip)
+        state["capability_skips"] = capability_skips
         if not remote_fetch_blocked:
             report(
                 f"Downloaded/reused {n_with_pdf} PDFs; "
@@ -147,6 +165,7 @@ async def reader_agent(
         elif not disclose_fetch_policy(fetch_policy):
             report(f"Full-text evidence ready for {n_with_pdf}/{len(papers_to_process)} papers")
     else:
+        state["capability_skips"] = []
         report(f"Abstract-only mode: skipping PDF download for {len(papers_to_process)} papers")
 
     # --- Phase 2+3: Parse + Extract (concurrent with progress) ---
@@ -166,6 +185,9 @@ async def reader_agent(
     summaries: dict[str, PaperSummary] = {}
     failures: list[dict[str, str]] = []
     fulltext_fallbacks: list[dict[str, str]] = []
+    capability_skip_ids = {
+        row.get("paper_id") for row in state.get("capability_skips", [])
+    }
     fulltext_status_rows: list[tuple[str, str, str, str, str]] = []
     for _i, paper, result in raw_results:
         summary, reason = result
@@ -175,7 +197,8 @@ async def reader_agent(
                 # Full attempt was requested but this paper ended at abstract
                 # level. Report the real level so callers never label it full.
                 fallback_reason = (
-                    "remote_fetch_restricted" if remote_fetch_blocked and not getattr(paper, "pdf_path", None)
+                    "source_capability_disabled" if paper.id in capability_skip_ids
+                    else "remote_fetch_restricted" if remote_fetch_blocked and not getattr(paper, "pdf_path", None)
                     else "oa_fulltext_unavailable" if not getattr(paper, "pdf_path", None)
                     else "fulltext_parse_degraded"
                 )
@@ -315,6 +338,12 @@ async def _process_single_paper(
     "empty_shell".
     """
     s = get_settings()
+    from core.paper_search_settings_store import (
+        paper_capability_source, source_capability_enabled,
+    )
+    abstract_allowed, _abstract_reason = source_capability_enabled(
+        paper_capability_source(paper, "abstract"), "abstract"
+    )
 
     # --- Cache lookup (Phase 0) ---
     # A ``full``-mode cache row is only valid when it contains real full text.
@@ -330,7 +359,7 @@ async def _process_single_paper(
             cached_summary = None
         if cached_summary is not None and read_mode == "full" and (
             not summary_has_full_text(cached_summary)
-            or _full_text_is_abstract(cached_summary.full_text, paper.abstract)
+            or _full_text_is_abstract(cached_summary.full_text, paper_abstract_text(paper))
         ):
             logger.warning(
                 "Discarding invalid full-mode cache for %s (full_text missing or "
@@ -372,6 +401,9 @@ async def _process_single_paper(
                     _index_paper, paper, cached_summary, healed_doc, "full",
                     session_id, storage_context=storage_context,
                 )
+        if (cached_summary is not None and not abstract_allowed
+                and not summary_has_full_text(cached_summary)):
+            cached_summary = None
         if cached_summary is not None:
             # A summary-cache hit must also restore the independently persisted
             # multimodal inventory.  Older cache rows predate ``summary.elements``
@@ -397,7 +429,7 @@ async def _process_single_paper(
     # --- Full attempt without an OA PDF: reuse the abstract cache if present.
     # This keeps repeated deep_read calls free for paywalled papers while the
     # full key stays empty, so a later OA copy can still be picked up.
-    if read_mode == "full" and not paper.pdf_path:
+    if read_mode == "full" and not paper.pdf_path and abstract_allowed:
         cached_abstract = db.get_cached_summary(paper.id, profile_key, "abstract")
         if cached_abstract:
             try:
@@ -408,7 +440,7 @@ async def _process_single_paper(
                 if not abstract_summary.document_info:
                     abstract_summary.document_info = _document_info(
                         paper, None, read_level="abstract",
-                        text_chars=len(paper.abstract or ""),
+                        text_chars=len(paper_abstract_text(paper)),
                     )
                 await run_cpu_bound(
                     _index_paper, paper, abstract_summary, None, "abstract",
@@ -437,7 +469,7 @@ async def _process_single_paper(
     doc_text = ""
     if doc is not None and is_full_text(doc.raw_text):
         doc_text = doc.raw_text
-    source_text = doc_text or paper.abstract or ""
+    source_text = doc_text or paper_abstract_text(paper) or ""
 
     if not source_text:
         return None, "no_text"

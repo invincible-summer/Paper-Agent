@@ -469,88 +469,62 @@ class PaperSearchPolicyUpdate(BaseModel):
 class PaperSearchDiagnosticRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     sources: list[str] | None = None
+    capability: Literal["connectivity", "search", "abstract", "fulltext"] | None = None
+
+
+class PaperCapabilityUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_version: int = Field(gt=0)
+    enabled: bool
 
 
 _PAPER_DIAGNOSTIC_SEMAPHORE = __import__("asyncio").Semaphore(1)
 
 
-def _source_suggestion(catalog_row: dict, runtime: dict,
-                       per_source_timeout_seconds: float) -> str:
-    """Circuit/config recommendation for one channel (empty string = healthy)."""
-    config = str(catalog_row.get("configuration_status") or "ready")
-    if config == "missing_api_key":
-        return "尚未配置 API Key：在 .env 补齐并重启后，该渠道才会参与检索。"
-    if config == "missing_contact_email":
-        return "尚未配置联系邮箱（.env 的 PAPER_PLATFORM_CONTACT_EMAIL）：补齐后该渠道才可用。"
-    state = str(runtime.get("state") or "closed")
-    if state == "open":
-        remaining = max(1, round(float(runtime.get("remaining_seconds") or 0)))
-        return f"已熔断，约 {remaining} 秒后自动半开复测；持续失败可临时关闭该渠道开关。"
-    if state == "half_open":
-        return "半开探测中，等待下一次检索结果确认恢复。"
-    error = str(runtime.get("last_error_code") or "")
-    if error == "rate_limited":
-        return "云服务器 IP 被限流：建议配置 API Key（如有）并降低调用频率，反复限流可临时关闭该渠道。"
-    if error in {"timeout", "connection_error"}:
-        return "跨境连接不稳定：可先手动熔断 300 秒再复测，仍失败建议临时关闭该渠道。"
-    if error in {"server_error", "schema_mismatch", "bot_challenge",
-                 "unexpected_redirect", "invalid_response"}:
-        return f"最近一次调用异常（{error}）：建议复测确认，连续 3 次异常会自动熔断。"
-    latency = runtime.get("last_latency_ms")
-    if isinstance(latency, (int, float)) and latency > per_source_timeout_seconds * 1000:
-        return (f"最近延迟 {int(latency)} ms 已超过单渠道时限 {per_source_timeout_seconds:.0f} 秒："
-                "检索时会被本地掐断，建议关闭该渠道或改善网络出口。")
-    return ""
-
-
 def _paper_policy_payload() -> dict:
     from dataclasses import asdict
-
     from core.config import get_settings
-    from core.paper_search_settings_store import SOURCE_IDS, get_paper_search_policy
-    from core.search_source_health import get_search_health_registry
+    from core.paper_search_settings_store import SOURCE_IDS, capability_defaults, get_latest_diagnostics, get_paper_search_policy
     from tools.search.diagnostics import source_catalog
 
     policy = get_paper_search_policy()
     static = get_settings().search
+    default_sources = {name: bool(static.sources.get(name, True)) for name in SOURCE_IDS}
     defaults = {
-        "sources": {name: bool(static.sources.get(name, True)) for name in SOURCE_IDS},
-        "search_deadline_seconds": 30,
-        "per_source_timeout_seconds": 12,
-        "verify_fulltext": True,
-        "fulltext_verify_timeout_seconds": 30,
-        "force_fulltext_probe": True,
-        "paper_fetch_mode": "enabled",
-        "fetch_policy_disclosure": "affected_only",
-        "routing_mode": "smart",
+        "sources": default_sources,
+        "capabilities": capability_defaults(default_sources),
+        "search_deadline_seconds": 30, "per_source_timeout_seconds": 12,
+        "verify_fulltext": True, "fulltext_verify_timeout_seconds": 30,
+        "force_fulltext_probe": True, "paper_fetch_mode": "enabled",
+        "fetch_policy_disclosure": "affected_only", "routing_mode": "smart",
     }
     quick_sources = dict(policy.sources)
     quick_sources.update({"openalex": False, "semantic_scholar": False, "core": False})
-    catalog_rows = source_catalog()
-    catalog_by_id = {row["id"]: row for row in catalog_rows}
-    health = get_search_health_registry()
-    runtime_status = []
-    for name in SOURCE_IDS:
-        state = health.get(name)
-        state["suggestion"] = _source_suggestion(
-            catalog_by_id.get(name, {}), state,
-            per_source_timeout_seconds=float(policy.per_source_timeout_seconds))
-        runtime_status.append(state)
+    latest = get_latest_diagnostics()
+    catalog = source_catalog()
+    disabled_by = {
+        source: {capability: state.get("disabled_by") for capability, state in capabilities.items()}
+        for source, capabilities in policy.capabilities.items()
+    }
+    disabled_reason = {
+        source: {capability: state.get("reason") for capability, state in capabilities.items()}
+        for source, capabilities in policy.capabilities.items()
+    }
     return {
-        "policy": asdict(policy),
+        "policy": asdict(policy), "capabilities": policy.capabilities,
         "defaults": defaults,
-        "quick_preset": {
-            "sources": quick_sources,
-            "search_deadline_seconds": 30,
-            "per_source_timeout_seconds": 12,
-            "verify_fulltext": True,
-            "fulltext_verify_timeout_seconds": 30,
-            "force_fulltext_probe": True,
-            "routing_mode": "smart",
+        "quick_preset": {"sources": quick_sources, "search_deadline_seconds": 30,
+                         "per_source_timeout_seconds": 12, "verify_fulltext": True,
+                         "fulltext_verify_timeout_seconds": 30, "force_fulltext_probe": True,
+                         "routing_mode": "smart"},
+        "source_catalog": catalog,
+        "configuration_status": {
+            row["id"]: row.get("configuration_status", "ready") for row in catalog
         },
-        "source_catalog": catalog_rows,
-        "runtime_status": runtime_status,
-        "breaker": {"threshold": 3, "cooldown_seconds": 300},
+        "disabled_by": disabled_by,
+        "disabled_reason": disabled_reason,
+        "diagnostic_summary": latest.get("capability"),
+        "last_checked_at": latest.get("last_complete_at"),
     }
 
 
@@ -590,65 +564,65 @@ async def put_admin_paper_search_policy(
     return await run_cpu_bound(_update)
 
 
-async def _save_paper_diagnostic(kind: str, started_at: float,
-                                 items: list[dict]) -> dict:
+@router.put("/paper-search/sources/{source}/capabilities/{capability}")
+async def put_paper_source_capability(
+    source: str, capability: str, body: PaperCapabilityUpdate,
+    authorization: str | None = Header(None),
+) -> dict:
+    admin = _administrator(authorization)
     from dataclasses import asdict
-    import time
-
-    from core.paper_search_settings_store import save_diagnostic_run
-
-    finished_at = time.time()
-    counts: dict[str, int] = {}
-    for item in items:
-        status = str(item.get("status") or "unknown")
-        counts[status] = counts.get(status, 0) + 1
-    run = await run_cpu_bound(
-        save_diagnostic_run, kind, started_at, finished_at,
-        {"count": len(items), "statuses": counts}, items,
+    from core.paper_search_settings_store import (
+        PaperSearchSettingsError, PaperSearchVersionConflict, set_source_capability,
     )
-    return asdict(run)
+    try:
+        policy = await run_cpu_bound(set_source_capability, source, capability, body.enabled,
+                                     expected_version=body.expected_version, updated_by=admin["id"])
+    except PaperSearchVersionConflict as exc:
+        raise HTTPException(409, str(exc)) from None
+    except PaperSearchSettingsError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return {"policy": asdict(policy), "capability": policy.capabilities[source][capability]}
 
 
-@router.post("/paper-search/diagnostics/connectivity")
-async def post_paper_search_connectivity(
+@router.post("/paper-search/diagnostics/capabilities")
+async def post_paper_capability_diagnostics(
     body: PaperSearchDiagnosticRequest,
     authorization: str | None = Header(None),
 ) -> dict:
     _administrator(authorization)
     import time
-
-    from tools.search.diagnostics import run_connectivity
+    from dataclasses import asdict
+    from core.paper_search_settings_store import apply_diagnostic_results
+    from tools.search.diagnostics import flatten_capability_diagnostics, run_platform_diagnostics
 
     if _PAPER_DIAGNOSTIC_SEMAPHORE.locked():
         raise HTTPException(409, "已有论文平台检测正在运行，请稍后重试")
     async with _PAPER_DIAGNOSTIC_SEMAPHORE:
         started_at = time.time()
         try:
-            items = await run_connectivity(body.sources)
+            platforms = await run_platform_diagnostics(body.sources, body.capability)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        return await _save_paper_diagnostic("connectivity", started_at, items)
-
-
-@router.post("/paper-search/diagnostics/download")
-async def post_paper_search_download_test(
-    body: PaperSearchDiagnosticRequest,
-    authorization: str | None = Header(None),
-) -> dict:
-    _administrator(authorization)
-    import time
-
-    from tools.search.diagnostics import run_download_speed
-
-    if _PAPER_DIAGNOSTIC_SEMAPHORE.locked():
-        raise HTTPException(409, "已有论文平台检测正在运行，请稍后重试")
-    async with _PAPER_DIAGNOSTIC_SEMAPHORE:
-        started_at = time.time()
-        try:
-            items = await run_download_speed(body.sources)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from None
-        return await _save_paper_diagnostic("download", started_at, items)
+        items = flatten_capability_diagnostics(platforms)
+        for platform in platforms:
+            platform.pop("_persist_capabilities", None)
+        scope = (
+            "single_capability" if body.capability
+            else "complete_platforms" if body.sources
+            else "complete_all"
+        )
+        run = await run_cpu_bound(
+            apply_diagnostic_results, items, started_at=started_at,
+            finished_at=time.time(), kind="capability", platforms=platforms,
+            summary_metadata={
+                "diagnostic_scope": scope,
+                "requested_sources": body.sources or [],
+            },
+        )
+        payload = asdict(run)
+        payload["platforms"] = platforms
+        payload["policy"] = _paper_policy_payload()["policy"]
+        return payload
 
 
 @router.get("/paper-search/diagnostics/latest")
@@ -661,33 +635,6 @@ async def get_paper_search_diagnostics_latest(
     return await run_cpu_bound(get_latest_diagnostics)
 
 
-class PaperSourceBreakerRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    source: str = Field(min_length=1, max_length=40)
-    action: Literal["open", "close"]
-
-
-@router.post("/paper-search/breaker")
-def post_paper_search_breaker(body: PaperSourceBreakerRequest,
-                              authorization: str | None = Header(None)) -> dict:
-    """Manually trip or recover one source's circuit breaker."""
-    _administrator(authorization)
-    from core.paper_search_settings_store import get_paper_search_policy
-    from core.search_source_health import get_search_health_registry
-    from tools.search.registry import SOURCE_IDS
-
-    if body.source not in SOURCE_IDS:
-        raise HTTPException(404, f"未知论文渠道：{body.source}")
-    health = get_search_health_registry()
-    if body.action == "open":
-        health.force_open(body.source)
-    else:
-        health.force_close(body.source)
-    state = health.get(body.source)
-    state["suggestion"] = _source_suggestion(
-        {}, state,
-        per_source_timeout_seconds=float(get_paper_search_policy().per_source_timeout_seconds))
-    return {"source": body.source, "state": state}
 
 # ---------------------------------------------------------------------------
 # Runtime per-tool time budgets (工具时限预算)

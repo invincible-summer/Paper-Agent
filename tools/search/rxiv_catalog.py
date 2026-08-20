@@ -121,6 +121,25 @@ def _fts_query(query: str) -> str:
     return " AND ".join(f'"{token}"' for token in tokens) or '""'
 
 
+def _row_to_paper(row, server: str) -> Paper:
+    authors = json.loads(row["authors_json"] or "[]")
+    year = int(row["published"][:4]) if str(row["published"])[:4].isdigit() else None
+    doi = row["doi"]
+    landing = row["url"] or ""
+    return Paper(
+        id=generate_paper_id(row["title"], authors[0] if authors else "", year, doi),
+        title=row["title"], authors=authors, year=year, venue=server,
+        doi=doi, source=server, abstract=row["abstract"],
+        # Rxiv's official metadata API does not expose a PDF URL.  The
+        # provider-hosted versioned ``.full.pdf`` URL is the controlled
+        # fallback used only after the canonical record supplied the DOI and
+        # version; downstream SSRF/PDF validation remains mandatory.
+        pdf_url=(f"{landing}.full.pdf" if landing else None),
+        keywords=[row["category"]] if row["category"] else [],
+        urls={server: landing} if landing else {},
+    )
+
+
 def search_catalog(server: str, query: str, limit: int = 20, *, path: Path | None = None) -> list[Paper]:
     conn = _connect(path)
     try:
@@ -133,18 +152,23 @@ def search_catalog(server: str, query: str, limit: int = 20, *, path: Path | Non
         rows = []
     finally:
         conn.close()
-    papers = []
-    for row in rows:
-        authors = json.loads(row["authors_json"] or "[]")
-        year = int(row["published"][:4]) if str(row["published"])[:4].isdigit() else None
-        doi = row["doi"]
-        papers.append(Paper(
-            id=generate_paper_id(row["title"], authors[0] if authors else "", year, doi),
-            title=row["title"], authors=authors, year=year, venue=server,
-            doi=doi, source=server, abstract=row["abstract"], pdf_url=None,
-            keywords=[row["category"]] if row["category"] else [], urls={server: row["url"]},
-        ))
-    return papers
+    return [_row_to_paper(row, server) for row in rows]
+
+
+def diagnostic_sample(server: str, *, path: Path | None = None) -> Paper | None:
+    """Return one indexed record solely for constructing a real local FTS probe."""
+    if server not in START_DATES:
+        raise ValueError("invalid rxiv server")
+    conn = _connect(path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM rxiv_records WHERE server=? "
+            "ORDER BY published DESC, id DESC LIMIT 1",
+            (server,),
+        ).fetchone()
+        return _row_to_paper(row, server) if row is not None else None
+    finally:
+        conn.close()
 
 
 def update_sync_state(server: str, *, next_date: date | None = None,

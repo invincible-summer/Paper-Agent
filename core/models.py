@@ -30,7 +30,13 @@ class Paper:
     language: str = "en"
     citation_count: int = 0
     abstract: str = ""
+    # Provenance survives cross-source dedup so capability gates apply to the
+    # platform that actually supplied each evidence field, not every merged id.
+    abstract_source: str = ""
+    abstract_policy_status: str = "available"  # available | disabled
+    abstract_policy_reason: str = ""
     pdf_url: str | None = None
+    pdf_source: str = ""
     pdf_path: str | None = None
     keywords: list[str] = field(default_factory=list)
     urls: dict[str, str] = field(default_factory=dict)
@@ -51,7 +57,11 @@ class Paper:
             "language": self.language,
             "citation_count": self.citation_count,
             "abstract": self.abstract,
+            "abstract_source": self.abstract_source,
+            "abstract_policy_status": self.abstract_policy_status,
+            "abstract_policy_reason": self.abstract_policy_reason,
             "pdf_url": self.pdf_url,
+            "pdf_source": self.pdf_source,
             "pdf_path": self.pdf_path,
             "keywords": self.keywords,
             "urls": self.urls,
@@ -66,7 +76,9 @@ class Paper:
         kwargs = {}
         for k in ["id", "title", "authors", "year", "venue", "doi",
                   "source", "language", "citation_count", "abstract",
-                  "pdf_url", "pdf_path", "keywords", "urls"]:
+                  "abstract_source", "abstract_policy_status",
+                  "abstract_policy_reason", "pdf_url", "pdf_source",
+                  "pdf_path", "keywords", "urls"]:
             v = d.get(k)
             if v is not None:
                 kwargs[k] = v

@@ -27,6 +27,7 @@ from typing import Any
 
 from core.embeddings import embed_texts
 from core.models import Paper
+from core.paper_search_settings_store import paper_abstract_text
 from core.reading_policy import (
     fulltext_available,
     normalize_fulltext_status,
@@ -52,7 +53,7 @@ def compute_semantic_edges(papers: list[Paper], existing_pairs: set[tuple[str, s
     try:
         vecs = vectors
         if vecs is None:
-            docs = [f"{p.title or ''}\n{(p.abstract or '')[:300]}" for p in papers]
+            docs = [f"{p.title or ''}\n{paper_abstract_text(p)[:300]}" for p in papers]
             vecs = embed_fn(docs)
     except Exception as e:  # noqa: BLE001
         logger.warning("semantic edge embedding failed: %s", e)
@@ -136,25 +137,16 @@ async def fetch_citation_edges(papers: list[Paper], citation_mode: str = "fast")
     if not dois:
         return [], "no_doi"
     try:
-        from core.paper_search_settings_store import get_paper_search_policy
-        from core.search_source_health import get_search_health_registry
-        if not get_paper_search_policy().sources.get("openalex", True):
-            return [], "disabled"
-        health = get_search_health_registry()
-        allowed, state, _ = health.allow("openalex")
+        from core.paper_search_settings_store import source_capability_enabled
+        allowed, _reason = source_capability_enabled("openalex", "search")
         if not allowed:
-            return [], f"breaker_{state}"
+            return [], "source_capability_disabled"
         timeout = _CITATION_TIMEOUTS.get(citation_mode, 3.0)
         async with asyncio.timeout(timeout):
             refs_by_doi, doi_to_oa, status = await openalex_refs.fetch_citation_bundle(dois)
         if status == "available":
-            current = health.get("openalex")
-            if current.get("last_error_code") in {"rate_limited", "timeout", "connection_error", "server_error", "invalid_response"}:
-                status = "unavailable"
-            else:
-                edges = openalex_refs.build_citation_edges(papers, refs_by_doi, doi_to_oa)
-                health.record_success("openalex")
-                return edges, status
+            edges = openalex_refs.build_citation_edges(papers, refs_by_doi, doi_to_oa)
+            return edges, status
         return [], status
     except TimeoutError:
         return [], "timeout"
@@ -210,7 +202,7 @@ async def build_genealogy(papers: list[Paper], cluster_of: dict[str, int],
             "layer": "core" if p.layer == "core" else "candidate",
             "authors": (p.authors or [])[:3],
             "url": _best_url(p),
-            "abstract": (p.abstract or "")[:200],
+            "abstract": paper_abstract_text(p)[:200],
             "venue": p.venue or "",
             # Only a verified live-PDF probe (or a real full_text summary)
             # may show as full-text available. A metadata pdf_url is often a

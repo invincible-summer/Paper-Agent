@@ -5,7 +5,7 @@ import asyncio
 import time
 
 from core.models import Paper
-from core.search_source_health import get_search_health_registry
+from core.paper_search_settings_store import source_capability_enabled
 from tools.search.base import SearchBackend, SearchOutcome, normalize_title, title_similarity
 from tools.search.registry import runtime_gate
 from tools.search.router import RouteHints, choose_sources, infer_route_hints
@@ -71,6 +71,21 @@ class SearchManager:
                     papers.extend(await backend.search(query, self.results_per_source))
                 outcome = SearchOutcome(source, papers, "ok" if papers else "reachable_empty", request_count=min(2, len(queries)))
             outcome.source = source
+            abstract_allowed, abstract_reason = source_capability_enabled(
+                source, "abstract"
+            )
+            for paper in outcome.papers:
+                if paper.abstract and not paper.abstract_source:
+                    paper.abstract_source = source
+                if paper.pdf_url and not paper.pdf_source:
+                    paper.pdf_source = source
+                if not abstract_allowed:
+                    paper.abstract = ""
+                    paper.abstract_source = source
+                    paper.abstract_policy_status = "disabled"
+                    paper.abstract_policy_reason = (
+                        abstract_reason or "source_capability_disabled"
+                    )
             if not outcome.network_ms:
                 outcome.network_ms = int((time.monotonic() - started) * 1000)
             return outcome
@@ -81,27 +96,16 @@ class SearchManager:
         except Exception:
             return SearchOutcome(source, [], "schema_mismatch", network_ms=int((time.monotonic()-started)*1000), error_code="schema_mismatch")
 
-    def _record_health(self, outcome: SearchOutcome) -> None:
-        health = get_search_health_registry()
-        latency = outcome.network_ms + outcome.queue_ms
-        code = outcome.error_code or (outcome.status if outcome.status in _FAILURE_CODES else None)
-        if code in _FAILURE_CODES:
-            health.record_failure(outcome.source, code, status=outcome.http_status, latency_ms=latency)
-        elif outcome.status != "local_budget_exhausted":
-            health.record_success(outcome.source, status=outcome.http_status, latency_ms=latency)
-
     async def _run_wave(self, sources: list[str], queries: list[str], deadline: float, report) -> list[SearchOutcome]:
-        health = get_search_health_registry()
         tasks: dict[asyncio.Task, str] = {}
         for source in sources:
             backend = BACKENDS.get(source)
             if backend is None: continue
-            allowed, state, remaining = health.allow(source)
+            allowed, reason = source_capability_enabled(source, "search")
             if not allowed:
-                report(f"  → {source} 已熔断，跳过（约 {remaining:.0f}s 后半开）")
+                report(f"  → {source} 搜索能力已关闭，跳过：{reason or '管理员策略'}")
                 continue
-            batch_queries = queries[:1] if state == "half_open" else queries
-            tasks[asyncio.create_task(self._bounded_search(source, backend, batch_queries))] = source
+            tasks[asyncio.create_task(self._bounded_search(source, backend, queries))] = source
         outcomes: list[SearchOutcome] = []
         pending = set(tasks)
         while pending:
@@ -110,7 +114,7 @@ class SearchManager:
             done, pending = await asyncio.wait(pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
             if not done: break
             for task in done:
-                outcome = task.result(); outcomes.append(outcome); self._record_health(outcome)
+                outcome = task.result(); outcomes.append(outcome)
                 report(f"  → {outcome.source} {outcome.status}（{len(outcome.papers)} 篇，{outcome.network_ms}ms）")
         if pending:
             for task in pending: task.cancel()
@@ -135,7 +139,7 @@ class SearchManager:
         queries = unique_queries or ([topic] if topic else [])
         if not queries: return []
 
-        eligible = {s for s in self.enabled_sources if runtime_gate(s)[0]}
+        eligible = {s for s in self.enabled_sources if runtime_gate(s)[0] and source_capability_enabled(s, "search")[0]}
         if self.routing_mode == "all_enabled":
             primary=[s for s in self.enabled_sources if s in eligible]; fallback=[]
             reasons={s:"管理员全启用模式" for s in primary}
@@ -144,8 +148,22 @@ class SearchManager:
             hints=infer_route_hints(" ".join([topic,*queries]), route_hints)
             decision=choose_sources(hints, self.enabled_sources, eligible)
             primary,fallback,reasons=decision.primary,decision.fallback,decision.reasons
+        ineligible = {}
+        skipped = []
+        for source in self.enabled_sources:
+            if source in eligible:
+                continue
+            configured, config_reason = runtime_gate(source)
+            if not configured:
+                reason_code, reason = config_reason, config_reason
+            else:
+                _allowed, reason = source_capability_enabled(source, "search")
+                reason_code = "source_capability_disabled"
+            ineligible[source] = reason_code
+            skipped.append({"source": source, "capability": "search", "status": "skipped",
+                            "reason_code": reason_code, "reason": reason or reason_code})
         self.last_route={"primary":primary,"fallback":fallback,"reasons":reasons,
-                         "ineligible":{s:runtime_gate(s)[1] for s in self.enabled_sources if s not in eligible}}
+                         "ineligible":ineligible, "skipped":skipped}
         report(f"  → 智能路由主渠道：{', '.join(primary) if primary else '无'}")
         if "pubmed" in primary or "pubmed" in fallback:
             report("  → PubMed/NLM 仅提供来源记录，不代表 NLM 对内容或结论背书；请核对原始记录。")
@@ -193,10 +211,14 @@ class SearchManager:
 def _merge(existing: Paper, new: Paper) -> None:
     if new.abstract and len(new.abstract) > len(existing.abstract):
         existing.abstract = new.abstract
+        existing.abstract_source = new.abstract_source or new.source
+        existing.abstract_policy_status = new.abstract_policy_status
+        existing.abstract_policy_reason = new.abstract_policy_reason
     if new.citation_count > existing.citation_count:
         existing.citation_count = new.citation_count
     if new.pdf_url and not existing.pdf_url:
         existing.pdf_url = new.pdf_url
+        existing.pdf_source = new.pdf_source or new.source
     if new.doi and not existing.doi:
         existing.doi = new.doi
     if new.keywords:

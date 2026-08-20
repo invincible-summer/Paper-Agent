@@ -110,6 +110,12 @@ async def probe_pdf_url(
     The actual full download only happens later in deep_read.
     """
     import asyncio
+    from urllib.parse import urlparse
+
+    if (urlparse(url).hostname or "").lower() in {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}:
+        from tools.pdf.arxiv_wget import fetch_arxiv_pdf
+        result = await fetch_arxiv_pdf(url, max_bytes=8192, timeout=timeout, max_redirects=max_redirects, probe=True)
+        return (result.ok, "ok" if result.ok else (result.error_code or "probe_error"))
 
     current = url
     use_range = True
@@ -191,21 +197,35 @@ class PDFFetcher:
     async def candidate_urls(self, paper: Paper) -> list[str]:
         """OA candidates allowed by the administrator's runtime policy."""
         from core.paper_search_settings_store import (
-            get_paper_search_policy, remote_probe_allowed, source_enabled,
+            get_paper_search_policy, paper_capability_source, remote_probe_allowed,
+            source_capability_enabled,
         )
 
         policy = get_paper_search_policy()
         override = bool(getattr(self, "admin_override", False))
         if not override and not remote_probe_allowed(policy):
             return []
+        capability_source = paper_capability_source(paper, "fulltext")
+        if not override and not source_capability_enabled(
+            capability_source, "fulltext", policy
+        )[0]:
+            return []
         urls: list[str] = []
-        if paper.pdf_url and (override or source_enabled(paper.source, policy)):
+        if paper.pdf_url and (override or source_capability_enabled(
+            capability_source, "fulltext", policy
+        )[0]):
             urls.append(paper.pdf_url)
         # Keep the fallback lazy: resolving every DOI up front made a normal
         # result set issue dozens of unnecessary Unpaywall calls even when an
         # explicit source PDF was already usable.
         if not urls:
-            oa_url = await self._unpaywall_pdf_url(paper.doi) if paper.doi else None
+            unpaywall_allowed = override or source_capability_enabled(
+                "unpaywall", "fulltext", policy
+            )[0]
+            oa_url = (
+                await self._unpaywall_pdf_url(paper.doi)
+                if paper.doi and unpaywall_allowed else None
+            )
             if oa_url:
                 urls.append(oa_url)
         return urls
@@ -213,7 +233,8 @@ class PDFFetcher:
     async def fetch(self, paper: Paper) -> str | None:
         """Return a verified local PDF, downloading only when policy permits."""
         from core.paper_search_settings_store import (
-            get_paper_search_policy, remote_download_allowed,
+            get_paper_search_policy, paper_capability_source,
+            remote_download_allowed, source_capability_enabled,
         )
 
         logical_name = f"{_sanitize_filename_component(paper.id)}.pdf"
@@ -234,7 +255,14 @@ class PDFFetcher:
 
         override = bool(getattr(self, "admin_override", False))
         origin = str(getattr(self, "fetch_origin", "automatic"))
-        if not override and not remote_download_allowed(origin, get_paper_search_policy()):
+        policy = get_paper_search_policy()
+        capability_source = paper_capability_source(paper, "fulltext")
+        if not override and (
+            not remote_download_allowed(origin, policy)
+            or not source_capability_enabled(
+                capability_source, "fulltext", policy
+            )[0]
+        ):
             return None
 
         urls = await self.candidate_urls(paper)
@@ -248,7 +276,10 @@ class PDFFetcher:
         # An explicit source PDF may be stale.  Only after it actually fails do
         # the DOI -> Unpaywall fallback, preserving the documented order
         # without paying the lookup cost on the common success path.
-        if paper.pdf_url and paper.doi:
+        if (paper.pdf_url and paper.doi
+                and (override or source_capability_enabled(
+                    "unpaywall", "fulltext", policy
+                )[0])):
             oa_url = await self._unpaywall_pdf_url(paper.doi)
             if oa_url and oa_url not in urls:
                 path = await self._download(oa_url, local_path, paper.title)
@@ -264,6 +295,10 @@ class PDFFetcher:
         from core.config import get_settings
 
         from tools.search.registry import contact_email
+        from core.paper_search_settings_store import source_capability_enabled
+        if (not bool(getattr(self, "admin_override", False))
+                and not source_capability_enabled("unpaywall", "fulltext")[0]):
+            return None
         email = contact_email(get_settings().search)
         doi = (doi or "").strip()
         for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
@@ -283,7 +318,7 @@ class PDFFetcher:
             if not data.get("is_oa"):
                 return None
             best = data.get("best_oa_location") or {}
-            url = best.get("url_for_pdf") or best.get("url")
+            url = best.get("url_for_pdf")
             if url:
                 return url
             for loc in data.get("oa_locations") or []:
@@ -296,7 +331,20 @@ class PDFFetcher:
 
     async def _download(self, url: str, local_path: Path, title: str = "") -> str | None:
         """Stream one OA PDF with per-redirect SSRF validation."""
+        from urllib.parse import urlparse
         from tools.ingest.downloader import download_to_temp
+
+        if (urlparse(url).hostname or "").lower() in {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}:
+            from tools.pdf.arxiv_wget import fetch_arxiv_pdf
+            result = await fetch_arxiv_pdf(url, max_bytes=MAX_PDF_BYTES, timeout=60, destination=local_path)
+            if not result.ok:
+                logger.warning("arXiv wget download failed: %s", result.error_code)
+                return None
+            if getattr(self, "_artifact_store", None) is not None:
+                artifact = self._artifact_store.save_public_pdf(local_path, logical_name=local_path.name)
+                local_path.unlink(missing_ok=True)
+                return str(artifact.path)
+            return str(local_path)
 
         temp_dir = (
             self.storage_context.temp_dir

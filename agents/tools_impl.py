@@ -324,6 +324,18 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb,
 
     total = len(session.papers) + len(session.candidates)
     if total == 0:
+        route = result.get("search_route", {}) or {}
+        skipped = list(route.get("skipped", []) or [])
+        if skipped and not route.get("primary") and not route.get("fallback"):
+            message = (
+                "当前没有可用的网络论文平台：候选平台均因管理员持久能力策略或静态配置被跳过。"
+                "已停止本次检索，不会重复尝试这些平台。"
+            )
+            return ToolResult(
+                status="error", tool="search_papers", text=message,
+                error={"code": ErrorCode.SOURCE_CAPABILITY_DISABLED, "message": message},
+                data={"skipped_capabilities": skipped, "search_route": route},
+            )
         return err(
             "search_papers", ErrorCode.NO_PAPERS,
             f"主题「{topic}」没有检索到论文。建议：换更宽泛的英文关键词、缩短过长的主题句、"
@@ -367,6 +379,10 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb,
         search_queries=session.search_queries,
         source_notices=source_notices,
         search_route=result.get("search_route", {}),
+        capability_skips=(
+            list((result.get("search_route", {}) or {}).get("skipped", []) or [])
+            + list(result.get("capability_skips", []) or [])
+        ),
         budget_exhausted=bool(result.get("budget_exhausted")),
         completed_stages=list(result.get("completed_stages", [])),
         skipped_stages=list(result.get("skipped_stages", [])),
@@ -441,6 +457,7 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
 
     failures: list[dict] = []
     fallback_details: list[dict] = []
+    capability_skips: list[dict] = []
     n_summaries = 0
     if full_group:
         state: dict = {
@@ -455,6 +472,7 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
         n_summaries = len(result.get("paper_summaries", {}))
         failures.extend(result.get("read_failures", []))
         fallback_details.extend(result.get("fulltext_fallbacks", []))
+        capability_skips.extend(result.get("capability_skips", []))
 
     # Never count an attempted download as a full read. Actual full-text papers
     # are those whose summaries now carry a real parsed body.
@@ -473,10 +491,18 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
         if summary is None or p.id in fallback_ids or p.id in failure_ids:
             continue
         if not summary_has_full_text(summary):
+            capability_skip = _fulltext_capability_skip(session, p)
+            if capability_skip and not any(
+                row.get("paper_id") == p.id for row in capability_skips
+            ):
+                capability_skips.append(capability_skip)
             fallback_details.append({
                 "paper_id": p.id, "title": p.title or p.id,
-                "reason": ("oa_fulltext_unavailable" if explicit_remote_allowed
-                           else "remote_fetch_restricted"),
+                "reason": (
+                    "source_capability_disabled" if capability_skip
+                    else "oa_fulltext_unavailable" if explicit_remote_allowed
+                    else "remote_fetch_restricted"
+                ),
             })
             fallback_ids.add(p.id)
 
@@ -488,7 +514,10 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
             _persist_fulltext_status(p, "available", "deep_read_full_verified", session)
         elif p.id in fallback_ids or p.id in failure_ids:
             restricted = any(
-                detail.get("paper_id") == p.id and detail.get("reason") == "remote_fetch_restricted"
+                detail.get("paper_id") == p.id
+                and detail.get("reason") in {
+                    "remote_fetch_restricted", "source_capability_disabled"
+                }
                 for detail in fallback_details
             )
             status = "unknown" if restricted else "unavailable"
@@ -531,6 +560,7 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
             if fallback_details:
                 reason_labels = {
                     "oa_fulltext_unavailable": "无 OA 全文",
+                    "source_capability_disabled": "平台全文能力已关闭",
                     "fulltext_parse_degraded": "全文解析降级",
                     "remote_fetch_restricted": (
                         "管理员限制远程全文拉取" if disclose_restriction else "仅使用现有证据"),
@@ -567,6 +597,7 @@ async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> Tool
         attachments=attachment_results, failures=failures,
         full_text_paper_ids=actual_full_ids,
         abstract_fallback_papers=fallback_details,
+        capability_skips=capability_skips,
     )
 
 
@@ -593,6 +624,7 @@ async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> Too
                    "会话中还没有可问答的内容。请先 search_papers（可再 deep_read），或让用户上传 PDF。")
 
     fulltext_missing_title = ""
+    capability_skips: list[dict] = []
     if paper_id:
         selected_paper = session.paper_by_id(paper_id)
         if selected_paper is None:
@@ -600,6 +632,9 @@ async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> Too
                        "指定 paper_id 不在当前会话论文集中。")
         paper_id = selected_paper.id
         had_fulltext = summary_has_full_text(session.paper_summaries.get(paper_id))
+        capability_skip = _fulltext_capability_skip(session, selected_paper)
+        if capability_skip:
+            capability_skips.append(capability_skip)
         fetched = await _ensure_fulltext(session, paper_id, progress_cb)
         if fetched and not had_fulltext:
             session.full_read_count += 1
@@ -683,7 +718,9 @@ async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> Too
     # no user confirmation.
     escalated = False
     if evidence_gap(answer, passages, query):
-        n = await _escalate_fulltext(session, _escalation_targets(passages), progress_cb)
+        n = await _escalate_fulltext(
+            session, _escalation_targets(passages), progress_cb, capability_skips
+        )
         if n:
             passages2 = await run_cpu_bound(
                 _retrieve_passages, session, retrieval_query, paper_id, top_k, modality
@@ -702,14 +739,20 @@ async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> Too
     if escalated:
         text += "（检测到摘要级证据不足，已自动补读全文后重新检索回答）"
     elif fulltext_missing_title:
-        text += f"（注意：{fulltext_missing_title} 未能取得 OA 全文，本次回答仅基于摘要级证据）"
+        if capability_skips:
+            text += (
+                f"（注意：{fulltext_missing_title} 所属平台的全文获取能力已关闭，"
+                "已跳过 OA 探测与下载；本次回答仅基于当前允许的摘要级证据）"
+            )
+        else:
+            text += f"（注意：{fulltext_missing_title} 未能取得 OA 全文，本次回答仅基于摘要级证据）"
     elif evidence_gap(answer, passages, query):
         text += "（检测到证据缺口，但相关论文未能取得 OA 全文；请以上述摘要级边界为准）"
     return ok(
         "ask_papers",
         text,
         answer=answer, sources=_passages_to_sources(passages),
-        attachments=attachment_results,
+        attachments=attachment_results, capability_skips=capability_skips,
     )
 
 
@@ -803,8 +846,10 @@ def _escalation_targets(passages: list[dict]) -> list[str]:
     return out
 
 
-async def _escalate_fulltext(session: ChatSession, paper_ids: list[str],
-                             progress_cb) -> int:
+async def _escalate_fulltext(
+    session: ChatSession, paper_ids: list[str], progress_cb,
+    capability_skips: list[dict] | None = None,
+) -> int:
     """Budget-capped targeted full-text fetch; returns newly-fetched count."""
     from core.reading_policy import (
         FULL_READS_PER_ASK, full_read_allowance, summary_has_full_text,
@@ -816,6 +861,14 @@ async def _escalate_fulltext(session: ChatSession, paper_ids: list[str],
         s = session.paper_summaries.get(pid)
         if summary_has_full_text(s):
             continue  # already full — nothing to fetch, no budget spent
+        paper = session.paper_by_id(pid)
+        skip = _fulltext_capability_skip(session, paper) if paper is not None else None
+        if skip:
+            if capability_skips is not None and not any(
+                row.get("paper_id") == pid for row in capability_skips
+            ):
+                capability_skips.append(skip)
+            continue
         if await _ensure_fulltext(session, pid, progress_cb):
             done += 1
     session.full_read_count += done
@@ -920,6 +973,36 @@ def _ensure_session_index(session: ChatSession) -> None:
         logger.debug("session index self-heal skipped: %s", e)
 
 
+def _fulltext_capability_skip(session: ChatSession, paper: Paper) -> dict | None:
+    """Return a structured remote-fulltext skip unless verified local evidence exists."""
+    from core.paper_search_settings_store import (
+        capability_skip_result, paper_capability_source,
+        source_capability_enabled,
+    )
+    from core.reading_policy import summary_has_full_text
+
+    if summary_has_full_text(session.paper_summaries.get(paper.id)):
+        return None
+    local_path = getattr(paper, "pdf_path", None)
+    if local_path:
+        try:
+            with open(local_path, "rb") as stream:
+                if stream.read(5) == b"%PDF-":
+                    return None
+        except OSError:
+            pass
+    allowed, reason = source_capability_enabled(
+        paper_capability_source(paper, "fulltext"), "fulltext"
+    )
+    if allowed:
+        return None
+    row = capability_skip_result(
+        paper_capability_source(paper, "fulltext"), "fulltext", reason
+    )
+    row.update({"paper_id": paper.id, "title": paper.title or paper.id})
+    return row
+
+
 async def _ensure_fulltext(session: ChatSession, paper_id: str, progress_cb=None) -> bool:
     """On-demand full-text for a single paper (targeted deep-dive / escalation).
 
@@ -947,6 +1030,16 @@ async def _ensure_fulltext(session: ChatSession, paper_id: str, progress_cb=None
         disclose_fetch_policy, get_paper_search_policy, remote_download_allowed,
     )
     fetch_policy = get_paper_search_policy()
+    from core.paper_search_settings_store import (
+        paper_capability_source, source_capability_enabled,
+    )
+    fulltext_allowed, capability_reason = source_capability_enabled(
+        paper_capability_source(paper, "fulltext"), "fulltext", fetch_policy
+    )
+    if not fulltext_allowed:
+        if progress_cb:
+            progress_cb(capability_reason or "该论文来源的全文获取能力已关闭；跳过 OA 探测和下载。")
+        return False
     if not remote_download_allowed("automatic", fetch_policy):
         if progress_cb and disclose_fetch_policy(fetch_policy):
             progress_cb("管理员当前限制自动论文全文拉取；本次使用已有缓存与摘要。")
@@ -1038,6 +1131,26 @@ def _element_passage_id(element_id: str) -> str:
     return f"{element_id}::element"
 
 
+def _network_paper_evidence_allowed(session: ChatSession, paper_id: str) -> bool:
+    """Whether cached abstract/summary evidence may enter the current RAG turn."""
+    if not paper_id or paper_id.startswith("upload:"):
+        return True
+    paper = session.paper_by_id(paper_id)
+    if paper is None:
+        return True
+    from core.paper_search_settings_store import (
+        paper_capability_source, source_capability_enabled,
+    )
+    from core.reading_policy import summary_has_full_text
+    if summary_has_full_text(session.paper_summaries.get(paper_id)):
+        return True
+    if getattr(paper, "pdf_path", None):
+        return True
+    return source_capability_enabled(
+        paper_capability_source(paper, "abstract"), "abstract"
+    )[0]
+
+
 def _session_corpus(session: ChatSession) -> list[dict]:
     """In-memory BM25 corpus from session data (summaries + full texts + uploads
     + figure/table/formula element captions)."""
@@ -1049,11 +1162,14 @@ def _session_corpus(session: ChatSession) -> list[dict]:
     corpus: list[dict] = []
     title_of = {p.id: p.title for p in session.all_papers()}
     for p in session.all_papers():
-        text = f"{p.title or ''}\n{p.abstract or ''}".strip()
+        from core.paper_search_settings_store import paper_abstract_text
+        text = f"{p.title or ''}\n{paper_abstract_text(p)}".strip()
         if text:
             corpus.append({"id": p.id, "paper_id": p.id, "title": p.title or "",
                            "section": "abstract", "text": text})
     for pid, s in (session.paper_summaries or {}).items():
+        if not _network_paper_evidence_allowed(session, pid):
+            continue
         title = title_of.get(pid, pid)
         body_parts = [getattr(s, "research_problem", "") or "",
                       getattr(s, "methodology", "") or ""]
@@ -1184,8 +1300,11 @@ def _hybrid_retrieve(session: ChatSession, query: str, paper_id: str | None,
                 pid_key = h.id[len(prefix):] if h.id.startswith(prefix) else h.id
                 meta = h.metadata or {}
                 # Small-to-big: dedupe on the parent passage, return parent text.
+                hit_paper_id = meta.get("paper_id", "")
+                if not _network_paper_evidence_allowed(session, hit_paper_id):
+                    continue
                 parent_id = meta.get("parent_id") or ""
-                key = f"{meta.get('paper_id', '')}::{parent_id}" if parent_id else pid_key
+                key = f"{hit_paper_id}::{parent_id}" if parent_id else pid_key
                 if key in passages_by_id:
                     continue
                 passages_by_id[key] = {
@@ -1290,12 +1409,32 @@ async def _tool_research_map(args: dict, session: ChatSession, progress_cb) -> T
     _sync_fulltext_status_from_summaries(session)
     policy = get_performance_policy()
     citation_mode = policy.map_citation_mode
+    capability_skips: list[dict] = []
+    citation_capability_enabled = True
     try:
-        from core.paper_search_settings_store import get_paper_search_policy
-        if not get_paper_search_policy().sources.get("openalex", False):
-            citation_mode = "off"
+        from core.paper_search_settings_store import (
+            capability_skip_result, paper_capability_source,
+            source_capability_enabled,
+        )
+        citation_capability_enabled, citation_reason = source_capability_enabled(
+            "openalex", "search"
+        )
+        if citation_mode != "off" and not citation_capability_enabled:
+            capability_skips.append(capability_skip_result(
+                "openalex", "search", citation_reason
+            ))
+        seen_abstract_sources: set[str] = set()
+        for paper in session.all_papers():
+            source = paper_capability_source(paper, "abstract")
+            allowed, reason = source_capability_enabled(source, "abstract")
+            if allowed or source in seen_abstract_sources:
+                continue
+            seen_abstract_sources.add(source)
+            capability_skips.append(capability_skip_result(
+                source, "abstract", reason
+            ))
     except Exception:
-        citation_mode = "off"
+        citation_capability_enabled = False
 
     all_papers = session.all_papers()
     fingerprint_payload = [{
@@ -1304,7 +1443,11 @@ async def _tool_research_map(args: dict, session: ChatSession, progress_cb) -> T
         "fulltext_status": getattr(p, "fulltext_status", "unknown"),
         "doi": p.doi or "",
     } for p in all_papers]
-    fingerprint_payload.extend([citation_mode, get_prompt("map.summary").version])
+    fingerprint_payload.extend([
+        citation_mode, citation_capability_enabled,
+        sorted((row.get("source"), row.get("capability")) for row in capability_skips),
+        get_prompt("map.summary").version,
+    ])
     fingerprint = hashlib.sha256(json.dumps(
         fingerprint_payload, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
     cached = session.map_data if isinstance(session.map_data, dict) else {}
@@ -1319,6 +1462,7 @@ async def _tool_research_map(args: dict, session: ChatSession, progress_cb) -> T
         progress=progress_cb, citation_mode=citation_mode)
     map_data["fingerprint"] = fingerprint
     map_data["cache_hit"] = False
+    map_data["capability_skips"] = capability_skips
     session.map_data = map_data
 
     graph = map_data.get("graph", {})

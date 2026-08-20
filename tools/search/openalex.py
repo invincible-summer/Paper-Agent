@@ -28,7 +28,7 @@ class OpenAlexBackend(SearchBackend):
         params = {
             "search": query,
             "sort": "relevance_score:desc",
-            "per-page": min(limit, 50),
+            "per_page": min(limit, 50),
             "api_key": api_key,
         }
         try:

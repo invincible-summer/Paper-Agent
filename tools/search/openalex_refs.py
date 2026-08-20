@@ -12,12 +12,18 @@ logger = logging.getLogger(__name__)
 
 API_URL = "https://api.openalex.org/works"
 
-# Citation enrichment is non-critical: share the OpenAlex breaker and use the
-# same short 429 retry policy as the primary search backend.
+# Citation enrichment is non-critical and uses the same short bounded 429
+# retry policy as the primary OpenAlex backend.
 _limiter = RateLimiter(
     max_concurrent=5, min_interval=0.5,
     source_name="openalex", fast_fail_429=True,
 )
+
+
+def _capability_allowed() -> bool:
+    from core.paper_search_settings_store import source_capability_enabled
+
+    return source_capability_enabled("openalex", "search")[0]
 
 
 def _auth_params() -> dict:
@@ -31,24 +37,34 @@ async def fetch_referenced_works(dois: list[str]) -> dict[str, list[str]]:
     Keyed by normalized DOI. Papers with no DOI are the caller's responsibility.
     """
     out: dict[str, list[str]] = {}
-    if not dois or not getattr(get_settings().search, "openalex_api_key", ""):
+    if not dois or not _capability_allowed() or not getattr(get_settings().search, "openalex_api_key", ""):
         return out
     client = get_search_http_client()
+
     async def fetch_one(doi: str) -> None:
-            ndoi = _norm_doi(doi)
-            if not ndoi:
+        ndoi = _norm_doi(doi)
+        if not ndoi:
+            return
+        url = f"{API_URL}/doi:{ndoi}"
+        params = {"select": "id,referenced_works", **_auth_params()}
+        try:
+            async with _limiter:
+                response = await _limiter.fetch(
+                    client, "GET", url, params=params
+                )
+            if response.status_code != 200:
+                logger.debug(
+                    "OpenAlex refs lookup %s -> %s",
+                    ndoi, response.status_code,
+                )
                 return
-            url = f"{API_URL}/doi:{ndoi}"
-            params = {"select": "id,referenced_works", **_auth_params()}
-            try:
-                async with _limiter:
-                    resp = await _limiter.fetch(client, "GET", url, params=params)
-                if resp.status_code != 200:
-                    logger.debug("OpenAlex refs lookup %s -> %s", ndoi, resp.status_code)
-                    return
-                out[ndoi] = list(resp.json().get("referenced_works") or [])
-            except Exception as e:
-                logger.warning("OpenAlex refs lookup failed for %s: %s", ndoi, e)
+            out[ndoi] = list(
+                response.json().get("referenced_works") or []
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "OpenAlex refs lookup failed for %s: %s", ndoi, exc
+            )
     await asyncio.gather(*(fetch_one(doi) for doi in dict.fromkeys(dois)))
     return out
 
@@ -56,24 +72,34 @@ async def fetch_referenced_works(dois: list[str]) -> dict[str, list[str]]:
 async def resolve_openalex_ids(dois: list[str]) -> dict[str, str]:
     """Map each DOI -> its OpenAlex work id (W...), keyed by normalized DOI."""
     out: dict[str, str] = {}
-    if not dois or not getattr(get_settings().search, "openalex_api_key", ""):
+    if not dois or not _capability_allowed() or not getattr(get_settings().search, "openalex_api_key", ""):
         return out
     client = get_search_http_client()
+
     async def fetch_one(doi: str) -> None:
-            ndoi = _norm_doi(doi)
-            if not ndoi:
+        ndoi = _norm_doi(doi)
+        if not ndoi:
+            return
+        params = {
+            "filter": f"doi:{ndoi}",
+            "select": "id,doi",
+            "per_page": 1,
+            **_auth_params(),
+        }
+        try:
+            async with _limiter:
+                response = await _limiter.fetch(
+                    client, "GET", API_URL, params=params
+                )
+            if response.status_code != 200:
                 return
-            params = {"filter": f"doi:{ndoi}", "select": "id,doi", "per-page": 1, **_auth_params()}
-            try:
-                async with _limiter:
-                    resp = await _limiter.fetch(client, "GET", API_URL, params=params)
-                if resp.status_code != 200:
-                    return
-                results = resp.json().get("results") or []
-                if results:
-                    out[ndoi] = results[0].get("id", "")
-            except Exception as e:
-                logger.debug("OpenAlex id resolve failed for %s: %s", ndoi, e)
+            results = response.json().get("results") or []
+            if results:
+                out[ndoi] = results[0].get("id", "")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "OpenAlex id resolve failed for %s: %s", ndoi, exc
+            )
     await asyncio.gather(*(fetch_one(doi) for doi in dict.fromkeys(dois)))
     return out
 
@@ -140,13 +166,13 @@ def snowball_misses(
 
 async def fetch_works_metadata(openalex_ids: list[str]) -> list[dict]:
     """Batch-fetch metadata for a list of OpenAlex work ids (1 request)."""
-    if not openalex_ids:
+    if not openalex_ids or not _capability_allowed():
         return []
     flt = "|".join(openalex_ids)
     params = {
         "filter": f"ids.openalex:{flt}",
         "select": "id,doi,title,publication_year,cited_by_count,authorships,primary_location",
-        "per-page": min(len(openalex_ids), 50),
+        "per_page": min(len(openalex_ids), 50),
         **_auth_params(),
     }
     if not getattr(get_settings().search, "openalex_api_key", ""):
@@ -216,9 +242,10 @@ def _paper_id_for_doi(papers: list[Paper], doi: str) -> str | None:
 
 
 def _iter_papers_with_doi(papers: list[Paper]):
-    for p in papers:
-        if p.doi:
-            yield p.id, p.doi
+    for paper in papers:
+        if paper.doi:
+            yield paper.id, paper.doi
+
 
 async def fetch_citation_bundle(dois: list[str]) -> tuple[dict[str, list[str]], dict[str, str], str]:
     """Fetch DOI -> OpenAlex id/references with one batched works request.
@@ -228,12 +255,12 @@ async def fetch_citation_bundle(dois: list[str]) -> tuple[dict[str, list[str]], 
     status string rather than raised to the map builder.
     """
     normalized = list(dict.fromkeys(_norm_doi(d) for d in dois if _norm_doi(d)))[:100]
-    if not normalized:
+    if not normalized or not _capability_allowed():
         return {}, {}, "no_doi"
     params = {
         "filter": "doi:" + "|".join(normalized),
         "select": "id,doi,referenced_works",
-        "per-page": min(len(normalized), 100),
+        "per_page": min(len(normalized), 100),
         **_auth_params(),
     }
     try:

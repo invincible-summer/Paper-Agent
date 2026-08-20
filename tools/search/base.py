@@ -267,7 +267,7 @@ class RateLimiter:
                     continue
                 break
         except Exception:
-            # The backend classifies timeout/request/parse failures so a single
-            # network exception is counted exactly once by the source breaker.
+            # The backend classifies timeout/request/parse failures once in the
+            # returned SearchOutcome; no source-level breaker state is mutated.
             raise
         return resp

@@ -135,19 +135,15 @@ def test_search_manager_returns_partial_results_at_hard_deadline(monkeypatch):
     assert any(outcome.status == "local_budget_exhausted" for outcome in manager.last_outcomes)
 
 
-def test_local_source_timeout_does_not_poison_breaker(monkeypatch):
+def test_local_source_timeout_is_local_budget_only(monkeypatch):
     import tools.search.manager as manager_mod
-    from core.search_source_health import get_search_health_registry
     class Hanging:
         async def search_many(self,queries,limit):
             await asyncio.Event().wait()
-    monkeypatch.setitem(manager_mod.BACKENDS,"hang-local",Hanging())
-    health=get_search_health_registry();health.reset()
     manager=manager_mod.SearchManager(["hang-local"],per_source_timeout_seconds=.01,search_deadline_seconds=.03)
     outcome=asyncio.run(manager._bounded_search("hang-local",Hanging(),["q"]))
-    manager._record_health(outcome)
     assert outcome.status=="local_budget_exhausted"
-    assert health.get("hang-local")["consecutive_failures"]==0
+    assert outcome.error_code=="local_budget_exhausted"
 
 
 def test_rate_limiter_telemetry_counts_retry_requests():
@@ -182,7 +178,6 @@ def test_explicit_ineligible_source_is_not_routed():
 
 def test_smart_manager_uses_at_most_four_plus_two_sources(monkeypatch):
     import tools.search.manager as manager_mod
-    from core.search_source_health import get_search_health_registry
     from tools.search.base import SearchOutcome
     called=[]
     primary={"dblp","arxiv","crossref","openalex"}
@@ -197,7 +192,7 @@ def test_smart_manager_uses_at_most_four_plus_two_sources(monkeypatch):
     for source in SOURCE_IDS:
         monkeypatch.setitem(manager_mod.BACKENDS,source,Fake(source))
     monkeypatch.setattr(manager_mod,"runtime_gate",lambda source:(True,"ready"))
-    get_search_health_registry().reset()
+    monkeypatch.setattr(manager_mod,"source_capability_enabled",lambda source, capability:(True,None))
     manager=manager_mod.SearchManager(list(SOURCE_IDS),routing_mode="smart",
                                       search_deadline_seconds=10,per_source_timeout_seconds=1)
     papers=asyncio.run(manager.search_all(["agent"],route_hints=RouteHints(disciplines=["cs"])))
@@ -228,8 +223,12 @@ def test_openaire_oauth_token_cache_and_anonymous_budget(monkeypatch):
         status_code=200
         def json(self): return {"access_token":"token","expires_in":600}
     class Client:
-        def __init__(self): self.calls=0
-        async def post(self,*args,**kwargs): self.calls+=1; return Resp()
+        def __init__(self):
+            self.calls = []
+
+        async def post(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return Resp()
     client=Client()
     settings=SimpleNamespace(search=SimpleNamespace(
         openaire_client_id="client",openaire_client_secret="secret"))
@@ -238,7 +237,11 @@ def test_openaire_oauth_token_cache_and_anonymous_budget(monkeypatch):
     mod._token=None
     assert asyncio.run(mod._access_token())=="token"
     assert asyncio.run(mod._access_token())=="token"
-    assert client.calls==1
+    assert len(client.calls) == 1
+    args, kwargs = client.calls[0]
+    assert args == (mod.TOKEN_URL,)
+    assert kwargs["data"] == {"grant_type": "client_credentials"}
+    assert kwargs["auth"] == ("client", "secret")
     mod._token=None
     mod._anonymous_calls.clear()
     try:
@@ -246,3 +249,18 @@ def test_openaire_oauth_token_cache_and_anonymous_budget(monkeypatch):
         assert mod._allow_anonymous() is False
     finally:
         mod._anonymous_calls.clear()
+
+
+def test_disabled_search_capability_never_creates_backend_task(monkeypatch):
+    import tools.search.manager as manager_mod
+    called=[]
+    class Fake:
+        async def search_many(self,queries,limit):
+            called.append(True); return []
+    monkeypatch.setitem(manager_mod.BACKENDS,"arxiv",Fake())
+    monkeypatch.setattr(manager_mod,"runtime_gate",lambda _source:(True,"ready"))
+    monkeypatch.setattr(manager_mod,"source_capability_enabled",lambda _source,_capability:(False,"diagnostic disabled"))
+    manager=manager_mod.SearchManager(["arxiv"],routing_mode="all_enabled")
+    papers=asyncio.run(manager.search_all(["query"]))
+    assert papers==[] and called==[]
+    assert manager.last_route["skipped"][0]["reason_code"]=="source_capability_disabled"

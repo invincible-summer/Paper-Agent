@@ -28,6 +28,9 @@ async def enrich_by_dois(dois: list[str]) -> dict[str, dict]:
     dois = [d for d in dict.fromkeys(dois) if d][:_MAX_LOOKUPS]
     if not dois:
         return {}
+    from core.paper_search_settings_store import source_capability_enabled
+    if not source_capability_enabled("crossref", "search")[0]:
+        return {}
     s = get_settings()
     email = s.search.crossref_email or s.search.openalex_email
     params = {"mailto": email} if email else None

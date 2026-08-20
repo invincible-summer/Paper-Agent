@@ -283,9 +283,24 @@ export async function updateDisplayPolicy(
 export type PaperFetchMode = "enabled" | "explicit_only" | "probe_only" | "disabled";
 export type FetchPolicyDisclosure = "affected_only" | "silent";
 export type PaperRoutingMode = "smart" | "all_enabled";
+export type PaperCapability = "search" | "abstract" | "fulltext";
+export type CapabilityDiagnosticStatus = "ok" | "slow" | "failed" | "not_applicable" | "not_configured" | "empty";
+
+export interface PaperCapabilityState {
+  enabled: boolean;
+  disabled_by: "administrator" | "diagnostic" | null;
+  reason_code: string | null;
+  reason: string | null;
+  disabled_at: number | null;
+  last_checked_at: number | null;
+  last_diagnostic_status: CapabilityDiagnosticStatus | null;
+  last_latency_ms: number | null;
+  last_kb_per_second: number | null;
+}
 
 export interface PaperSearchPolicy {
   sources: Record<string, boolean>;
+  capabilities: Record<string, Record<PaperCapability, PaperCapabilityState>>;
   search_deadline_seconds: number;
   per_source_timeout_seconds: number;
   verify_fulltext: boolean;
@@ -316,40 +331,59 @@ export interface PaperSourceCatalogItem {
   supports_remote_search: boolean;
   supports_search: boolean;
   supports_connectivity: boolean;
+  supports_abstract: boolean;
   supports_pdf_probe: boolean;
+  supports_fulltext: boolean;
   supports_download_test: boolean;
+  official_docs_url: string;
+  diagnostic_method: "official_api" | "official_api_plus_controlled_pdf_probe" | "official_resolver";
   local_index_status: Record<string, string | number | null> | null;
 }
 
-export interface PaperSourceRuntimeStatus {
+export interface CapabilityDiagnostic {
+  status: CapabilityDiagnosticStatus;
+  latency_ms: number | null;
+  result_count?: number;
+  valid_abstract_count?: number;
+  abstract_length?: number;
+  bytes_read?: number;
+  kb_per_second?: number;
+  pdf_magic_valid?: boolean;
+  error_code: string | null;
+  message: string | null;
+}
+
+export interface PlatformDiagnostic {
   source: string;
-  state: "closed" | "open" | "half_open";
-  consecutive_failures: number;
-  open_until: number;
-  remaining_seconds: number;
-  last_http_status: number | null;
-  last_latency_ms: number | null;
-  last_error_code: string | null;
-  last_checked_at: number | null;
-  suggestion?: string;
+  connectivity: CapabilityDiagnostic;
+  search: CapabilityDiagnostic;
+  abstract: CapabilityDiagnostic;
+  fulltext: CapabilityDiagnostic;
+  auto_disabled_capabilities: PaperCapability[];
 }
 
 export interface PaperSearchPolicyResponse {
   policy: PaperSearchPolicy;
+  capabilities: PaperSearchPolicy["capabilities"];
   defaults: Omit<PaperSearchPolicy, "version" | "updated_by" | "updated_at">;
   quick_preset: Partial<PaperSearchPolicy>;
   source_catalog: PaperSourceCatalogItem[];
-  runtime_status: PaperSourceRuntimeStatus[];
-  breaker: { threshold: number; cooldown_seconds: number };
+  configuration_status: Record<string, string>;
+  disabled_by: Record<string, Record<PaperCapability, PaperCapabilityState["disabled_by"]>>;
+  disabled_reason: Record<string, Record<PaperCapability, string | null>>;
+  diagnostic_summary: PaperDiagnosticRun | null;
+  last_checked_at: number | null;
 }
 
 export interface PaperDiagnosticRun {
   id: string;
-  kind: "connectivity" | "download";
+  kind: "capability";
   started_at: number;
   finished_at: number;
-  summary: { count: number; statuses: Record<string, number> };
+  summary: { count: number; statuses: Record<string, number>; auto_disabled_capabilities?: Array<{ source: string; capability: PaperCapability }> };
   items: Array<Record<string, string | number | boolean | null>>;
+  platforms?: PlatformDiagnostic[];
+  policy?: PaperSearchPolicy;
 }
 
 export async function getPaperSearchPolicy(): Promise<PaperSearchPolicyResponse> {
@@ -365,51 +399,39 @@ export async function updatePaperSearchPolicy(
     "paper_fetch_mode" | "fetch_policy_disclosure" | "routing_mode">>,
 ): Promise<{ policy: PaperSearchPolicy }> {
   const res = await fetch(`${BASE}/paper-search/policy`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    method: "PUT", headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ expected_version: expectedVersion, ...changes }),
   });
   return parseResponse(res);
 }
 
-export async function runPaperConnectivity(sources?: string[]): Promise<PaperDiagnosticRun> {
-  const res = await fetch(`${BASE}/paper-search/diagnostics/connectivity`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ sources: sources?.length ? sources : null }),
+export async function setPaperSourceCapability(
+  source: string, capability: PaperCapability, enabled: boolean, expectedVersion: number,
+): Promise<{ policy: PaperSearchPolicy; capability: PaperCapabilityState }> {
+  const res = await fetch(`${BASE}/paper-search/sources/${encodeURIComponent(source)}/capabilities/${capability}`, {
+    method: "PUT", headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ expected_version: expectedVersion, enabled }),
   });
   return parseResponse(res);
 }
 
-export async function runPaperDownloadTest(sources?: string[]): Promise<PaperDiagnosticRun> {
-  const res = await fetch(`${BASE}/paper-search/diagnostics/download`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ sources: sources?.length ? sources : null }),
+export async function runPaperCapabilityDiagnostics(
+  sources?: string[], capability?: "connectivity" | PaperCapability,
+): Promise<PaperDiagnosticRun> {
+  const res = await fetch(`${BASE}/paper-search/diagnostics/capabilities`, {
+    method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ sources: sources?.length ? sources : null, capability: capability || null }),
   });
   return parseResponse(res);
 }
 
 export async function getLatestPaperDiagnostics(): Promise<{
+  capability: PaperDiagnosticRun | null;
   connectivity: PaperDiagnosticRun | null;
   download: PaperDiagnosticRun | null;
   recent: Array<Omit<PaperDiagnosticRun, "items">>;
 }> {
-  const res = await fetch(`${BASE}/paper-search/diagnostics/latest`, {
-    headers: authHeaders(), cache: "no-store",
-  });
-  return parseResponse(res);
-}
-
-export async function setPaperSourceBreaker(
-  source: string,
-  action: "open" | "close",
-): Promise<{ source: string; state: PaperSourceRuntimeStatus }> {
-  const res = await fetch(`${BASE}/paper-search/breaker`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ source, action }),
-  });
+  const res = await fetch(`${BASE}/paper-search/diagnostics/latest`, { headers: authHeaders(), cache: "no-store" });
   return parseResponse(res);
 }
 

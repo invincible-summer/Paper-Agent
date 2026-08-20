@@ -12,6 +12,7 @@ from core.models import Paper
 from core.reading_policy import (
     FULLTEXT_STATUS_AVAILABLE,
     FULLTEXT_STATUS_UNAVAILABLE,
+    FULLTEXT_STATUS_UNKNOWN,
     fulltext_available,
 )
 
@@ -290,3 +291,129 @@ def test_search_agent_pipeline_runs_fulltext_verification(monkeypatch):
     assert state["fulltext_statuses"] == {"P1": "available", "P2": "unavailable"}
     assert state["papers"][0].fulltext_status == FULLTEXT_STATUS_AVAILABLE
     assert state["papers"][1].fulltext_status == FULLTEXT_STATUS_UNAVAILABLE
+
+
+def test_probe_only_cache_cannot_bypass_new_source_capability_closure(monkeypatch, tmp_path):
+    import core.paper_search_settings_store as store
+    from tools.storage.database import Database
+
+    monkeypatch.setattr(store, "_DB_PATH", tmp_path / "users.db")
+    monkeypatch.setattr(store, "_seed", lambda: store.PaperSearchPolicy(
+        sources={name: True for name in store.SOURCE_IDS},
+    ))
+    store.reset_cache()
+    monkeypatch.setattr(avail, "get_settings", lambda: _settings(tmp_path))
+
+    db = Database(_settings(tmp_path).storage.sqlite_path)
+    db.set_fulltext_statuses([(
+        "P", FULLTEXT_STATUS_AVAILABLE, "oa_url_probe_verified:https://arxiv.org/pdf/1706.03762.pdf",
+        "", "https://arxiv.org/pdf/1706.03762.pdf",
+    )])
+    db.close()
+
+    policy = store.get_paper_search_policy()
+    store.set_source_capability(
+        "arxiv", "fulltext", False,
+        expected_version=policy.version, updated_by="administrator",
+    )
+
+    class ForbiddenFetcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def candidate_urls(self, _paper):
+            raise AssertionError("disabled source must not probe remotely")
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(avail, "PDFFetcher", ForbiddenFetcher)
+    skips = []
+    paper = Paper(
+        id="P", source="arxiv",
+        pdf_url="https://arxiv.org/pdf/1706.03762.pdf",
+    )
+    statuses = asyncio.run(avail.verify_papers_fulltext(
+        [paper], capability_skips=skips,
+    ))
+    assert statuses["P"] == FULLTEXT_STATUS_UNKNOWN
+    assert skips[0]["source"] == "arxiv"
+    assert skips[0]["reason_code"] == "source_capability_disabled"
+
+
+def test_unpaywall_probe_cache_cannot_bypass_new_unpaywall_closure(monkeypatch, tmp_path):
+    import core.paper_search_settings_store as store
+    from tools.storage.database import Database
+
+    monkeypatch.setattr(store, "_DB_PATH", tmp_path / "users.db")
+    monkeypatch.setattr(store, "_seed", lambda: store.PaperSearchPolicy(
+        sources={name: True for name in store.SOURCE_IDS},
+    ))
+    store.reset_cache()
+    monkeypatch.setattr(avail, "get_settings", lambda: _settings(tmp_path))
+
+    db = Database(_settings(tmp_path).storage.sqlite_path)
+    db.set_fulltext_statuses([(
+        "P", FULLTEXT_STATUS_AVAILABLE, "oa_url_probe_verified:https://oa.example/p.pdf",
+        "", "",
+    )])
+    db.close()
+
+    policy = store.get_paper_search_policy()
+    store.set_source_capability(
+        "unpaywall", "fulltext", False,
+        expected_version=policy.version, updated_by="administrator",
+    )
+    skips = []
+    paper = Paper(id="P", source="openalex", doi="10.1/example")
+    statuses = asyncio.run(avail.verify_papers_fulltext(
+        [paper], capability_skips=skips,
+    ))
+    assert statuses["P"] == FULLTEXT_STATUS_UNKNOWN
+    assert skips[0]["source"] == "unpaywall"
+
+
+def test_database_local_pdf_cache_survives_source_capability_closure(monkeypatch, tmp_path):
+    import core.paper_search_settings_store as store
+    from tools.storage.database import Database
+
+    monkeypatch.setattr(store, "_DB_PATH", tmp_path / "users.db")
+    monkeypatch.setattr(store, "_seed", lambda: store.PaperSearchPolicy(
+        sources={name: True for name in store.SOURCE_IDS},
+    ))
+    store.reset_cache()
+    monkeypatch.setattr(avail, "get_settings", lambda: _settings(tmp_path))
+
+    local_pdf = tmp_path / "cached.pdf"
+    local_pdf.write_bytes(b"%PDF-1.7 cached")
+    db = Database(_settings(tmp_path).storage.sqlite_path)
+    db.set_fulltext_statuses([(
+        "P", FULLTEXT_STATUS_AVAILABLE, "oa_download_verified",
+        str(local_pdf), "https://arxiv.org/pdf/1706.03762.pdf",
+    )])
+    db.close()
+
+    policy = store.get_paper_search_policy()
+    store.set_source_capability(
+        "arxiv", "fulltext", False,
+        expected_version=policy.version, updated_by="administrator",
+    )
+
+    class ForbiddenFetcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def candidate_urls(self, _paper):
+            raise AssertionError("verified local cache must avoid remote access")
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(avail, "PDFFetcher", ForbiddenFetcher)
+    paper = Paper(
+        id="P", source="arxiv",
+        pdf_url="https://arxiv.org/pdf/1706.03762.pdf",
+    )
+    statuses = asyncio.run(avail.verify_papers_fulltext([paper]))
+    assert statuses["P"] == FULLTEXT_STATUS_AVAILABLE
+    assert paper.pdf_path == str(local_pdf)

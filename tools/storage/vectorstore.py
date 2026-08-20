@@ -21,6 +21,7 @@ from typing import Any
 from core.config import get_settings
 from core.storage_context import StorageContext
 from core.embeddings import embed_texts, get_embedder
+from core.paper_search_settings_store import paper_abstract_text
 from tools.retrieval.chunking import smart_chunks
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def build_fulltext_chunks(parsed_sections=None, full_text: str | None = None) ->
 
 def _summary_document(summary, paper) -> str:
     """Level-1 document text: title + abstract (+ key findings when read)."""
-    parts = [paper.title or "", paper.abstract or ""]
+    parts = [paper.title or "", paper_abstract_text(paper)]
     if summary is not None:
         findings = getattr(summary, "key_findings", None) or []
         if isinstance(findings, list) and findings:

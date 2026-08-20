@@ -78,7 +78,7 @@ def sort_yearly_ascending(yearly: list[dict]) -> list[dict]:
 
 async def _groupby(client: httpx.AsyncClient, query: str, group_key: str,
                    per_page: int = 10, extra_filter: str = "") -> list:
-    params = {"search": query, "group_by": group_key, "per-page": per_page, **_auth_params()}
+    params = {"search": query, "group_by": group_key, "per_page": per_page, **_auth_params()}
     if extra_filter:
         params["filter"] = extra_filter
     try:
@@ -97,7 +97,9 @@ async def fetch_census(query: str) -> dict:
     """Aggregate the field across 4 dimensions. Each may degrade to [] independently."""
     import asyncio
 
-    if not query or not getattr(get_settings().search, "openalex_api_key", ""):
+    from core.paper_search_settings_store import source_capability_enabled
+    if (not query or not source_capability_enabled("openalex", "search")[0]
+            or not getattr(get_settings().search, "openalex_api_key", "")):
         return {"yearly": [], "top_authors": [], "top_institutions": [], "top_venues": []}
     client = get_search_http_client()
     yearly_raw, authors, insts, sources = await asyncio.gather(

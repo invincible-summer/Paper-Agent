@@ -32,10 +32,12 @@ async def lifespan(app: FastAPI):
         policy = get_performance_policy()
         mode = policy.startup_prewarm_mode
         if mode == "blocking":
-            await asyncio.to_thread(_prewarm_agent_stack, mode)
+            from core.blocking import run_cpu_bound
+            await run_cpu_bound(_prewarm_agent_stack, mode)
         elif mode == "background":
+            from core.blocking import run_cpu_bound
             background_task = asyncio.create_task(
-                asyncio.to_thread(_prewarm_agent_stack, mode))
+                run_cpu_bound(_prewarm_agent_stack, mode))
         else:
             from core.prewarm import _set
             _set(active_mode=mode, prewarm_state="disabled")

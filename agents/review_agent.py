@@ -21,6 +21,7 @@ from langchain_core.messages import HumanMessage
 from core.config import get_settings
 from core.llm import get_llm
 from core.models import Paper, PaperSummary
+from core.paper_search_settings_store import paper_abstract_text
 from core.prompts.review_prompts import (
     SECTION_WRITING_PROMPT,
     INTRODUCTION_PROMPT,
@@ -210,6 +211,16 @@ def _build_papers_list(papers: list[Paper], summaries: dict[str, PaperSummary]) 
             s = summary
 
         if s:
+            from core.paper_search_settings_store import (
+                paper_capability_source, source_capability_enabled,
+            )
+            from core.reading_policy import summary_has_full_text
+            if (not summary_has_full_text(summary)
+                    and not source_capability_enabled(
+                        paper_capability_source(p, "abstract"), "abstract"
+                    )[0]):
+                s = None
+        if s:
             problem = getattr(s, "research_problem", None) or (s.get("research_problem", "") if isinstance(s, dict) else "")
             methodology = getattr(s, "methodology", None) or (s.get("methodology", "") if isinstance(s, dict) else "")
             findings = getattr(s, "key_findings", None) or (s.get("key_findings", []) if isinstance(s, dict) else [])
@@ -226,8 +237,8 @@ def _build_papers_list(papers: list[Paper], summaries: dict[str, PaperSummary]) 
                 line += f"\n  Contributions: {'; '.join(str(c) for c in contributions[:3])[:200]}"
             if limitations and isinstance(limitations, list):
                 line += f"\n  Limitations: {'; '.join(str(l) for l in limitations[:2])[:150]}"
-        elif p.abstract:
-            line += f"\n  Abstract: {p.abstract[:300]}"
+        elif paper_abstract_text(p):
+            line += f"\n  Abstract: {paper_abstract_text(p)[:300]}"
 
         lines.append(line)
     return "\n".join(lines)

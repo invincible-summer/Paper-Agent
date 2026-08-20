@@ -32,6 +32,7 @@ from core.config import get_settings
 from core.embeddings import embed_texts
 from core.llm import ainvoke_utility, get_llm
 from core.models import Paper
+from core.paper_search_settings_store import paper_abstract_text
 from core.prompts.search import get_understand_prompt
 from core.state import ResearchState
 from tools.retrieval.bm25 import tokenize
@@ -192,7 +193,7 @@ def rerank_papers(
     if embed_fn is not None:
         try:
             docs = [query_text] + [
-                f"{p.title or ''}\n{(p.abstract or '')[:400]}" for p in papers
+                f"{p.title or ''}\n{paper_abstract_text(p)[:400]}" for p in papers
             ]
             vecs = embed_fn(docs)
             if vecs and len(vecs) == len(docs):
@@ -393,7 +394,10 @@ async def search_agent(state: ResearchState, progress_callback=None, invocation_
     from core.paper_search_settings_store import get_paper_search_policy
     policy = get_paper_search_policy()
     storage_context = state.get("storage_context")
-    enabled = [k for k, v in policy.sources.items() if v]
+    # Pass the complete registered set into the manager so the route audit can
+    # record every persistent capability/configuration skip. The manager creates
+    # tasks only for sources that pass both gates.
+    enabled = list(policy.sources)
     # Optional probe-time reservation: with force_fulltext_probe the probe must
     # run even when slow sources would otherwise eat the whole tool budget, so
     # retrieval and rerank stop early at a pre-probe deadline instead.
@@ -499,6 +503,7 @@ async def search_agent(state: ResearchState, progress_callback=None, invocation_
     state["candidates"] = candidates
     publish_snapshot()
     fulltext_statuses: dict[str, str] = {}
+    state["capability_skips"] = []
     if (policy.verify_fulltext and policy.fulltext_verify_timeout_seconds > 0
             and policy.paper_fetch_mode != "disabled" and (core or candidates)):
         # The probe stage is a second network budget; clamp it to the tool
@@ -517,13 +522,28 @@ async def search_agent(state: ResearchState, progress_callback=None, invocation_
             from tools.pdf.availability import verify_papers_fulltext
 
             report("探测各论文 OA 全文可获取性（只读取 PDF 文件头，不下载全文）...")
+            capability_skips: list[dict] = []
             try:
-                fulltext_statuses = await verify_papers_fulltext(
-                    core + candidates,
-                    storage_context=storage_context,
-                    progress_callback=report,
-                    timeout_seconds=probe_budget,
-                )
+                try:
+                    fulltext_statuses = await verify_papers_fulltext(
+                        core + candidates,
+                        storage_context=storage_context,
+                        progress_callback=report,
+                        timeout_seconds=probe_budget,
+                        capability_skips=capability_skips,
+                    )
+                except TypeError as exc:
+                    # Compatibility for injected extensions/tests that still
+                    # implement the pre-capability-skips optional signature.
+                    if "capability_skips" not in str(exc):
+                        raise
+                    fulltext_statuses = await verify_papers_fulltext(
+                        core + candidates,
+                        storage_context=storage_context,
+                        progress_callback=report,
+                        timeout_seconds=probe_budget,
+                    )
+                state["capability_skips"] = capability_skips
             except Exception as e:  # noqa: BLE001
                 logger.warning("fulltext verification degraded to unknown: %s", e)
             completed_stages.append("fulltext_probe")

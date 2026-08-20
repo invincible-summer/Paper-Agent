@@ -111,7 +111,11 @@ def test_checkpoint_restart_restores_structured_state_but_not_messages(tmp_path:
     load = store.get_or_create(principal, "caller", [{"role": "user", "content": "start"}])
     session = load.session
     session.topic = "唐吉诃德"
-    session.papers = [Paper(id="p1", title="论文 1")]
+    session.papers = [Paper(
+        id="p1", title="论文 1", abstract_source="openaire",
+        abstract_policy_status="disabled", abstract_policy_reason="network",
+        pdf_source="arxiv",
+    )]
     session.paper_summaries = {"p1": PaperSummary(paper_id="p1", key_findings=["k"])}
     session.map_data = {"clusters": [{"label": "理论"}]}
     session.loaded_skills = {"skill_a", "skill_b"}
@@ -133,6 +137,10 @@ def test_checkpoint_restart_restores_structured_state_but_not_messages(tmp_path:
     assert not restored.created
     assert restored.session.topic == "唐吉诃德"
     assert restored.session.papers[0].id == "p1"
+    assert restored.session.papers[0].abstract_source == "openaire"
+    assert restored.session.papers[0].abstract_policy_status == "disabled"
+    assert restored.session.papers[0].abstract_policy_reason == "network"
+    assert restored.session.papers[0].pdf_source == "arxiv"
     assert restored.session.map_data["clusters"][0]["label"] == "理论"
     assert restored.session.loaded_skills == {"skill_a", "skill_b"}
     assert restored.session.full_read_count == 3

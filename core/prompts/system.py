@@ -69,6 +69,7 @@ _L5_RECOVERY = """## 错误恢复
 - NO_PAPERS：没有可用论文或知识库。告知用户并建议换更宽泛/更具体的主题；先 search_papers 再调依赖论文的工具。
 - VALIDATION_ERROR：参数错误或同参数重复调用。修正参数或换一种做法。
 - CIRCUIT_OPEN：工具暂时熔断。本轮停止调用该工具，告知用户稍后再试。
+- SOURCE_CAPABILITY_DISABLED：平台能力被管理员持久关闭或配置不可用；直接说明缺少搜索/摘要/全文能力，不要重复调用或绕过 gate。
 - TOOL_ERROR / TIMEOUT / NO_TOOL：告知用户出了什么问题，给出替代路径；若已有 partial 结果则优先展示并总结，停止后续工具。
 同一回合连续 3 次工具失败：停下来，总结已有进展，询问用户如何继续。"""
 
@@ -79,18 +80,51 @@ SYSTEM_PROMPT = (
     + "\n\n" + _L4_FORMAT + "\n\n" + _L5_RECOVERY
 )
 
-register("system.main", 16, SYSTEM_PROMPT)
+register("system.main", 17, SYSTEM_PROMPT)
 register("system.redline_tail", 5, REDLINE_TAIL)
 
 
 def get_system_prompt() -> str:
-    """Return the current system prompt text from the registry, with the
-    skill-metadata section appended (progressive disclosure: name +
-    one-line description only; full skill text loads via use_skill)."""
+    """Return the registered prompt plus current persistent capability gates."""
     base = get("system.main").text
     from core.skills import skills_prompt_section
     section = skills_prompt_section()
-    return f"{base}\n\n{section}" if section else base
+    capability_context = ""
+    try:
+        from core.paper_search_settings_store import (
+            PAPER_CAPABILITIES, get_paper_search_policy,
+            source_capability_supported,
+        )
+        from tools.search.registry import SOURCE_SPECS
+        policy = get_paper_search_policy()
+        auxiliary_names = {"unpaywall": "Unpaywall", "doi": "doi.org"}
+        disabled = []
+        for source, capabilities in policy.capabilities.items():
+            for capability in PAPER_CAPABILITIES:
+                if not source_capability_supported(source, capability):
+                    continue
+                state = capabilities.get(capability) or {}
+                if not state.get("enabled", False):
+                    reason = state.get("reason") or state.get("reason_code") or "管理员策略关闭"
+                    display = (
+                        SOURCE_SPECS[source].display_name
+                        if source in SOURCE_SPECS else auxiliary_names.get(source, source)
+                    )
+                    disabled.append(f"{display}.{capability}（{reason}）")
+        if disabled:
+            capability_context = (
+                "## 当前论文平台能力（运行时持久策略）\n"
+                "以下能力在调用工具前即不可用；不要尝试绕过或重复联网。已有本地缓存和上传附件不受影响。\n- "
+                + "\n- ".join(disabled)
+            )
+        else:
+            capability_context = (
+                "## 当前论文平台能力（运行时持久策略）\n"
+                "所有已配置平台能力均未被管理员关闭；工具内部仍执行最终 gate。"
+            )
+    except Exception:
+        pass
+    return "\n\n".join(part for part in (base, capability_context, section) if part)
 
 
 def get_redline_tail() -> str:
