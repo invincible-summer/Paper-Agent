@@ -451,6 +451,7 @@ export interface ToolBudgetPolicyData {
   default_budget_seconds: number;
   reserve_seconds: number;
   api_turn_soft_seconds: number;
+  api_turn_hard_seconds: number;
   version: number;
   updated_by: string;
   updated_at: number;
@@ -462,7 +463,10 @@ export interface ToolBudgetLimits {
   min_reserve: number;
   max_reserve: number;
   gateway_timeout_seconds: number;
+  min_api_turn_soft_seconds: number;
+  max_api_turn_soft_seconds: number;
   api_turn_soft_seconds: number;
+  min_api_turn_hard_seconds: number;
   api_turn_hard_seconds: number;
   web_turn_soft_seconds: number;
   web_turn_hard_seconds: number;
@@ -495,6 +499,7 @@ export async function updateToolBudgets(
     default_budget_seconds?: number;
     reserve_seconds?: number;
     api_turn_soft_seconds?: number;
+    api_turn_hard_seconds?: number;
   },
 ): Promise<ToolBudgetsResponse> {
   const res = await fetch(`${BASE}/tool-budgets`, {

@@ -19,6 +19,8 @@ def test_defaults_match_code_budgets(isolated):
     assert policy.budgets == {}
     assert policy.default_budget_seconds == 30.0
     assert policy.reserve_seconds == 8.0
+    assert policy.api_turn_soft_seconds == 95.0
+    assert policy.api_turn_hard_seconds == 105.0
     assert store.get_tool_budget("search_papers") == 45.0
     assert store.get_tool_budget("deep_read") == 75.0
     assert store.get_tool_budget("write_review") == 60.0
@@ -61,6 +63,44 @@ def test_validation_ranges(isolated):
     with pytest.raises(store.ToolBudgetSettingsError, match="未知设置字段"):
         store.update_tool_budget_policy(
             {"nope": 1}, expected_version=current.version, updated_by="admin")
+    # 默认硬时限 105 下，软时限必须 ≤ 100。
+    with pytest.raises(store.ToolBudgetSettingsError, match="软时限"):
+        store.update_tool_budget_policy(
+            {"api_turn_soft_seconds": 101},
+            expected_version=current.version, updated_by="admin")
+
+
+def test_api_turn_hard_and_soft_cross_validation(isolated):
+    current = store.get_tool_budget_policy()
+    # 硬时限无固定上限；抬高后软时限可超过旧的 100 秒上限。
+    updated = store.update_tool_budget_policy(
+        {"api_turn_hard_seconds": 200}, expected_version=current.version,
+        updated_by="admin")
+    assert updated.api_turn_hard_seconds == 200.0
+    updated = store.update_tool_budget_policy(
+        {"api_turn_soft_seconds": 150}, expected_version=updated.version,
+        updated_by="admin")
+    assert updated.api_turn_soft_seconds == 150.0
+    # 逐工具/默认预算上限跟随硬时限：硬 200 时预算 150 合法。
+    updated = store.update_tool_budget_policy(
+        {"budgets": {"deep_read": 150}, "default_budget_seconds": 120},
+        expected_version=updated.version, updated_by="admin")
+    assert updated.budgets["deep_read"] == 150.0
+    # 软时限必须比硬时限至少小 5 秒。
+    with pytest.raises(store.ToolBudgetSettingsError, match="软时限"):
+        store.update_tool_budget_policy(
+            {"api_turn_soft_seconds": 196}, expected_version=updated.version,
+            updated_by="admin")
+    # 硬时限最小 35（软最小 30 + 5 收尾余量）。
+    with pytest.raises(store.ToolBudgetSettingsError, match="硬时限"):
+        store.update_tool_budget_policy(
+            {"api_turn_hard_seconds": 34}, expected_version=updated.version,
+            updated_by="admin")
+    # 调低硬时限会让超出新上限的存量预算失效，保存被拒并指明工具。
+    with pytest.raises(store.ToolBudgetSettingsError, match="deep_read"):
+        store.update_tool_budget_policy(
+            {"api_turn_hard_seconds": 60}, expected_version=updated.version,
+            updated_by="admin")
 
 
 def test_accessor_falls_back_to_code_defaults_on_storage_failure(monkeypatch):

@@ -13,10 +13,14 @@ Resolution order for one tool's budget: explicit override → code default →
 would overflow the remaining turn time; it applies to every tool.
 
 Upper bound rationale (surfaced in the admin UI): the 清小搭 gateway times a
-whole request out at 120 s. The /v1 soft deadline is administrator-configurable
-from 30–100 s (95 s default), while the hard deadline remains fixed at 105 s;
-a budget above the current ``soft - reserve`` only takes full effect on the
-web channel (240 s / 300 s).
+whole request out at 120 s. Both /v1 deadlines are administrator-configurable
+with no fixed numeric ceiling — the only invariant is ``soft <= hard - 5`` so
+the soft deadline always leaves room for the degraded wrap-up answer before
+the hard cutoff kills the request (defaults 95 s / 105 s). Requests routed
+through the gateway are still cut at 120 s; values above that only take full
+effect for direct /v1 callers. Per-tool budgets are capped by the current
+hard deadline, and a budget above the current ``soft - reserve`` only takes
+full effect on the web channel (240 s / 300 s).
 """
 from __future__ import annotations
 
@@ -31,12 +35,15 @@ _DB_PATH = _PROJECT_ROOT / "data" / "users.db"
 _CACHE_TTL_SECONDS = 5.0
 
 BUDGET_MIN_SECONDS = 5.0
-BUDGET_MAX_SECONDS = 105.0
 RESERVE_MIN_SECONDS = 2.0
 RESERVE_MAX_SECONDS = 30.0
 API_TURN_SOFT_MIN_SECONDS = 30.0
-API_TURN_SOFT_MAX_SECONDS = 100.0
 API_TURN_SOFT_DEFAULT_SECONDS = 95.0
+# The hard deadline must leave at least this many seconds between soft and
+# hard for the degraded wrap-up answer generated after the soft deadline.
+API_TURN_DEADLINE_MARGIN_SECONDS = 5.0
+API_TURN_HARD_MIN_SECONDS = 35.0
+API_TURN_HARD_DEFAULT_SECONDS = 105.0
 
 # Code-level defaults (previously the hardcoded ``_TOOL_BUDGETS`` dict).
 CODE_TOOL_BUDGETS: dict[str, float] = {
@@ -66,6 +73,7 @@ class ToolBudgetPolicy:
     default_budget_seconds: float
     reserve_seconds: float
     api_turn_soft_seconds: float = API_TURN_SOFT_DEFAULT_SECONDS
+    api_turn_hard_seconds: float = API_TURN_HARD_DEFAULT_SECONDS
     version: int = 1
     updated_by: str = "bootstrap"
     updated_at: float = 0.0
@@ -82,6 +90,7 @@ def _connect() -> sqlite3.Connection:
                default_budget_seconds REAL NOT NULL,
                reserve_seconds REAL NOT NULL,
                api_turn_soft_seconds REAL NOT NULL DEFAULT 95,
+               api_turn_hard_seconds REAL NOT NULL DEFAULT 105,
                version INTEGER NOT NULL,
                updated_by TEXT NOT NULL,
                updated_at REAL NOT NULL
@@ -92,6 +101,11 @@ def _connect() -> sqlite3.Connection:
         conn.execute(
             "ALTER TABLE tool_budget_policy ADD COLUMN api_turn_soft_seconds "
             "REAL NOT NULL DEFAULT 95"
+        )
+    if "api_turn_hard_seconds" not in columns:
+        conn.execute(
+            "ALTER TABLE tool_budget_policy ADD COLUMN api_turn_hard_seconds "
+            "REAL NOT NULL DEFAULT 105"
         )
     conn.commit()
     return conn
@@ -122,8 +136,9 @@ def _row_to_policy(row) -> ToolBudgetPolicy:
         default_budget_seconds=float(row[1]),
         reserve_seconds=float(row[2]),
         api_turn_soft_seconds=float(row[3]),
-        version=int(row[4]), updated_by=str(row[5] or "bootstrap"),
-        updated_at=float(row[6] or 0.0),
+        api_turn_hard_seconds=float(row[4]),
+        version=int(row[5]), updated_by=str(row[6] or "bootstrap"),
+        updated_at=float(row[7] or 0.0),
     )
 
 
@@ -136,21 +151,24 @@ def get_tool_budget_policy() -> ToolBudgetPolicy:
     try:
         row = conn.execute(
             "SELECT budgets_json, default_budget_seconds, reserve_seconds, "
-            "api_turn_soft_seconds, version, updated_by, updated_at "
+            "api_turn_soft_seconds, api_turn_hard_seconds, "
+            "version, updated_by, updated_at "
             "FROM tool_budget_policy WHERE id = 1"
         ).fetchone()
         if row is None:
             conn.execute(
                 "INSERT INTO tool_budget_policy (id, budgets_json, default_budget_seconds, "
-                "reserve_seconds, api_turn_soft_seconds, version, updated_by, updated_at) "
-                "VALUES (1, '{}', ?, ?, ?, 1, 'bootstrap', ?)",
+                "reserve_seconds, api_turn_soft_seconds, api_turn_hard_seconds, "
+                "version, updated_by, updated_at) "
+                "VALUES (1, '{}', ?, ?, ?, ?, 1, 'bootstrap', ?)",
                 (CODE_FALLBACK_BUDGET, CODE_FALLBACK_RESERVE,
-                 API_TURN_SOFT_DEFAULT_SECONDS, now),
+                 API_TURN_SOFT_DEFAULT_SECONDS, API_TURN_HARD_DEFAULT_SECONDS, now),
             )
             conn.commit()
             row = conn.execute(
                 "SELECT budgets_json, default_budget_seconds, reserve_seconds, "
-                "api_turn_soft_seconds, version, updated_by, updated_at "
+                "api_turn_soft_seconds, api_turn_hard_seconds, "
+                "version, updated_by, updated_at "
                 "FROM tool_budget_policy WHERE id = 1"
             ).fetchone()
     finally:
@@ -161,25 +179,31 @@ def get_tool_budget_policy() -> ToolBudgetPolicy:
 
 
 def _validate(policy: ToolBudgetPolicy) -> None:
-    for name, value in sorted(policy.budgets.items()):
-        if not BUDGET_MIN_SECONDS <= value <= BUDGET_MAX_SECONDS:
-            raise ToolBudgetSettingsError(
-                f"工具 {name} 的预算必须在 {BUDGET_MIN_SECONDS:.0f}–{BUDGET_MAX_SECONDS:.0f} 秒之间")
-    if not BUDGET_MIN_SECONDS <= policy.default_budget_seconds <= BUDGET_MAX_SECONDS:
+    if policy.api_turn_hard_seconds < API_TURN_HARD_MIN_SECONDS:
         raise ToolBudgetSettingsError(
-            f"默认预算必须在 {BUDGET_MIN_SECONDS:.0f}–{BUDGET_MAX_SECONDS:.0f} 秒之间")
+            f"清小搭整轮硬时限必须不小于 {API_TURN_HARD_MIN_SECONDS:.0f} 秒")
+    budget_max = policy.api_turn_hard_seconds
+    for name, value in sorted(policy.budgets.items()):
+        if not BUDGET_MIN_SECONDS <= value <= budget_max:
+            raise ToolBudgetSettingsError(
+                f"工具 {name} 的预算必须在 {BUDGET_MIN_SECONDS:.0f}–{budget_max:.0f} 秒之间")
+    if not BUDGET_MIN_SECONDS <= policy.default_budget_seconds <= budget_max:
+        raise ToolBudgetSettingsError(
+            f"默认预算必须在 {BUDGET_MIN_SECONDS:.0f}–{budget_max:.0f} 秒之间")
     if not RESERVE_MIN_SECONDS <= policy.reserve_seconds <= RESERVE_MAX_SECONDS:
         raise ToolBudgetSettingsError(
             f"整轮预留量必须在 {RESERVE_MIN_SECONDS:.0f}–{RESERVE_MAX_SECONDS:.0f} 秒之间")
-    if not API_TURN_SOFT_MIN_SECONDS <= policy.api_turn_soft_seconds <= API_TURN_SOFT_MAX_SECONDS:
+    soft_max = policy.api_turn_hard_seconds - API_TURN_DEADLINE_MARGIN_SECONDS
+    if not API_TURN_SOFT_MIN_SECONDS <= policy.api_turn_soft_seconds <= soft_max:
         raise ToolBudgetSettingsError(
-            f"清小搭整轮软时限必须在 {API_TURN_SOFT_MIN_SECONDS:.0f}–"
-            f"{API_TURN_SOFT_MAX_SECONDS:.0f} 秒之间")
+            f"清小搭整轮软时限必须在 {API_TURN_SOFT_MIN_SECONDS:.0f}–{soft_max:.0f} 秒之间"
+            f"（至少比硬时限留出 {API_TURN_DEADLINE_MARGIN_SECONDS:.0f} 秒收尾时间）")
 
 
 def update_tool_budget_policy(changes: dict, *, expected_version: int,
                               updated_by: str) -> ToolBudgetPolicy:
-    allowed = {"budgets", "default_budget_seconds", "reserve_seconds", "api_turn_soft_seconds"}
+    allowed = {"budgets", "default_budget_seconds", "reserve_seconds",
+               "api_turn_soft_seconds", "api_turn_hard_seconds"}
     unknown = sorted(set(changes) - allowed)
     if unknown:
         raise ToolBudgetSettingsError(f"未知设置字段：{', '.join(unknown)}")
@@ -197,11 +221,13 @@ def update_tool_budget_policy(changes: dict, *, expected_version: int,
         cursor = conn.execute(
             """UPDATE tool_budget_policy SET budgets_json = ?,
                    default_budget_seconds = ?, reserve_seconds = ?,
-                   api_turn_soft_seconds = ?, version = version + 1, updated_by = ?, updated_at = ?
+                   api_turn_soft_seconds = ?, api_turn_hard_seconds = ?,
+                   version = version + 1, updated_by = ?, updated_at = ?
                WHERE id = 1 AND version = ?""",
             (json.dumps(candidate.budgets, sort_keys=True),
              candidate.default_budget_seconds, candidate.reserve_seconds,
-             candidate.api_turn_soft_seconds, updated_by, candidate.updated_at,
+             candidate.api_turn_soft_seconds, candidate.api_turn_hard_seconds,
+             candidate.updated_by, candidate.updated_at,
              int(expected_version)),
         )
         if cursor.rowcount != 1:

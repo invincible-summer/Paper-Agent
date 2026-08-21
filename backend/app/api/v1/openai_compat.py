@@ -104,6 +104,8 @@ def _tool_progress_text(name: str, args: dict) -> str:
 _ARTIFACT_TOOLS = {"research_map", "write_review"}
 
 _HEARTBEAT_SECONDS = 10.0
+# Test/embedding override hooks only; production deadlines come from the
+# administrator-adjustable tool_budget_policy snapshot (defaults 95/105).
 _API_SOFT_DEADLINE_SECONDS = 95.0
 _API_HARD_DEADLINE_SECONDS = 105.0
 _SSE_COALESCE_SECONDS = 0.05
@@ -649,7 +651,8 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     from core.turn_execution import TurnExecutionContext
     from core.tool_budget_store import (
         CODE_FALLBACK_BUDGET, CODE_FALLBACK_RESERVE,
-        API_TURN_SOFT_DEFAULT_SECONDS, ToolBudgetPolicy, get_tool_budget_policy,
+        API_TURN_SOFT_DEFAULT_SECONDS, API_TURN_HARD_DEFAULT_SECONDS,
+        ToolBudgetPolicy, get_tool_budget_policy,
     )
     try:
         tool_budget_policy = get_tool_budget_policy()
@@ -659,6 +662,7 @@ async def chat_completions(request: Request, authorization: str | None = Header(
             budgets={}, default_budget_seconds=CODE_FALLBACK_BUDGET,
             reserve_seconds=CODE_FALLBACK_RESERVE,
             api_turn_soft_seconds=API_TURN_SOFT_DEFAULT_SECONDS,
+            api_turn_hard_seconds=API_TURN_HARD_DEFAULT_SECONDS,
         )
     # Keep the historical module-level override usable by focused tests and
     # embedding callers; production uses the administrator snapshot.
@@ -667,6 +671,14 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         if _API_SOFT_DEADLINE_SECONDS != 95.0
         else tool_budget_policy.api_turn_soft_seconds
     )
+    if _API_HARD_DEADLINE_SECONDS != 105.0:
+        api_hard_seconds = _API_HARD_DEADLINE_SECONDS
+    else:
+        api_hard_seconds = tool_budget_policy.api_turn_hard_seconds
+        # Defensive clamp for hand-edited databases: the soft deadline must
+        # always fire before the hard cutoff so the degraded wrap-up answer
+        # can still be emitted.
+        api_hard_seconds = max(api_hard_seconds, api_soft_seconds + 5.0)
 
     async def prepare():
         prepared = await _prepare_turn(body, principal)
@@ -713,11 +725,11 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         chat_turn, render_skill_card, render_tool_card, render_search_table, skill_display_title = agent_stack
         execution = TurnExecutionContext.openai_api(
             soft_timeout_seconds=api_soft_seconds,
-            hard_timeout_seconds=_API_HARD_DEADLINE_SECONDS,
+            hard_timeout_seconds=api_hard_seconds,
             tool_budget_policy=tool_budget_policy,
         )
         try:
-            async with asyncio.timeout(_API_HARD_DEADLINE_SECONDS):
+            async with asyncio.timeout(api_hard_seconds):
                 prepared = await prepare()
                 session = prepared["session"]
                 policy = prepared["policy"]
@@ -848,7 +860,10 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 status_code=504,
                 content={"error": {
                     "type": "deadline_exceeded",
-                    "message": "The agent turn exceeded the 105 second interactive deadline.",
+                    "message": (
+                        "The agent turn exceeded the "
+                        f"{api_hard_seconds:.0f} second interactive deadline."
+                    ),
                 }},
             )
 
@@ -878,7 +893,7 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     execution = TurnExecutionContext.openai_api(
         progress_cb=progress_cb,
         soft_timeout_seconds=api_soft_seconds,
-        hard_timeout_seconds=_API_HARD_DEADLINE_SECONDS,
+        hard_timeout_seconds=api_hard_seconds,
         tool_budget_policy=tool_budget_policy,
     )
 

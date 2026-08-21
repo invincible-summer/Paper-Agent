@@ -400,7 +400,7 @@ API 物理根目录固定隔离为 `data/openai_api/{state.db,metadata.db,chroma
 
 ### 7.3 整轮预算、最少工具门禁与部分成功
 
-`tool_budget_policy` 除逐工具预算和 `reserve_seconds` 外，还持久化 `api_turn_soft_seconds`（默认 95、范围 30–100 秒，旧库幂等 `ALTER TABLE`）；固定硬截止 105 秒不暴露为可改设置。`/v1` 请求只读取一次完整策略快照并创建 `TurnExecutionContext`，所以同一轮的软时限、逐工具预算和预留量一致；Web 仍使用 240/300 秒软硬时限。每次模型决策前追加不持久化的动态预算提示。
+`tool_budget_policy` 除逐工具预算和 `reserve_seconds` 外，还持久化 `api_turn_soft_seconds`（默认 95）与 `api_turn_hard_seconds`（默认 105，两者均由旧库幂等 `ALTER TABLE` 补列）。软/硬时限都在 `/admin/performance` 可调、无固定数值上限，唯一约束是 `软 ≤ 硬 − 5`（为软超时后的降级总结收尾留时间；硬最小 35），逐工具预算与默认预算的上限动态跟随硬时限。`/v1` 请求只读取一次完整策略快照并创建 `TurnExecutionContext`，所以同一轮的软硬时限、逐工具预算和预留量一致，运行时再防御性钳制 `硬 ≥ 软 + 5` 兜底手工改库；经清小搭网关转发的请求仍受网关 120 秒总超时限制，超过 120 秒的设置只有直连 `/v1` 的调用能真正用满；Web 仍使用固定 240/300 秒软硬时限。每次模型决策前追加不持久化的动态预算提示。
 
 仅 `openai_api` 启用执行门禁：一个模型决策批次最多一个公开工具、整轮最多三个；首个工具在轻/中/重 5/10/15 秒最低启动阈值以上可裁剪到“剩余软时限−预留”，后续工具必须完整容纳管理员预算 + 预留。`search_papers`/`research_map` 仍各自最多实际启动一次。任一 TIMEOUT 或携带 `budget_exhausted` 的 partial 关闭后续公开工具准入，模型只做最终总结；`use_skill` 是内部加载事件，不占公开工具额度。
 
@@ -559,7 +559,7 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 ### 部署单 worker 与事件循环隔离
 
-`/v1`、网页 `/api/v1` 和健康检查共享同一个 Uvicorn 事件循环；会话内存、熔断器、LLM 限流信号量也都是进程内状态，因此仍必须 `--workers 1`。同步的 Docling/PyMuPDF 结构解析、SentenceTransformer/CrossEncoder 推理、Chroma 向量读写和附件快速提取不得直接运行在 async 请求链：统一经 `core.blocking.run_cpu_bound` 投递到一个进程级 daemon ML worker 串行执行。SQLite Checkpoint、轻量文件写入等 I/O 经 `core.blocking.run_io_bound` 投递到独立的两个受限 I/O worker，避免 ML 队列形成跨请求队头阻塞。OpenAI-compatible 流式链路验证后先发 role 首帧；工具进度经 reasoning 输出，管理员可调 30–100 秒（默认 95 秒）的 `/v1` 软时限停止启动新工作，固定 105 秒硬时限前闭合 stop + `[DONE]`，客户端断开会取消并回收 producer。原生 ML 调用被取消时无法强杀，但已取消的等待任务不再写入请求状态。扩多 worker/多机前仍须外置共享会话、任务队列、熔断和限流状态，不能直接增加 Uvicorn worker。
+`/v1`、网页 `/api/v1` 和健康检查共享同一个 Uvicorn 事件循环；会话内存、熔断器、LLM 限流信号量也都是进程内状态，因此仍必须 `--workers 1`。同步的 Docling/PyMuPDF 结构解析、SentenceTransformer/CrossEncoder 推理、Chroma 向量读写和附件快速提取不得直接运行在 async 请求链：统一经 `core.blocking.run_cpu_bound` 投递到一个进程级 daemon ML worker 串行执行。SQLite Checkpoint、轻量文件写入等 I/O 经 `core.blocking.run_io_bound` 投递到独立的两个受限 I/O worker，避免 ML 队列形成跨请求队头阻塞。OpenAI-compatible 流式链路验证后先发 role 首帧；工具进度经 reasoning 输出，管理员可调的 `/v1` 软时限（默认 95 秒）停止启动新工作，管理员可调的硬时限（默认 105 秒）前闭合 stop + `[DONE]`（软 ≤ 硬 − 5，经网关转发的请求仍受网关 120 秒限制），客户端断开会取消并回收 producer。原生 ML 调用被取消时无法强杀，但已取消的等待任务不再写入请求状态。扩多 worker/多机前仍须外置共享会话、任务队列、熔断和限流状态，不能直接增加 Uvicorn worker。
 
 前端 `fetchAuthConfig` 使用 8 秒超时；超时只结束首屏无限 spinner，并保留本地已有登录信息。所有 `/api/v1` 权限仍由后端逐请求校验，前端降级不构成授权。
 
@@ -618,4 +618,4 @@ arXiv 的管理员测速、`probe_pdf_url` 分支和 `PDFFetcher` 真实下载�
 
 研究地图计算一次标题/摘要嵌入并同时用于聚类和语义边；地图簇标签、概述和领域脉络由注册 Prompt 的一次 utility 调用完成，和引文增强并发。所有增强步骤都可失败，结果仍为 success 并包含 `degraded`、各阶段状态、引文状态、缓存命中和 `stage_ms`。地图缓存指纹包含论文 id/标题/年份/引用数/全文状态、Prompt 版本和引文策略；新搜索会清空旧地图。
 
-Web 与 `/v1` 都传递 `TurnExecutionContext`。Web 使用 240 秒软时限和 300 秒硬时限；软时限正常收尾并保存，硬时限取消且不保存半轮历史。OpenAI 使用管理员可调 30–100 秒（默认 95 秒）的软时限、固定 105 秒硬时限和既有 SSE 帧序。`search_papers`、`research_map` 每轮最多实际开始一次；参数校验失败不占次数，工具耗尽自身预算和整轮剩余预算使用不同 `timeout_kind`，超时文案明确要求本轮不要再次调用该工具。工具自身预算与整轮预留量不再硬编码，由「运行时工具时限预算」的策略存储管理。
+Web 与 `/v1` 都传递 `TurnExecutionContext`。Web 使用 240 秒软时限和 300 秒硬时限；软时限正常收尾并保存，硬时限取消且不保存半轮历史。OpenAI 使用管理员可调的软时限（默认 95 秒）与硬时限（默认 105 秒，约束 软 ≤ 硬 − 5、无固定上限）和既有 SSE 帧序。`search_papers`、`research_map` 每轮最多实际开始一次；参数校验失败不占次数，工具耗尽自身预算和整轮剩余预算使用不同 `timeout_kind`，超时文案明确要求本轮不要再次调用该工具。工具自身预算与整轮预留量不再硬编码，由「运行时工具时限预算」的策略存储管理。

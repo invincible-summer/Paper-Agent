@@ -700,9 +700,12 @@ class ToolBudgetPolicyUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     expected_version: int = Field(gt=0)
     budgets: dict[str, int] | None = None
-    default_budget_seconds: int | None = Field(default=None, ge=5, le=105)
+    default_budget_seconds: int | None = Field(default=None, ge=5)
     reserve_seconds: int | None = Field(default=None, ge=2, le=30)
-    api_turn_soft_seconds: int | None = Field(default=None, ge=30, le=100)
+    # Cross-field rules (soft <= hard - 5, budgets <= hard) live in
+    # core.tool_budget_store._validate as the single authority.
+    api_turn_soft_seconds: int | None = Field(default=None, ge=30)
+    api_turn_hard_seconds: int | None = Field(default=None, ge=35)
 
     def changes(self) -> dict:
         return self.model_dump(exclude={"expected_version"}, exclude_none=True)
@@ -741,17 +744,21 @@ def _tool_budget_payload() -> dict:
             "default_budget_seconds": policy.default_budget_seconds,
             "reserve_seconds": policy.reserve_seconds,
             "api_turn_soft_seconds": policy.api_turn_soft_seconds,
+            "api_turn_hard_seconds": policy.api_turn_hard_seconds,
             "version": policy.version,
             "updated_by": policy.updated_by,
             "updated_at": policy.updated_at,
         },
         "catalog": catalog,
         "limits": {
-            "min_seconds": 5, "max_seconds": 105,
+            "min_seconds": 5, "max_seconds": policy.api_turn_hard_seconds,
             "min_reserve": 2, "max_reserve": 30,
             "gateway_timeout_seconds": 120,
+            "min_api_turn_soft_seconds": 30,
+            "max_api_turn_soft_seconds": policy.api_turn_hard_seconds - 5,
             "api_turn_soft_seconds": policy.api_turn_soft_seconds,
-            "api_turn_hard_seconds": 105,
+            "min_api_turn_hard_seconds": 35,
+            "api_turn_hard_seconds": policy.api_turn_hard_seconds,
             "web_turn_soft_seconds": 240, "web_turn_hard_seconds": 300,
         },
         "breaker": {"threshold": 3, "cooldown_seconds": 300},

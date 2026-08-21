@@ -60,6 +60,10 @@ def test_catalog_is_rich_and_covers_all_tools(env):
         assert item["overridden"] is False
     assert data["policy"]["reserve_seconds"] == 8.0
     assert data["limits"]["api_turn_soft_seconds"] == 95
+    assert data["limits"]["api_turn_hard_seconds"] == 105
+    assert data["limits"]["max_api_turn_soft_seconds"] == 100
+    assert data["limits"]["min_api_turn_hard_seconds"] == 35
+    assert data["limits"]["max_seconds"] == 105
 
 
 def test_update_is_immediate_with_conflict_and_unknown_tool(env):
@@ -106,7 +110,7 @@ def test_tool_breaker_recovery(env, monkeypatch):
     assert result["breaker_states"]["search_papers"]["state"] == "closed"
 
 
-def test_old_policy_table_migrates_api_turn_soft_seconds(env, monkeypatch, tmp_path):
+def test_old_policy_table_migrates_turn_deadline_columns(env, monkeypatch, tmp_path):
     import sqlite3
 
     legacy = tmp_path / "legacy-users.db"
@@ -121,12 +125,14 @@ def test_old_policy_table_migrates_api_turn_soft_seconds(env, monkeypatch, tmp_p
     budget_store.reset_cache()
     policy = budget_store.get_tool_budget_policy()
     assert policy.api_turn_soft_seconds == 95
+    assert policy.api_turn_hard_seconds == 105
     with sqlite3.connect(legacy) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(tool_budget_policy)")}
     assert "api_turn_soft_seconds" in columns
+    assert "api_turn_hard_seconds" in columns
 
 
-def test_api_turn_soft_seconds_update_and_bounds(env):
+def test_api_turn_deadlines_update_and_bounds(env):
     data = asyncio.run(admin_api.get_admin_tool_budgets(env["admin"]))
     result = asyncio.run(admin_api.put_admin_tool_budgets(
         admin_api.ToolBudgetPolicyUpdate(
@@ -134,6 +140,34 @@ def test_api_turn_soft_seconds_update_and_bounds(env):
         env["admin"],
     ))
     assert result["policy"]["api_turn_soft_seconds"] == 88
+    # 101 不再被 schema 拒绝，但在默认硬时限 105 下仍违反 软 ≤ 硬 − 5。
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(admin_api.put_admin_tool_budgets(
+            admin_api.ToolBudgetPolicyUpdate(
+                expected_version=result["policy"]["version"], api_turn_soft_seconds=101),
+            env["admin"]))
+    assert exc.value.status_code == 422
+    # 抬高硬时限后，超过旧 100 秒上限的软时限与预算上限都随之放开。
+    result = asyncio.run(admin_api.put_admin_tool_budgets(
+        admin_api.ToolBudgetPolicyUpdate(
+            expected_version=result["policy"]["version"], api_turn_hard_seconds=200),
+        env["admin"]))
+    assert result["policy"]["api_turn_hard_seconds"] == 200
+    assert result["limits"]["max_seconds"] == 200
+    assert result["limits"]["max_api_turn_soft_seconds"] == 195
+    result = asyncio.run(admin_api.put_admin_tool_budgets(
+        admin_api.ToolBudgetPolicyUpdate(
+            expected_version=result["policy"]["version"], api_turn_soft_seconds=150),
+        env["admin"]))
+    assert result["policy"]["api_turn_soft_seconds"] == 150
+    # 软时限必须比硬时限至少小 5 秒。
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(admin_api.put_admin_tool_budgets(
+            admin_api.ToolBudgetPolicyUpdate(
+                expected_version=result["policy"]["version"], api_turn_soft_seconds=196),
+            env["admin"]))
+    assert exc.value.status_code == 422
+    # 硬时限低于 35（软最小 30 + 5 收尾余量）在 schema 层就被拒绝。
     with pytest.raises(Exception):
         admin_api.ToolBudgetPolicyUpdate(
-            expected_version=result["policy"]["version"], api_turn_soft_seconds=101)
+            expected_version=result["policy"]["version"], api_turn_hard_seconds=34)
