@@ -17,7 +17,7 @@
 - **check_structure** — 上传草稿结构体检（`tools/writing/structure_check.py`，纯代码零模型消耗）：章节树（markdown/数字/中文/LaTeX 标题）/ IMRaD 缺失章节 / 章节比例失衡 / 摘要长度 / 引用卫生 / 图表统计，前端专用卡片渲染体检报告
 - **check_format** — 格式检查（纯代码）：图表编号连续性与正文引用、引用风格混用、GB/T 7714 规范度、关键词数量、标题断号；LaTeX 源查 \cite/\ref/参考文献块配对；支持传入用户格式要求逐条对照，排版项诚实列入人工核对清单
 - **export_manuscript** — 写作产物导出：初稿/润色稿/修改清单 → docx / tex（ctexart 中文可编译）/ md 下载文件，清小搭侧经 x_soda 附件下发
-- **使用文档公告页** — `/usage-doc` 始终公开只读展示管理员维护的 Markdown 功能说明；管理员登录后可在同一页面的单个文本框中编辑并保存，使用“上传图片并插入”按钮把 PNG/JPEG/GIF/WebP 上传到受控文档资源目录并插入当前光标位置。
+- **使用文档公告页** — `/usage-doc` 始终公开只读展示管理员维护的 Markdown 功能说明，左侧按标题自动生成"本页目录"侧栏（窄屏折叠）；管理员登录后可在同一页面的单个文本框中编辑并保存，使用“上传图片并插入”按钮把 PNG/JPEG/GIF/WebP 上传到受控文档资源目录并插入当前光标位置。手册默认内容来自 git 跟踪的 `config/usage_document.md`：本地编辑并 push 后，服务器 `git pull` 再执行 `./.env_conda/bin/python scripts/sync_usage_document.py` 即可覆盖线上手册（幂等，约 5 秒内生效、无需重启；注意覆盖会丢弃页面临时编辑，UI 上传的图片不随 git 分发）。
 - **清小搭展示边界与卡片仿真** — 自有前端的 React 工具卡和交互式 `GenealogyGraph` 不会随 OpenAI 协议跨端执行；`/v1` 通道在正文中插入一行式工具状态、确定性检索结果表格、技能提示，以及管理员可选的实验性 Mermaid 研究图谱；文件卡通过 `x_soda.attachments` 下发。研究图谱由四个独立开关组合：美化 SVG 附件、正文 Mermaid、可下载的自包含交互 HTML、普通 Markdown 关系说明。SVG / Mermaid / HTML 至少启用一种，Markdown 可独立关闭；新安装默认仅 SVG。HTML 只作为附件下载，使用 CSP、内联数据与原生 JavaScript，下载后在浏览器打开，不在主站同源内联执行。
 - **integrity_sweep** — 可靠性质检（纯官方 API，零模型）：逐篇查撤稿（OpenAlex `is_retracted`）/ 勘误或关切声明（Crossref `relation`）/ arXiv 预印本是否已有正式版；写综述、投稿导出前必跑
 - **bib_import** — 导入 .bib 文献库（Zotero/EndNote/Mendeley 导出）到候选集，DOI 经 Crossref 自动补全，与会话论文去重后并入；与 citation_export 双向互通

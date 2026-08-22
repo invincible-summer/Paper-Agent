@@ -59,6 +59,44 @@ def test_public_document_is_seeded_and_versioned(env):
     assert document_api.get_public_usage_document()["content"] == "# 新文档\n\n支持 Markdown。"
 
 
+def test_document_seeds_from_tracked_source_file(env):
+    document = document_store.get_usage_document()
+    assert document.content == document_store._SOURCE_PATH.read_text(encoding="utf-8")
+    assert document.content.startswith("# 使用文档")
+
+
+def test_sync_usage_document_is_idempotent_when_content_matches(env):
+    applied, after = document_store.sync_usage_document_from_source()
+    assert applied is False
+    assert after.version == 1
+
+    applied_again, final = document_store.sync_usage_document_from_source()
+    assert applied_again is False
+    assert final.version == 1
+
+
+def test_sync_usage_document_overwrites_admin_edits(env, tmp_path, monkeypatch):
+    current = document_store.get_usage_document()
+    edited = document_store.update_usage_document(
+        "# 管理员临时编辑\n", expected_version=current.version, updated_by="admin"
+    )
+
+    source = tmp_path / "usage_document.md"
+    source.write_text("# git 版手册\n\n覆盖内容。", encoding="utf-8")
+    monkeypatch.setattr(document_store, "_SOURCE_PATH", source)
+
+    applied, updated = document_store.sync_usage_document_from_source()
+    assert applied is True
+    assert updated.content == "# git 版手册\n\n覆盖内容。"
+    assert updated.version == edited.version + 1
+    assert updated.updated_by == "script:sync_usage_document"
+    assert document_store.get_usage_document().content == "# git 版手册\n\n覆盖内容。"
+
+    applied_again, unchanged = document_store.sync_usage_document_from_source()
+    assert applied_again is False
+    assert unchanged.version == updated.version
+
+
 def test_document_update_is_admin_only_and_conflict_protected(env):
     current = document_api.get_public_usage_document()
     with pytest.raises(HTTPException) as normal_error:

@@ -185,6 +185,10 @@ Paper_Agent/
 
 管理员保存接口为 `PUT /api/v1/admin/usage-document`；认证失败返回 403，版本冲突返回 409，内容长度上限为 500,000 字符。公告文档与聊天历史、用户上传、OpenAI API 私有存储相互隔离。
 
+默认内容来自 git 跟踪的 `config/usage_document.md`（`core/usage_document_store.py` 启动时读取），因此手册可以走"本地编辑 → push GitHub → 服务器 `git pull` 后执行 `scripts/sync_usage_document.py`"的分发流程：脚本用仓库文件覆盖数据库行（幂等，内容一致时不涨版本），后端 5 秒读缓存内生效、无需重启；覆盖会丢弃服务器上通过管理页面临时编辑的内容，页面上传的图片也属服务器运行时数据（`data/usage_document/assets/`），不随 git 分发。
+
+前端页面为两栏布局：左侧按 Markdown 标题自动生成"本页目录"侧栏（`frontend/components/UsageDocOutline.tsx`，滚动时高亮当前章节，窄屏折叠为可展开目录）；正文标题渲染时按行号挂锚点 id。手册行首的一级标题与页面固定大标题重复，渲染时被跳过，全页只保留页头一个"使用文档"大标题。
+
 ### 3.5 管理员访问控制端点（`/api/v1/admin/auth-settings`）
 
 `GET` 返回设置行 + SMTP 非机密状态（`{configured, sender, from_name}`）；`PUT`（strict body + `expected_version` 乐观锁，冲突 409）修改四个开关，守卫：`email_requirement=verify` 且 SMTP 未配置 → 422；把 `auth_required` 关为 false 必须携带 `confirm_disable_auth=true`（防误关——关闭后所有未登录访问立即变为 local 用户，穿透数据隔离，且管理页随之不可用）→ 否则 422。`POST /auth-settings/test-email` 向指定邮箱发测试邮件验证 SMTP 连通性。前端页面 `/admin/auth-settings`（访问控制）：开关行 = 标签 + 问号帮助 + 共享 `AdminToggle`，说明文字全部收进 HelpModal；保存走 draft/diff/sticky 保存栏；关账号登录需在 ConfirmModal 中输入「确认」，关游客访问有危险确认弹窗；本地模式下游客/注册/邮箱开关禁用并显示横幅。

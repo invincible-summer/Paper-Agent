@@ -1,11 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft, BookOpenText, ImagePlus, Loader2, Save } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Nav } from "@/components/Nav";
+import {
+  extractUsageDocOutline,
+  UsageDocMobileOutline,
+  UsageDocOutline,
+  type UsageDocOutlineItem,
+} from "@/components/UsageDocOutline";
 import { useAuthStore } from "@/stores/auth";
 import {
   getUsageDocument,
@@ -26,7 +32,55 @@ function formatUpdatedAt(timestamp: number): string {
   }).format(new Date(timestamp * 1000));
 }
 
-function MarkdownContent({ content }: { content: string }) {
+type HeadingNode = { position?: { start?: { line?: number } } };
+type HeadingProps = ComponentPropsWithoutRef<"h1"> & { node?: HeadingNode };
+
+function MarkdownContent({
+  content,
+  outline,
+}: {
+  content: string;
+  outline: UsageDocOutlineItem[];
+}) {
+  const lineToItem = useMemo(() => {
+    const map = new Map<number, UsageDocOutlineItem>();
+    for (const item of outline) map.set(item.line, item);
+    return map;
+  }, [outline]);
+
+  const components = useMemo<Components>(() => {
+    // 锚点 id 由行号映射挂到标题上，与左侧目录共享同一份 outline。
+    const heading = (tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") => {
+      const Heading = ({ node, children, ...props }: HeadingProps) => {
+        const line = node?.position?.start?.line;
+        const item = line !== undefined ? lineToItem.get(line) : undefined;
+        if (item?.isTitleHeading) return null;
+        const Tag = tag;
+        return (
+          <Tag {...props} id={item?.id} className="scroll-mt-28">
+            {children}
+          </Tag>
+        );
+      };
+      return Heading;
+    };
+    return {
+      h1: heading("h1"),
+      h2: heading("h2"),
+      h3: heading("h3"),
+      h4: heading("h4"),
+      h5: heading("h5"),
+      h6: heading("h6"),
+      a: ({ node: _node, ...props }) => (
+        <a {...props} target="_blank" rel="noopener noreferrer" />
+      ),
+      img: ({ node: _node, ...props }) => (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img {...props} loading="lazy" alt={props.alt || "文档图片"} />
+      ),
+    };
+  }, [lineToItem]);
+
   return (
     <div className="usage-document-prose">
       <ReactMarkdown
@@ -38,15 +92,7 @@ function MarkdownContent({ content }: { content: string }) {
           if (/^mailto:/i.test(value)) return value;
           return "";
         }}
-        components={{
-          a: ({ node: _node, ...props }) => (
-            <a {...props} target="_blank" rel="noopener noreferrer" />
-          ),
-          img: ({ node: _node, ...props }) => (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img {...props} loading="lazy" alt={props.alt || "文档图片"} />
-          ),
-        }}
+        components={components}
       >
         {content}
       </ReactMarkdown>
@@ -68,6 +114,10 @@ export default function UsageDocumentPage() {
   const [notice, setNotice] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const outline = useMemo(
+    () => extractUsageDocOutline(document?.content ?? ""),
+    [document?.content]
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -157,7 +207,7 @@ export default function UsageDocumentPage() {
   return (
     <div className="min-h-screen bg-bg text-fg">
       <Nav />
-      <main className="mx-auto max-w-5xl px-4 py-8 sm:px-8">
+      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-8">
         <div className="mb-6 flex items-start gap-3">
           <button
             type="button"
@@ -173,7 +223,10 @@ export default function UsageDocumentPage() {
           </div>
           <div className="min-w-0">
             <h1 className="text-2xl font-bold">使用文档</h1>
-            <p className="mt-1 text-sm text-muted">智能体功能介绍、使用方法与注意事项</p>
+            <p className="mt-1 text-sm text-muted">
+              智能体功能介绍、使用方法与注意事项
+              {document ? ` · 最后更新：${formatUpdatedAt(document.updated_at)}` : ""}
+            </p>
           </div>
         </div>
 
@@ -236,13 +289,15 @@ export default function UsageDocumentPage() {
               </section>
             )}
 
-            <article className="rounded-2xl border border-border-light bg-surface p-5 shadow-sm sm:p-8">
-              <div className="mb-6 border-b border-border-light pb-4">
-                <h2 className="text-xl font-semibold">{document.title}</h2>
-                <p className="mt-1 text-xs text-muted">最后更新：{formatUpdatedAt(document.updated_at)}</p>
+            <div className="flex items-start gap-8">
+              <UsageDocOutline items={outline} />
+              <div className="min-w-0 flex-1">
+                <UsageDocMobileOutline items={outline} />
+                <article className="rounded-2xl border border-border-light bg-surface p-5 shadow-sm sm:p-8">
+                  <MarkdownContent content={document.content} outline={outline} />
+                </article>
               </div>
-              <MarkdownContent content={document.content} />
-            </article>
+            </div>
           </>
         ) : null}
       </main>

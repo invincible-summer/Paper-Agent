@@ -3,7 +3,9 @@
 The document is intentionally separate from chat history and API storage.  It
 is a single public document, persisted in the web users database with an
 optimistic version lock so two administrator tabs cannot silently overwrite
-one another.
+one another.  The seed/sync source is the git-tracked
+``config/usage_document.md``; a deployment can overwrite the server-side row
+from that file without a service restart via ``sync_usage_document_from_source``.
 """
 from __future__ import annotations
 
@@ -14,47 +16,13 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DB_PATH = _PROJECT_ROOT / "data" / "users.db"
+# The seed/sync source ships with the repository so a local edit can reach the
+# production row through git pull + scripts/sync_usage_document.py.
+_SOURCE_PATH = _PROJECT_ROOT / "config" / "usage_document.md"
 _MAX_CONTENT_CHARS = 500_000
 _CACHE_TTL_SECONDS = 5.0
 
-DEFAULT_CONTENT = """# 使用文档
-
-欢迎使用 **Paper Agent**。这是一个面向文献检索、论文阅读和研究分析的智能体。
-
-## 主要功能
-
-- **论文检索**：从多个学术平台检索论文，并按相关性整理结果。
-- **论文深读**：读取开放获取论文，提炼研究问题、方法、结论和局限。
-- **论文谱系**：分析论文之间的引用、主题和方法演化关系。
-- **文献综述**：围绕研究主题组织文献，生成结构化综述和研究方向建议。
-- **多模态理解**：在可用时分析论文中的图表、公式和页面结构。
-- **文件分析**：支持上传论文、文档和图片进行对话式分析。
-
-## 使用建议
-
-1. 先说明你的研究主题、问题或关键词。
-2. 需要最新文献时，明确告诉智能体进行论文检索。
-3. 指定论文后，可以继续要求深读、比较、综述或生成论文谱系。
-4. 复杂任务可以拆成多个步骤，以获得更稳定的结果。
-
-## Markdown 内容
-
-本页面由管理员维护，支持标题、列表、表格、代码块、链接和图片等 Markdown 语法。
-
-如需插入图片，可以在编辑框中使用：
-
-```markdown
-![图片说明](/api/v1/usage-document/assets/图片文件名.png)
-```
-
-请以实际上传后返回的图片 Markdown 为准。
-
-## 注意事项
-
-- 论文全文获取受论文平台开放获取政策和网络状况影响。
-- 不同论文平台可能有访问频率限制。
-- 请勿在对话中提交密码、API Key 或其他敏感信息。
-"""
+DEFAULT_CONTENT = _SOURCE_PATH.read_text(encoding="utf-8")
 
 
 class UsageDocumentError(ValueError):
@@ -179,6 +147,26 @@ def update_usage_document(content: str, *, expected_version: int, updated_by: st
     document = _row_to_document(row)
     _cache = (str(_DB_PATH), now, document)
     return document
+
+
+def sync_usage_document_from_source() -> tuple[bool, UsageDocument]:
+    """Overwrite the persisted document with the git-tracked source file.
+
+    Idempotent: when the row already matches the file nothing is written and
+    the version stays put.  Otherwise the file replaces the current content
+    (discarding any server-side administrator hot edits) and bumps the
+    version, so the running service picks it up within the read-cache TTL.
+    """
+    content = _SOURCE_PATH.read_text(encoding="utf-8")
+    current = get_usage_document()
+    if current.content == content:
+        return False, current
+    updated = update_usage_document(
+        content,
+        expected_version=current.version,
+        updated_by="script:sync_usage_document",
+    )
+    return True, updated
 
 
 def document_asdict(document: UsageDocument | None = None) -> dict:

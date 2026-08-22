@@ -918,6 +918,383 @@ sudo certbot renew --dry-run
 
 不要给 `/v1` 或 `/files` 增加 Nginx Basic Auth，否则会破坏清小搭 Bearer 鉴权和附件下载。
 
+### 12.3 保留现有域名并增加第二个域名（可选）
+
+如果希望在保留现有地址
+`https://paper-agent.ycr10.cn` 的同时，再使用
+`https://paper-agent.invincible-summer.xyz` 访问同一套 Paper Agent，
+不需要复制服务器、数据库或 systemd 服务。只需为第二个域名增加 DNS 记录、
+CORS 白名单、Nginx virtual host 和 HTTPS 证书即可。
+
+本节的示例值如下：
+
+```bash
+export OLD_DOMAIN='paper-agent.ycr10.cn'
+export NEW_DOMAIN='paper-agent.invincible-summer.xyz'
+export ECS_PUBLIC_IP='123.57.6.126'
+export APP_DIR='/opt/paper-agent'
+export APP_USER='paper-agent'
+export NGINX_SITE='/etc/nginx/sites-available/paper-agent-invincible-summer'
+export ACME_ROOT='/var/www/paper-agent-acme'
+```
+
+> `paper-agent` 是推荐的主机记录。如果实际要使用其他子域名，只需同时替换
+> `NEW_DOMAIN`、DNS 主机记录、证书中的 `-d` 参数和下面 Nginx 配置中的
+> `server_name`；不要把示例中的 `paprt-agent` 拼写错误带到正式配置中。
+
+#### 12.3.1 在阿里云云解析新增 A 记录
+
+在 `invincible-summer.xyz` 的 DNS 控制台新增一条记录：
+
+| 配置项 | 值 |
+|---|---|
+| 记录类型 | `A` |
+| 主机记录 | `paper-agent` |
+| 记录值 | `123.57.6.126` |
+| TTL | 默认值或 `600` |
+
+不要删除或修改现有的 `paper-agent.ycr10.cn` 记录。DNS 发布后，在本地或服务器检查：
+
+```bash
+dig +short A "$NEW_DOMAIN"
+# 预期包含：123.57.6.126
+
+getent hosts "$NEW_DOMAIN"
+```
+
+如果仍无返回值，先等待 DNS TTL 和运营商缓存刷新；在解析生效前不要签发证书。
+中国大陆 ECS 还必须确认该域名已完成 ICP 备案并满足当前阿里云接入条件。
+
+#### 12.3.2 将新域名加入生产 CORS 白名单
+
+`PUBLIC_BASE_URL` 和 `FRONTEND_ORIGIN` 继续使用旧域名，以保持清小搭附件链接和
+现有规范 Origin 不变：
+
+```ini
+PUBLIC_BASE_URL=https://paper-agent.ycr10.cn
+FRONTEND_ORIGIN=https://paper-agent.ycr10.cn
+```
+
+只在 `CORS_ORIGINS` 中追加新域名。若生产 `.env` 中已有其他白名单，必须保留并用英文逗号分隔，例如：
+
+```ini
+CORS_ORIGINS=https://paper-agent.invincible-summer.xyz,https://已有的其他来源.example
+```
+
+在服务器执行以下安全流程；备份只留在服务器，不要提交 GitHub：
+
+```bash
+set -euo pipefail
+export APP_DIR='/opt/paper-agent'
+export APP_USER='paper-agent'
+export BACKUP_DIR="/var/backups/paper-agent/domain-alias-$(date +%Y%m%d-%H%M%S)"
+
+sudo install -d -o root -g root -m 0700 "$BACKUP_DIR"
+sudo cp -a "$APP_DIR/.env" "$BACKUP_DIR/.env.before-domain-alias"
+sudo chown root:root "$BACKUP_DIR/.env.before-domain-alias"
+sudo chmod 600 "$BACKUP_DIR/.env.before-domain-alias"
+sudo stat -c '%U:%G %a %n' "$APP_DIR/.env"
+
+# 只编辑以下三个非秘密配置项；不要把密钥复制到命令行或聊天记录。
+sudo -u "$APP_USER" nano "$APP_DIR/.env"
+sudo -u "$APP_USER" grep -E \
+  '^(PUBLIC_BASE_URL|FRONTEND_ORIGIN|CORS_ORIGINS)=' "$APP_DIR/.env"
+
+sudo systemctl restart paper-agent
+sleep 5
+curl -fsS --max-time 10 http://127.0.0.1:8000/health
+sudo systemctl is-active paper-agent
+```
+
+如果需要恢复修改前配置：
+
+```bash
+sudo cp -a "$BACKUP_DIR/.env.before-domain-alias" "$APP_DIR/.env"
+sudo chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
+sudo chmod 600 "$APP_DIR/.env"
+sudo systemctl restart paper-agent
+```
+
+#### 12.3.3 前端构建变量检查
+
+当前部署将 `NEXT_PUBLIC_BACKEND_URL` 在构建时设置为旧规范域名。这样从新域名打开网页时，
+REST 请求仍走新域名的同源 `/api` 代理，SSE 请求则直连旧规范域名；新增的 CORS 白名单会允许该
+浏览器 Origin 访问 SSE。
+
+先检查当前生产前端构建流程和运行环境。不要把 `.env` 中的密钥打印出来：
+
+```bash
+cd "$APP_DIR"
+sudo -H -u "$APP_USER" grep -RFl -- \
+  'https://paper-agent.ycr10.cn' \
+  frontend/.next/static frontend/.next/server 2>/dev/null | head -n 20 || true
+```
+
+如果命令能在前端产物中找到旧规范域名，并且本次只是新增域名，则无需重建前端。
+如果没有找到、无法确认原构建值、该值错误，或者前端源码/构建配置也发生变化，使用旧规范域名
+安全地重新构建：
+
+```bash
+cd "$APP_DIR/frontend"
+sudo -H -u "$APP_USER" env \
+  HOME=/var/lib/paper-agent \
+  BACKEND_URL=http://127.0.0.1:8000 \
+  NEXT_PUBLIC_BACKEND_URL=https://paper-agent.ycr10.cn \
+  /usr/local/bin/pnpm build
+sudo systemctl restart paper-agent-web
+```
+
+#### 12.3.4 为新域名创建 HTTP 引导站点
+
+确认 DNS 已解析后，在服务器创建独立 Nginx site。不要修改旧的
+`/etc/nginx/sites-available/paper-agent`：
+
+```bash
+export NEW_DOMAIN='paper-agent.invincible-summer.xyz'
+export NGINX_SITE='/etc/nginx/sites-available/paper-agent-invincible-summer'
+export ACME_ROOT='/var/www/paper-agent-acme'
+
+sudo mkdir -p "$ACME_ROOT"
+sudo chown -R www-data:www-data "$ACME_ROOT"
+sudo tee "$NGINX_SITE" >/dev/null <<'NGINX'
+server {
+    listen 80;
+    server_name paper-agent.invincible-summer.xyz;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/paper-agent-acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        default_type text/plain;
+        return 200 'Paper Agent HTTPS bootstrap for second domain\n';
+    }
+}
+NGINX
+
+sudo ln -sfn "$NGINX_SITE" \
+  /etc/nginx/sites-enabled/paper-agent-invincible-summer
+sudo nginx -t
+sudo systemctl reload nginx
+curl -i --max-time 10 "http://$NEW_DOMAIN/"
+```
+
+#### 12.3.5 为新域名签发 HTTPS 证书
+
+```bash
+export NEW_DOMAIN='paper-agent.invincible-summer.xyz'
+export ACME_ROOT='/var/www/paper-agent-acme'
+
+sudo certbot certonly --webroot \
+  -w "$ACME_ROOT" \
+  -d "$NEW_DOMAIN"
+
+sudo test -f "/etc/letsencrypt/live/$NEW_DOMAIN/fullchain.pem"
+sudo test -f "/etc/letsencrypt/live/$NEW_DOMAIN/privkey.pem"
+```
+
+如果证书签发失败，先检查 DNS、阿里云安全组的 80 端口和 Nginx 的 ACME 路径；
+不要为了签证书开放 3000 或 8000 端口。
+
+#### 12.3.6 将新站点切换为 HTTPS 并代理到现有服务
+
+证书签发成功后，用以下内容完整替换新 site。旧域名的 Nginx 配置不变。
+本配置使用新域名的独立证书，但继续代理同一套本机服务。
+
+```bash
+export NGINX_SITE='/etc/nginx/sites-available/paper-agent-invincible-summer'
+
+sudo tee "$NGINX_SITE" >/dev/null <<'NGINX'
+server {
+    listen 80;
+    server_name paper-agent.invincible-summer.xyz;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/paper-agent-acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name paper-agent.invincible-summer.xyz;
+
+    ssl_certificate     /etc/letsencrypt/live/paper-agent.invincible-summer.xyz/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/paper-agent.invincible-summer.xyz/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    server_tokens off;
+    client_max_body_size 50m;
+
+    location /v1/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        add_header X-Accel-Buffering no always;
+    }
+
+    location /api/v1/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Guest-Id $http_x_guest_id;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        add_header X-Accel-Buffering no always;
+    }
+
+    location /files/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Guest-Id $http_x_guest_id;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+
+    location /elements/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Guest-Id $http_x_guest_id;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location = /health {
+        proxy_pass http://127.0.0.1:8000/health;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+NGINX
+
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+新 site 不要重复声明 `map $http_upgrade $connection_upgrade`。它直接复用旧站点文件中已经在
+Nginx `http` 上下文声明的 `$connection_upgrade`；旧站点必须继续保持启用。
+
+#### 12.3.7 双域名验收
+
+```bash
+set -euo pipefail
+export OLD_DOMAIN='paper-agent.ycr10.cn'
+export NEW_DOMAIN='paper-agent.invincible-summer.xyz'
+
+# DNS 与 HTTP/TLS
+dig +short A "$NEW_DOMAIN" | grep -Fx '123.57.6.126'
+curl -fsSI --max-time 10 "http://$NEW_DOMAIN/" \
+  | grep -Eiq '^location: https://paper-agent\.invincible-summer\.xyz/'
+curl -fsS --max-time 10 "https://$NEW_DOMAIN/health"
+curl -fsS --max-time 10 "https://$NEW_DOMAIN/api/v1/auth/config"
+curl -fsSI --max-time 10 "https://$NEW_DOMAIN/chat"
+
+# 新域名页面跨域直连旧规范域名的 SSE 预检
+curl -fsSi --max-time 10 -X OPTIONS \
+  "https://$OLD_DOMAIN/api/v1/chat/stream" \
+  -H "Origin: https://$NEW_DOMAIN" \
+  -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: authorization,content-type,x-guest-id' \
+  | grep -Fi "access-control-allow-origin: https://$NEW_DOMAIN"
+
+# 旧域名回归
+curl -fsS --max-time 10 "https://$OLD_DOMAIN/health"
+curl -fsS --max-time 10 "https://$OLD_DOMAIN/api/v1/auth/config"
+curl -fsSI --max-time 10 "https://$OLD_DOMAIN/chat"
+
+# 证书自动续期
+sudo certbot renew --dry-run
+```
+
+浏览器中分别打开两个域名，确认：
+
+- 新域名可以打开 `/chat`、登录、查看历史、上传附件并完成流式聊天；
+- 浏览器开发者工具中没有 CORS、Mixed Content 或 SSE 连接错误；
+- 旧域名仍可以登录、聊天、下载附件，并且清小搭原有 `/v1` 配置不受影响；
+- 使用 Agent API Key 时分别检查：
+
+```bash
+curl -fsS --max-time 15 "https://$NEW_DOMAIN/v1/models" \
+  -H 'Authorization: Bearer <管理员创建的长期 Agent API Key>'
+curl -fsS --max-time 15 "https://$OLD_DOMAIN/v1/models" \
+  -H 'Authorization: Bearer <管理员创建的长期 Agent API Key>'
+```
+
+不要把真实 Agent API Key 写入部署手册、shell 历史、日志、截图或 Git。
+
+两个域名指向同一套后端数据，但浏览器的 `localStorage` 按 Origin 隔离；因此同一用户
+第一次打开新域名时需要重新登录一次。登录后，两个域名访问的是同一个服务器端账户和数据。
+
+#### 12.3.8 新域名配置回滚
+
+只回滚新域名，不触碰旧域名：
+
+```bash
+set -euo pipefail
+export APP_DIR='/opt/paper-agent'
+export APP_USER='paper-agent'
+export NGINX_SITE='/etc/nginx/sites-available/paper-agent-invincible-summer'
+export BACKUP_ENV='/var/backups/paper-agent/domain-alias-<时间戳>/.env.before-domain-alias'
+
+sudo rm -f /etc/nginx/sites-enabled/paper-agent-invincible-summer
+sudo nginx -t
+sudo systemctl reload nginx
+
+# 如果本次修改过 CORS_ORIGINS，恢复 .env 备份；不要用示例文件覆盖生产配置。
+sudo cp -a "$BACKUP_ENV" "$APP_DIR/.env"
+sudo chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
+sudo chmod 600 "$APP_DIR/.env"
+sudo systemctl restart paper-agent
+
+curl -fsS --max-time 10 "https://paper-agent.ycr10.cn/health"
+```
+
+确认旧域名恢复正常后，再按保留策略决定是否删除新证书和备份。删除证书不是回滚必需步骤：
+
+```bash
+sudo certbot certificates
+# 只有确认不再需要该证书时才执行：
+sudo certbot delete --cert-name paper-agent.invincible-summer.xyz
+```
+
+不要删除旧域名的证书、Nginx site、运行时数据或数据库。
+
 ---
 
 ## 13. 首次上线验收
