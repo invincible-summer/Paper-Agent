@@ -90,20 +90,11 @@ class OpenAlexBackend(SearchBackend):
                 source=self.name,
                 citation_count=item.get("cited_by_count", 0),
                 abstract=abstract,
-                pdf_url=_extract_pdf_url(item),
                 keywords=_extract_keywords(item),
                 urls={"openalex": item.get("id", "")},
             )
             papers.append(paper)
         return papers
-
-
-def _extract_pdf_url(item: dict) -> str | None:
-    for loc in (item.get("best_oa_location") or {}, item.get("primary_location") or {}):
-        pdf = loc.get("pdf_url")
-        if pdf:
-            return pdf
-    return None
 
 
 def _extract_keywords(item: dict) -> list[str]:

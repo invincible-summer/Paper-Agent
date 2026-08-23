@@ -60,37 +60,6 @@ def _select_session_papers(session: ChatSession, paper_ids) -> list[Paper] | Non
     return selected
 
 
-def _sync_fulltext_status_from_summaries(session: ChatSession) -> None:
-    """Papers whose summaries really carry full_text are definitely available."""
-    from core.reading_policy import summary_has_full_text
-
-    for paper in session.all_papers():
-        if summary_has_full_text(session.paper_summaries.get(paper.id)):
-            paper.fulltext_status = "available"
-
-
-def _persist_fulltext_status(paper: Paper, status: str, evidence: str,
-                             session: ChatSession) -> None:
-    """Best-effort persistence of a verified fulltext status (never raises)."""
-    try:
-        from core.config import get_settings
-        from tools.storage.database import Database
-
-        db = Database(storage_context=session.storage_context) \
-            if session.storage_context is not None \
-            else Database(get_settings().storage.sqlite_path)
-        try:
-            db.set_fulltext_status(
-                paper.id, status, evidence=evidence,
-                pdf_path=paper.pdf_path or "",
-                candidate_url=paper.pdf_url or "",
-            )
-        finally:
-            db.close()
-    except Exception as e:  # noqa: BLE001
-        logger.debug("fulltext status persist skipped for %s: %s", paper.id, e)
-
-
 # ---------------------------------------------------------------------------
 # Validation + dispatch
 # ---------------------------------------------------------------------------
@@ -240,7 +209,7 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb,
                    "缺少必填参数 topic。请先向用户确认研究主题，再带 topic 调用。")
 
     # Guard against "locate a paper we already own" searches. The model should
-    # call deep_read/ask_papers with the session paper_id directly; this keeps
+    # call ask_papers with the session paper_id directly; this keeps
     # one bad dispatch decision from spending a full multi-source search.
     known_paper = session.paper_by_id(topic) if session.has_papers() else None
     if known_paper is None and session.has_papers():
@@ -249,7 +218,7 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb,
         return err(
             "search_papers", ErrorCode.VALIDATION_ERROR,
             f"「{topic[:80]}」已经在当前会话论文集中（paper_id={known_paper.id}）。"
-            "请直接调用 deep_read(paper_ids=[该 id]) 或 ask_papers(paper_id=该 id)，"
+            "请直接调用 ask_papers(paper_id=该 id)；若需要全文，请先上传原文。"
             "不要为定位已有论文重新 search_papers。",
         )
 
@@ -272,7 +241,6 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb,
         session.reading_path = []
         session.literature_review = ""
         if invocation_context is not None:
-            from core.reading_policy import normalize_fulltext_status
             total = len(papers) + len(candidates)
             text = (f"检索已获得可恢复结果：核心集 {len(papers)} 篇，"
                     f"候选 {len(candidates)} 篇。")
@@ -286,9 +254,6 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb,
                 completed_stages=list(snapshot.get("completed_stages", [])),
                 skipped_stages=list(snapshot.get("skipped_stages", [])),
                 budget_exhausted=True,
-                fulltext_unknown=sum(
-                    normalize_fulltext_status(p.fulltext_status) == "unknown"
-                    for p in papers + candidates),
             ))
 
     state: dict = {
@@ -308,90 +273,58 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb,
         pass
     result = await search_agent(state, **search_kwargs)
 
+    route = result.get("search_route", {}) or {}
+    route_skips = list(route.get("skipped", []) or [])
+    if not result.get("papers") and not result.get("candidates") and route_skips:
+        failure = err(
+            "search_papers", ErrorCode.SOURCE_CAPABILITY_DISABLED,
+            "当前没有可用的论文搜索平台；请联系管理员开启至少一个平台的搜索能力。",
+        )
+        failure.data = {"skipped_capabilities": route_skips, "search_route": route}
+        return failure
+
     session.papers = [p if isinstance(p, Paper) else Paper.from_dict(p)
                       for p in result.get("papers", [])]
     session.candidates = [p if isinstance(p, Paper) else Paper.from_dict(p)
                           for p in result.get("candidates", [])]
     session.sub_directions = result.get("sub_directions", [])
     session.search_queries = result.get("search_queries", [])
-    promoted_ids = list(result.get("promoted_fulltext_core_ids", []))
-    fulltext_core_available = int(result.get("fulltext_core_available", 0) or 0)
-    fulltext_core_target = int(result.get("fulltext_core_target", 0) or 0)
-    # New search supersedes earlier derived artifacts.
-    session.map_data = {}
-    session.reading_path = []
-    session.literature_review = ""
-
-    total = len(session.papers) + len(session.candidates)
-    if total == 0:
-        route = result.get("search_route", {}) or {}
-        skipped = list(route.get("skipped", []) or [])
-        if skipped and not route.get("primary") and not route.get("fallback"):
-            message = (
-                "当前没有可用的网络论文平台：候选平台均因管理员持久能力策略或静态配置被跳过。"
-                "已停止本次检索，不会重复尝试这些平台。"
-            )
-            return ToolResult(
-                status="error", tool="search_papers", text=message,
-                error={"code": ErrorCode.SOURCE_CAPABILITY_DISABLED, "message": message},
-                data={"skipped_capabilities": skipped, "search_route": route},
-            )
-        return err(
-            "search_papers", ErrorCode.NO_PAPERS,
-            f"主题「{topic}」没有检索到论文。建议：换更宽泛的英文关键词、缩短过长的主题句、"
-            "或拆成更具体的子问题后重试。",
-        )
-    from core.reading_policy import normalize_fulltext_status
-    all_papers = session.papers + session.candidates
-    statuses = [normalize_fulltext_status(p.fulltext_status) for p in all_papers]
-    n_available = statuses.count("available")
-    n_unavailable = statuses.count("unavailable")
-    n_unknown = statuses.count("unknown")
+    # Search returns metadata/abstract evidence only.  No remote full-text
+    # status, promotion, URL or PDF fields are part of this public result.
     source_notices = [str(item) for item in result.get("source_notices", []) if str(item).strip()]
+    all_papers = session.papers + session.candidates
+    from core.paper_search_settings_store import paper_abstract_text
+    valid_abstracts = sum(bool(paper_abstract_text(p).strip()) for p in all_papers)
+    skipped_no_abstract = len(all_papers) - valid_abstracts
     text = (
-        f"检索完成：核心集 {len(session.papers)} 篇，候选 {len(session.candidates)} 篇。"
-        f"全文状态：{n_available} 篇已探测到可访问的 OA PDF，"
-        f"{n_unavailable} 篇已探测为不可获取，"
-        f"{n_unknown} 篇尚未完成探测（显示为待验证，深读时会实际下载尝试；"
-        f"fulltext_status 字段：available=可获取全文 / "
-        f"unavailable=仅摘要 / unknown=尚未验证；"
-        f"探测只读取 PDF 文件头，不下载全文）。"
-        f"核心层全文保障：{fulltext_core_available}/{fulltext_core_target} 篇；"
-        f"本次从候选提升 {len(promoted_ids)} 篇（候选不补位）。"
-        f"核心集论文：{'；'.join(p.title for p in session.papers[:5])}"
+        f"检索完成：核心集 {len(session.papers)} 篇，候选 {len(session.candidates)} 篇；"
+        f"其中 {valid_abstracts} 篇具有有效摘要，可用于摘要级问答和综述。"
     )
+    if skipped_no_abstract:
+        text += f"另有 {skipped_no_abstract} 篇缺少有效摘要，不会进入综述证据。"
+    text += f"核心集论文：{'；'.join(p.title for p in session.papers[:5])}"
     if source_notices:
         text += "\n来源提示：" + "；".join(source_notices)
     build_result = partial_result if result.get("budget_exhausted") else ok
     return build_result(
-        "search_papers",
-        text,
+        "search_papers", text,
         core_titles=[p.title for p in session.papers[:10]],
-        total_papers=total,
-        fulltext_available=n_available,
-        fulltext_unavailable=n_unavailable,
-        fulltext_unknown=n_unknown,
-        promoted_fulltext_core_ids=promoted_ids,
-        promoted_fulltext_core_count=len(promoted_ids),
-        fulltext_core_available=fulltext_core_available,
-        fulltext_core_target=fulltext_core_target,
+        total_papers=len(all_papers),
+        valid_abstract_count=valid_abstracts,
+        skipped_no_abstract_count=skipped_no_abstract,
         sub_directions=session.sub_directions,
         search_queries=session.search_queries,
         source_notices=source_notices,
-        search_route=result.get("search_route", {}),
+        search_route=route,
         capability_skips=(
-            list((result.get("search_route", {}) or {}).get("skipped", []) or [])
+            route_skips
             + list(result.get("capability_skips", []) or [])
         ),
         budget_exhausted=bool(result.get("budget_exhausted")),
         completed_stages=list(result.get("completed_stages", [])),
         skipped_stages=list(result.get("skipped_stages", [])),
         papers=[p.to_dict() for p in session.papers],
-        candidates=[{"id": p.id, "title": p.title, "year": p.year,
-                     "citation_count": p.citation_count, "source": p.source,
-                     "urls": p.urls, "pdf_url": p.pdf_url, "doi": p.doi,
-                     "fulltext_status": normalize_fulltext_status(p.fulltext_status)}
-                    for p in session.candidates],
+        candidates=[p.to_dict() for p in session.candidates],
     )
 
 
@@ -400,213 +333,52 @@ async def _tool_search_papers(args: dict, session: ChatSession, progress_cb,
 # ---------------------------------------------------------------------------
 
 async def _tool_deep_read(args: dict, session: ChatSession, progress_cb) -> ToolResult:
-    from agents.reader_agent import reader_agent
-    from core.paper_search_settings_store import (
-        disclose_fetch_policy, get_paper_search_policy, remote_download_allowed,
-    )
-    from core.reading_policy import plan_reading_depth, summary_has_full_text
+    """Deep-read uploaded documents only.
+
+    Network papers intentionally have no ``paper_ids`` surface anymore.  This
+    guard also rejects legacy callers that still send the field so an old
+    checkpoint cannot silently re-enable remote full-text behavior.
+    """
     from tools.ingest.attachments import attachment_by_id, ensure_attachment_understood
 
-    fetch_policy = get_paper_search_policy()
-    explicit_remote_allowed = remote_download_allowed("explicit", fetch_policy)
-    disclose_restriction = disclose_fetch_policy(fetch_policy)
-    focus = args.get("focus") or ""
-    paper_ids = [pid for pid in (args.get("paper_ids") or []) if pid]
-    attachment_ids = [aid for aid in (args.get("attachment_ids") or []) if aid]
-
-    if not session.has_papers() and not session.attachments:
-        return err("deep_read", ErrorCode.NO_PAPERS,
-                   "当前会话没有论文或上传附件。请先检索论文，或上传 PDF/DOCX/图片。")
-
-    if paper_ids:
-        selected = _select_session_papers(session, paper_ids)
-        if selected is None:
-            return err("deep_read", ErrorCode.VALIDATION_ERROR,
-                       "部分 paper_ids 不在当前论文集中。请从本会话论文 id 中选择。")
-    else:
-        selected = (list(session.papers) if session.has_papers() and not attachment_ids else [])
-
-    if attachment_ids:
-        selected_attachments = [attachment_by_id(session, aid) for aid in attachment_ids]
-        if any(a is None for a in selected_attachments):
+    if args.get("paper_ids"):
+        return err(
+            "deep_read", ErrorCode.VALIDATION_ERROR,
+            "网络论文已下线全文深读能力；当前只能基于有效摘要回答。请上传论文文件后再进行全文深读。",
+        )
+    attachments = list(session.attachments or [])
+    if args.get("attachment_ids"):
+        selected = [attachment_by_id(session, aid) for aid in args["attachment_ids"] if aid]
+        if any(item is None for item in selected):
             return err("deep_read", ErrorCode.VALIDATION_ERROR,
                        "部分 attachment_ids 不属于当前会话，已拒绝读取。")
-        selected_attachments = [a for a in selected_attachments if a is not None]
-    elif not selected and session.attachments:
-        # Attachment-only conversations can simply ask to deep-read "this file".
-        selected_attachments = list(session.attachments)
-    else:
-        selected_attachments = []
+        attachments = [item for item in selected if item is not None]
+    if not attachments:
+        return err("deep_read", ErrorCode.NO_PAPERS,
+                   "当前会话没有可深读的上传文件。网络论文只能基于摘要回答；请先上传 PDF、DOCX、TXT、MD 或 TEX。")
 
-    attachment_results: list[dict] = []
-    for attachment in selected_attachments:
+    focus = str(args.get("focus") or "").strip()
+    results: list[dict] = []
+    for attachment in attachments:
         if progress_cb:
-            progress_cb(f"正在按需深读上传文件：{attachment.get('filename', attachment.get('id', ''))[:40]}...")
+            progress_cb(f"正在完整解析上传文件：{attachment.get('filename', attachment.get('id', ''))[:60]}...")
         understood = await ensure_attachment_understood(attachment, session, focus=focus)
-        attachment_results.append({"filename": attachment.get("filename", ""), **understood})
-
-    # Deep read is an explicit full-text operation: every selected network paper
-    # is a full-attempt candidate (highest relevance first). Papers already
-    # carrying real full text are skipped; OA-unavailable papers fall back to
-    # abstract inside reader_agent and are reported below as abstract-level.
-    full_group, _ = plan_reading_depth(session, selected, focus) if selected else ([], [])
-    full_group = [p for p in full_group
-                  if not summary_has_full_text(session.paper_summaries.get(p.id))]
-    already_full_count = len([p for p in selected
-                              if summary_has_full_text(session.paper_summaries.get(p.id))])
-
-    failures: list[dict] = []
-    fallback_details: list[dict] = []
-    capability_skips: list[dict] = []
-    n_summaries = 0
-    if full_group:
-        state: dict = {
-            "papers": full_group, "topic": session.topic, "language": session.language,
-            "field_profile": session.field_profile, "read_mode": "full",
-            "session_id": session.session_id,
-            "storage_context": session.storage_context,
-            "fetch_origin": "explicit",
-        }
-        result = await reader_agent(state, progress_callback=progress_cb, read_mode="full")
-        session.paper_summaries.update(result.get("paper_summaries", {}))
-        n_summaries = len(result.get("paper_summaries", {}))
-        failures.extend(result.get("read_failures", []))
-        fallback_details.extend(result.get("fulltext_fallbacks", []))
-        capability_skips.extend(result.get("capability_skips", []))
-
-    # Never count an attempted download as a full read. Actual full-text papers
-    # are those whose summaries now carry a real parsed body.
-    actual_full_ids = [
-        p.id for p in full_group
-        if summary_has_full_text(session.paper_summaries.get(p.id))
-    ]
-    session.full_read_count += len(actual_full_ids)
-
-    # Some reader implementations/tests may not populate fulltext_fallbacks;
-    # derive the same facts from the summaries so reporting is always exact.
-    fallback_ids = {f.get("paper_id") for f in fallback_details}
-    failure_ids = {f.get("paper_id") for f in failures}
-    for p in full_group:
-        summary = session.paper_summaries.get(p.id)
-        if summary is None or p.id in fallback_ids or p.id in failure_ids:
-            continue
-        if not summary_has_full_text(summary):
-            capability_skip = _fulltext_capability_skip(session, p)
-            if capability_skip and not any(
-                row.get("paper_id") == p.id for row in capability_skips
-            ):
-                capability_skips.append(capability_skip)
-            fallback_details.append({
-                "paper_id": p.id, "title": p.title or p.id,
-                "reason": (
-                    "source_capability_disabled" if capability_skip
-                    else "oa_fulltext_unavailable" if explicit_remote_allowed
-                    else "remote_fetch_restricted"
-                ),
-            })
-            fallback_ids.add(p.id)
-
-    # Keep the per-paper fulltext_status in sync with what just happened, so a
-    # later research_map/search report cannot regress to a guessed availability.
-    for p in selected:
-        if p.id in actual_full_ids or summary_has_full_text(session.paper_summaries.get(p.id)):
-            p.fulltext_status = "available"
-            _persist_fulltext_status(p, "available", "deep_read_full_verified", session)
-        elif p.id in fallback_ids or p.id in failure_ids:
-            restricted = any(
-                detail.get("paper_id") == p.id
-                and detail.get("reason") in {
-                    "remote_fetch_restricted", "source_capability_disabled"
-                }
-                for detail in fallback_details
-            )
-            status = "unknown" if restricted else "unavailable"
-            p.fulltext_status = status
-            _persist_fulltext_status(
-                p, status, "remote_fetch_restricted" if restricted else "deep_read_full_unavailable", session)
-
-    ready_uploads = sum(r.get("status") == "ready" for r in attachment_results)
-    degraded_uploads = sum(r.get("status") in {"degraded", "legacy_text_only"} for r in attachment_results)
-    deferred_uploads = sum(r.get("status") == "deferred" for r in attachment_results)
-    parts: list[str] = []
-    restricted_fallback = any(
-        detail.get("reason") == "remote_fetch_restricted" for detail in fallback_details)
-    if restricted_fallback and disclose_restriction:
-        parts.append("管理员当前限制远程论文全文拉取，本次使用本地缓存和摘要级证据。")
-    if selected:
-        if full_group:
-            if actual_full_ids:
-                already_note = (
-                    f"；另有 {already_full_count} 篇此前已全文级深读、直接复用"
-                    if already_full_count else ""
-                )
-                parts.append(
-                    f"论文深读完成：{len(actual_full_ids)} 篇已取得 OA 全文并完成全文级深读，"
-                    f"{len(fallback_details)} 篇未取得全文、按摘要级深读；"
-                    f"共返回 {n_summaries} 篇结构化摘要{already_note}"
-                )
-            else:
-                if failures:
-                    parts.append(
-                        f"论文深读完成：{len(fallback_details)} 篇未取得 OA 全文、"
-                        f"按摘要级深读；{len(failures)} 篇失败；"
-                        f"共返回 {n_summaries} 篇结构化摘要"
-                    )
-                else:
-                    parts.append(
-                        f"论文深读完成：本次尝试的 {len(full_group)} 篇均未取得 OA 全文，"
-                        f"已按摘要级深读；共返回 {n_summaries} 篇结构化摘要"
-                    )
-            if fallback_details:
-                reason_labels = {
-                    "oa_fulltext_unavailable": "无 OA 全文",
-                    "source_capability_disabled": "平台全文能力已关闭",
-                    "fulltext_parse_degraded": "全文解析降级",
-                    "remote_fetch_restricted": (
-                        "管理员限制远程全文拉取" if disclose_restriction else "仅使用现有证据"),
-                }
-                shown = "；".join(
-                    f"{f.get('title') or f.get('paper_id')}（"
-                    f"{reason_labels.get(f.get('reason', ''), '无 OA 全文')}）"
-                    for f in fallback_details[:6]
-                )
-                if len(fallback_details) > 6:
-                    shown += f" 等 {len(fallback_details)} 篇"
-                parts.append(f"未取得 OA 全文、按摘要级处理：{shown}")
-        elif already_full_count:
-            parts.append(f"所选 {already_full_count} 篇此前已全文级深读，直接复用全文与图表缓存")
-        else:
-            parts.append("所选论文没有可深读的网络论文")
-    if attachment_results:
-        parts.append(
-            f"上传附件按需理解完成：{ready_uploads} 个已解析"
-            + (f"，{degraded_uploads} 个降级为文本" if degraded_uploads else "")
-            + (f"，{deferred_uploads} 个格式已保存但解析延期" if deferred_uploads else "")
-        )
-    if failures:
-        parts.append(f"{len(failures)} 篇论文失败")
-    selected_titles = {p.id: p.title for p in selected}
-    summaries_data = {}
-    for pid, summary in session.paper_summaries.items():
-        if pid not in selected_titles:
-            continue
-        payload = summary.to_dict() if hasattr(summary, "to_dict") else dict(summary)
-        summaries_data[pid] = {**payload, "title": selected_titles.get(pid) or pid}
+        results.append({"filename": attachment.get("filename", ""), **understood})
+    ready = sum(row.get("status") in {"ready", "text_only", "legacy_text_only"} for row in results)
+    deferred = sum(row.get("status") == "deferred" for row in results)
+    summary = f"上传文件深读完成：{ready}/{len(results)} 个文件已纳入完整文本/结构化解析。"
+    if deferred:
+        summary += f"另有 {deferred} 个格式已保存但解析延期。"
     return ok(
-        "deep_read", "；".join(parts) + "。", summaries=summaries_data,
-        attachments=attachment_results, failures=failures,
-        full_text_paper_ids=actual_full_ids,
-        abstract_fallback_papers=fallback_details,
-        capability_skips=capability_skips,
+        "deep_read",
+        summary + "网络论文仍严格限于摘要证据。",
+        attachments=results,
+        paper_summaries={},
     )
 
 
-# ---------------------------------------------------------------------------
-# ask_papers (hybrid RAG: vector track + BM25 track, RRF fusion)
-# ---------------------------------------------------------------------------
-
 async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> ToolResult:
-    from core.reading_policy import evidence_gap, summary_has_full_text
+    from core.reading_policy import evidence_gap
 
     query = (args.get("query") or "").strip()
     if not query:
@@ -621,25 +393,14 @@ async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> Too
 
     if not session.paper_summaries and not session.has_papers() and not session.attachments:
         return err("ask_papers", ErrorCode.NO_PAPERS,
-                   "会话中还没有可问答的内容。请先 search_papers（可再 deep_read），或让用户上传 PDF。")
+                   "会话中还没有可问答的内容。请先 search_papers，或上传论文文件后再 deep_read。")
 
-    fulltext_missing_title = ""
-    capability_skips: list[dict] = []
     if paper_id:
         selected_paper = session.paper_by_id(paper_id)
         if selected_paper is None:
             return err("ask_papers", ErrorCode.VALIDATION_ERROR,
                        "指定 paper_id 不在当前会话论文集中。")
         paper_id = selected_paper.id
-        had_fulltext = summary_has_full_text(session.paper_summaries.get(paper_id))
-        capability_skip = _fulltext_capability_skip(session, selected_paper)
-        if capability_skip:
-            capability_skips.append(capability_skip)
-        fetched = await _ensure_fulltext(session, paper_id, progress_cb)
-        if fetched and not had_fulltext:
-            session.full_read_count += 1
-        if not summary_has_full_text(session.paper_summaries.get(paper_id)):
-            fulltext_missing_title = selected_paper.title or paper_id
 
     # Upload multimodal work is lazy: explicit attachment queries always parse
     # that attachment; figure/table/formula queries parse current multimodal
@@ -699,8 +460,8 @@ async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> Too
         return partial_result(
             "ask_papers",
             "在本会话的论文与文件中没有检索到相关段落。可以换个包含论文关键词的问法重试，"
-            "或带 paper_id 针对具体某篇问答（会尝试补读该篇 OA 全文；"
-            "取不到全文时回退摘要级并明确说明）。",
+            "或带 paper_id 针对具体某篇问答。网络论文只使用有效摘要；"
+            "需要数字、实验或章节细节时请上传原文。",
             answer="", sources=[], attachments=attachment_results,
         )
 
@@ -712,47 +473,16 @@ async def _tool_ask_papers(args: dict, session: ChatSession, progress_cb) -> Too
             answer="", sources=_passages_to_sources(passages),
         )
 
-    # Adaptive depth (core/reading_policy): the generated answer shows an
-    # evidence gap → escalate ONCE: targeted full-text fetch for the most
-    # relevant papers, re-retrieve, regenerate. Rule-based, budget-capped,
-    # no user confirmation.
-    escalated = False
-    if evidence_gap(answer, passages, query):
-        n = await _escalate_fulltext(
-            session, _escalation_targets(passages), progress_cb, capability_skips
-        )
-        if n:
-            passages2 = await run_cpu_bound(
-                _retrieve_passages, session, retrieval_query, paper_id, top_k, modality
-            )
-            passages2 = _protect_passage(
-                passages2, _section_outline_passage(session, paper_id) if structure_query else None,
-                top_k,
-            )
-            if passages2:
-                answer2 = await _generate_grounded_answer(query, passages2)
-                if answer2:
-                    answer, passages, escalated = answer2, passages2, True
-
     valid_ids = {p["paper_id"] for p in passages if p.get("paper_id")}
     text = f"基于 {len(valid_ids)} 个来源、{len(passages)} 个段落完成回答。"
-    if escalated:
-        text += "（检测到摘要级证据不足，已自动补读全文后重新检索回答）"
-    elif fulltext_missing_title:
-        if capability_skips:
-            text += (
-                f"（注意：{fulltext_missing_title} 所属平台的全文获取能力已关闭，"
-                "已跳过 OA 探测与下载；本次回答仅基于当前允许的摘要级证据）"
-            )
-        else:
-            text += f"（注意：{fulltext_missing_title} 未能取得 OA 全文，本次回答仅基于摘要级证据）"
-    elif evidence_gap(answer, passages, query):
-        text += "（检测到证据缺口，但相关论文未能取得 OA 全文；请以上述摘要级边界为准）"
+    if evidence_gap(answer, passages, query):
+        text += "（当前证据不足以支持更细的数字、实验或章节级结论；网络论文仅依据有效摘要。"
+        text += "请上传论文原文后进行全文级分析。）"
     return ok(
         "ask_papers",
         text,
         answer=answer, sources=_passages_to_sources(passages),
-        attachments=attachment_results, capability_skips=capability_skips,
+        attachments=attachment_results,
     )
 
 
@@ -769,7 +499,10 @@ def _is_structure_query(query: str) -> bool:
 
 
 def _section_outline_passage(session: ChatSession, paper_id: str | None) -> dict | None:
-    if not paper_id:
+    # Ordered section outlines are full-document evidence.  Never reuse a
+    # historical network-paper summary here; only uploaded documents may
+    # expose that structure.
+    if not paper_id or not paper_id.startswith("upload:"):
         return None
     summary = session.paper_summaries.get(paper_id)
     outline = getattr(summary, "section_outline", None) or []
@@ -834,47 +567,6 @@ async def _generate_grounded_answer(query: str, passages: list[dict]) -> str | N
         logger.error("ask_papers LLM call failed: %s", e)
         return None
     return _validate_citations(answer, valid_ids)
-
-
-def _escalation_targets(passages: list[dict]) -> list[str]:
-    """Paper ids to full-read on escalation, ranked by passage order, deduped."""
-    out: list[str] = []
-    for p in passages:
-        pid = p.get("paper_id")
-        if pid and pid not in out:
-            out.append(pid)
-    return out
-
-
-async def _escalate_fulltext(
-    session: ChatSession, paper_ids: list[str], progress_cb,
-    capability_skips: list[dict] | None = None,
-) -> int:
-    """Budget-capped targeted full-text fetch; returns newly-fetched count."""
-    from core.reading_policy import (
-        FULL_READS_PER_ASK, full_read_allowance, summary_has_full_text,
-    )
-
-    allow = full_read_allowance(session, len(paper_ids), FULL_READS_PER_ASK)
-    done = 0
-    for pid in paper_ids[:allow]:
-        s = session.paper_summaries.get(pid)
-        if summary_has_full_text(s):
-            continue  # already full — nothing to fetch, no budget spent
-        paper = session.paper_by_id(pid)
-        skip = _fulltext_capability_skip(session, paper) if paper is not None else None
-        if skip:
-            if capability_skips is not None and not any(
-                row.get("paper_id") == pid for row in capability_skips
-            ):
-                capability_skips.append(skip)
-            continue
-        if await _ensure_fulltext(session, pid, progress_cb):
-            done += 1
-    session.full_read_count += done
-    if done:
-        logger.info("ask_papers escalated to full text for %d paper(s)", done)
-    return done
 
 
 # --- modality detection (rule-based, zero LLM) --------------------------------
@@ -967,159 +659,16 @@ def _ensure_session_index(session: ChatSession) -> None:
         logger.info("re-indexing %d paper summaries for session %s",
                     len(papers), session.session_id)
         for p in papers:
-            vs.upsert_paper_summary(p, session.paper_summaries.get(p.id),
-                                    session_id=session.session_id)
+            if not _network_paper_evidence_allowed(session, p.id):
+                continue
+            # Never let a restored network PaperSummary (possibly created from
+            # the retired remote-PDF path) re-enter the vector index.
+            summary = session.paper_summaries.get(p.id) if (
+                p.source == "upload" or p.id.startswith("upload:")
+            ) else None
+            vs.upsert_paper_summary(p, summary, session_id=session.session_id)
     except Exception as e:  # noqa: BLE001
         logger.debug("session index self-heal skipped: %s", e)
-
-
-def _fulltext_capability_skip(session: ChatSession, paper: Paper) -> dict | None:
-    """Return a structured remote-fulltext skip unless verified local evidence exists."""
-    from core.paper_search_settings_store import (
-        capability_skip_result, paper_capability_source,
-        source_capability_enabled,
-    )
-    from core.reading_policy import summary_has_full_text
-
-    if summary_has_full_text(session.paper_summaries.get(paper.id)):
-        return None
-    local_path = getattr(paper, "pdf_path", None)
-    if local_path:
-        try:
-            with open(local_path, "rb") as stream:
-                if stream.read(5) == b"%PDF-":
-                    return None
-        except OSError:
-            pass
-    allowed, reason = source_capability_enabled(
-        paper_capability_source(paper, "fulltext"), "fulltext"
-    )
-    if allowed:
-        return None
-    row = capability_skip_result(
-        paper_capability_source(paper, "fulltext"), "fulltext", reason
-    )
-    row.update({"paper_id": paper.id, "title": paper.title or paper.id})
-    return row
-
-
-async def _ensure_fulltext(session: ChatSession, paper_id: str, progress_cb=None) -> bool:
-    """On-demand full-text for a single paper (targeted deep-dive / escalation).
-
-    Fetches the PDF and runs it through the SAME multimodal pipeline as
-    deep_read (parse → scanned recovery → VLM element understanding → persist +
-    index), then indexes full-text chunks into the session RAG space and stashes
-    full_text on the in-memory summary. Best-effort. Returns True when full text
-    is available afterwards (already present or newly fetched).
-    """
-    from core.reading_policy import summary_has_full_text
-
-    summary = session.paper_summaries.get(paper_id)
-    if (summary_has_full_text(summary)
-            and getattr(summary, "section_outline", None)
-            and getattr(summary, "document_info", None)):
-        paper = session.paper_by_id(paper_id)
-        if paper is not None:
-            paper.fulltext_status = "available"
-            _persist_fulltext_status(paper, "available", "summary_full_verified", session)
-        return True
-    paper = session.paper_by_id(paper_id)
-    if paper is None:
-        return False
-    from core.paper_search_settings_store import (
-        disclose_fetch_policy, get_paper_search_policy, remote_download_allowed,
-    )
-    fetch_policy = get_paper_search_policy()
-    from core.paper_search_settings_store import (
-        paper_capability_source, source_capability_enabled,
-    )
-    fulltext_allowed, capability_reason = source_capability_enabled(
-        paper_capability_source(paper, "fulltext"), "fulltext", fetch_policy
-    )
-    if not fulltext_allowed:
-        if progress_cb:
-            progress_cb(capability_reason or "该论文来源的全文获取能力已关闭；跳过 OA 探测和下载。")
-        return False
-    if not remote_download_allowed("automatic", fetch_policy):
-        if progress_cb and disclose_fetch_policy(fetch_policy):
-            progress_cb("管理员当前限制自动论文全文拉取；本次使用已有缓存与摘要。")
-        return False
-    try:
-        from agents.reader_agent import (
-            _document_info, _section_outline, parse_and_understand,
-        )
-        from core.config import get_settings
-        from core.reading_policy import is_full_text
-        from tools.pdf.fetcher import PDFFetcher
-        from tools.storage.database import Database
-        from tools.storage.vectorstore import VectorStore
-
-        if progress_cb:
-            progress_cb(f"按需补读全文：{paper.title[:40]}...")
-        fetcher = PDFFetcher(
-            get_settings().reader.pdf_dir, storage_context=session.storage_context
-        )
-        paths = await fetcher.fetch_many([paper])
-        await fetcher.close()
-        pdf_path = paths.get(paper.id)
-        if not pdf_path:
-            paper.fulltext_status = "unavailable"
-            _persist_fulltext_status(paper, "unavailable", "no_oa_fulltext", session)
-            return False
-        paper.pdf_path = pdf_path
-
-        # Stage 1 + 1.5 + 2 + 3 — same path as deep_read. Element understanding
-        # is fingerprint-gated, so escalating after a deep_read costs zero VLM.
-        db = Database(storage_context=session.storage_context) if session.storage_context is not None else Database(get_settings().storage.sqlite_path)
-        assets_dir = str(session.storage_context.blob_dir / "element_assets") if session.storage_context is not None and session.storage_context.channel == "openai_api" else get_settings().reader.assets_dir
-        try:
-            doc = await parse_and_understand(
-                paper, db, assets_dir=assets_dir,
-                storage_context=session.storage_context,
-                session_id=session.session_id,
-            )
-        finally:
-            db.close()
-        if doc is None or not is_full_text(doc.raw_text):
-            # A parse that only recovered a fragment/abstract must not be
-            # labelled full text; ask_papers will state the abstract boundary.
-            paper.fulltext_status = "unavailable"
-            _persist_fulltext_status(paper, "unavailable", "parse_degraded", session)
-            return False
-        await run_cpu_bound(
-            VectorStore(storage_context=session.storage_context).upsert_fulltext_chunks,
-            paper, session_id=session.session_id,
-            parsed_sections=doc.sections, full_text=doc.raw_text,
-        )
-        if summary is None:
-            summary = PaperSummary(paper_id=paper.id)
-            session.paper_summaries[paper.id] = summary
-        summary.full_text = doc.raw_text
-        summary.section_outline = _section_outline(doc)
-        summary.document_info = _document_info(
-            paper, doc, read_level="full", text_chars=len(doc.raw_text),
-        )
-        if doc.elements:
-            summary.elements = [e.short_ref() for e in doc.elements]
-        # Persist the healed/created lightweight structure metadata so restored
-        # histories do not fall back to a top-k-only view on the next turn.
-        cache_db = Database(storage_context=session.storage_context) \
-            if session.storage_context is not None \
-            else Database(get_settings().storage.sqlite_path)
-        try:
-            import json as _json
-            cache_db.save_cached_summary(
-                paper.id, session.field_profile or "general", "full",
-                _json.dumps(summary.to_dict()),
-            )
-        finally:
-            cache_db.close()
-        paper.fulltext_status = "available"
-        _persist_fulltext_status(paper, "available", "ask_escalation_full_verified", session)
-        return True
-    except Exception as e:  # noqa: BLE001
-        logger.debug("on-demand fulltext failed for %s: %s", paper_id, e)
-        return False
 
 
 def _element_passage_id(element_id: str) -> str:
@@ -1132,73 +681,47 @@ def _element_passage_id(element_id: str) -> str:
 
 
 def _network_paper_evidence_allowed(session: ChatSession, paper_id: str) -> bool:
-    """Whether cached abstract/summary evidence may enter the current RAG turn."""
+    """Allow only a live, non-empty abstract for a network paper.
+
+    Historical structured/full-text summary rows are intentionally ignored;
+    they are retired evidence and must never bypass the abstract capability.
+    """
     if not paper_id or paper_id.startswith("upload:"):
+        return True
+    if any(str(item.get("id") or "") == str(paper_id)
+           for item in (session.attachments or [])):
         return True
     paper = session.paper_by_id(paper_id)
     if paper is None:
-        return True
+        return False
     from core.paper_search_settings_store import (
-        paper_capability_source, source_capability_enabled,
+        paper_abstract_text, paper_capability_source, source_capability_enabled,
     )
-    from core.reading_policy import summary_has_full_text
-    if summary_has_full_text(session.paper_summaries.get(paper_id)):
-        return True
-    if getattr(paper, "pdf_path", None):
-        return True
-    return source_capability_enabled(
+    abstract = paper_abstract_text(paper).strip()
+    if not abstract:
+        return False
+    allowed, _reason = source_capability_enabled(
         paper_capability_source(paper, "abstract"), "abstract"
-    )[0]
+    )
+    return bool(allowed)
 
 
 def _session_corpus(session: ChatSession) -> list[dict]:
-    """In-memory BM25 corpus from session data (summaries + full texts + uploads
-    + figure/table/formula element captions)."""
-    from pathlib import Path
-
-    from core.reading_policy import is_full_text
+    """BM25 corpus from live abstracts and private uploaded-document evidence."""
     from tools.storage.vectorstore import build_fulltext_chunks
 
     corpus: list[dict] = []
     title_of = {p.id: p.title for p in session.all_papers()}
+    from core.paper_search_settings_store import paper_abstract_text
     for p in session.all_papers():
-        from core.paper_search_settings_store import paper_abstract_text
-        text = f"{p.title or ''}\n{paper_abstract_text(p)}".strip()
-        if text:
-            corpus.append({"id": p.id, "paper_id": p.id, "title": p.title or "",
-                           "section": "abstract", "text": text})
-    for pid, s in (session.paper_summaries or {}).items():
-        if not _network_paper_evidence_allowed(session, pid):
+        if not _network_paper_evidence_allowed(session, p.id):
             continue
-        title = title_of.get(pid, pid)
-        body_parts = [getattr(s, "research_problem", "") or "",
-                      getattr(s, "methodology", "") or ""]
-        findings = getattr(s, "key_findings", None) or []
-        body_parts.extend(str(f) for f in findings[:5])
-        body = "\n".join(b for b in body_parts if b.strip())
-        if body.strip():
-            corpus.append({"id": f"{pid}::summary", "paper_id": pid, "title": title,
-                           "section": "summary", "text": body})
-        outline_passage = _section_outline_passage(session, pid)
-        if outline_passage is not None:
-            corpus.append({"id": f"{pid}::section_outline", **outline_passage})
-        full_text = getattr(s, "full_text", None)
-        if is_full_text(full_text):
-            corpus.extend(_parent_records(pid, title, build_fulltext_chunks(None, full_text)))
-        # Element caption passages — let BM25 match "Figure 3" / "the architecture
-        # diagram" lexically. The full VLM understanding text lives in the global
-        # elements collection (queried by the vector track); here we only need the
-        # addressable caption. Elements without a caption carry no lexical signal
-        # and are skipped (the vector track still catches them semantically).
-        for el in getattr(s, "elements", []) or []:
-            eid = el.get("element_id") or ""
-            cap = (el.get("caption") or "").strip()
-            if not eid or not cap:
-                continue
-            kind = el.get("kind") or ""
-            corpus.append({"id": _element_passage_id(eid), "paper_id": pid,
-                           "title": title, "section": kind,
-                           "text": f"[{kind}] {cap}"})
+        abstract = paper_abstract_text(p).strip()
+        text = f"{p.title or ''}\n{abstract}".strip()
+        corpus.append({"id": p.id, "paper_id": p.id, "title": p.title or "",
+                       "section": "abstract", "text": text})
+    # Do not read historical network summaries/full_text here.  Uploaded
+    # sidecars are the sole full-document source for this RAG corpus.
     from tools.ingest.attachments import attachment_text_path
     for a in session.attachments or []:
         aid = a.get("id")
@@ -1284,24 +807,72 @@ def _hybrid_retrieve(session: ChatSession, query: str, paper_id: str | None,
     try:
         vs = VectorStore(storage_context=session.storage_context)
         if vs.available():
-            hits = []
+            tagged_hits: list[tuple[object, bool]] = []
             if chunk_scope:
-                hits = vs.search_chunks(query, session_id=session.session_id,
-                                        paper_id=chunk_scope, top_k=top_k * 3)
+                if paper_id and paper_id.startswith("upload:"):
+                    tagged_hits = [
+                        (hit, True) for hit in vs.search_chunks(
+                            query, session_id=session.session_id,
+                            paper_id=chunk_scope, top_k=top_k * 3
+                        )
+                    ]
+                else:
+                    summary_hits = vs.search_summaries(
+                        query, session_id=session.session_id, top_k=top_k * 3)
+                    tagged_hits = [
+                        (hit, False) for hit in summary_hits
+                        if str((hit.metadata or {}).get("paper_id") or "") == str(paper_id)
+                    ]
             else:
-                hits = vs.search_chunks(query, session_id=session.session_id,
-                                        top_k=top_k * 3)
-                if not hits:
-                    hits = vs.search_summaries(query, session_id=session.session_id,
-                                               top_k=top_k * 3)
+                tagged_hits = [
+                    (hit, True) for hit in vs.search_chunks(
+                        query, session_id=session.session_id, top_k=top_k * 3
+                    )
+                ]
+                # Network-paper semantic retrieval lives in the level-1
+                # abstract index.  Query it even when upload chunks exist.
+                tagged_hits += [
+                    (hit, False) for hit in vs.search_summaries(
+                        query, session_id=session.session_id, top_k=top_k * 3
+                    )
+                ]
             v_ids = []
             prefix = f"{session.session_id}::"
-            for h in hits:
+            for h, is_chunk_hit in tagged_hits:
                 pid_key = h.id[len(prefix):] if h.id.startswith(prefix) else h.id
                 meta = h.metadata or {}
                 # Small-to-big: dedupe on the parent passage, return parent text.
                 hit_paper_id = meta.get("paper_id", "")
                 if not _network_paper_evidence_allowed(session, hit_paper_id):
+                    continue
+                hit_paper = session.paper_by_id(str(hit_paper_id)) if hit_paper_id else None
+                is_upload = str(hit_paper_id).startswith("upload:") or any(
+                    str(item.get("id") or "") == str(hit_paper_id)
+                    for item in (session.attachments or [])
+                )
+                is_network = bool(hit_paper_id) and not is_upload
+                if is_network and is_chunk_hit:
+                    # Old network full-text chunks are never even used to
+                    # select a paper.  The abstract-summary index is the sole
+                    # semantic vector track for network literature.
+                    continue
+                # A legacy full-text chunk can still be present until the
+                # retirement migration runs.  It must never become evidence:
+                # remap network hits to the live abstract and discard the
+                # historical chunk body/section.
+                if is_network:
+                    from core.paper_search_settings_store import paper_abstract_text
+                    evidence_text = paper_abstract_text(hit_paper).strip() if hit_paper else ""
+                    if not evidence_text:
+                        continue
+                    passages_by_id[str(hit_paper_id)] = {
+                        "paper_id": str(hit_paper_id),
+                        "title": hit_paper.title or meta.get("title", ""),
+                        "section": "abstract",
+                        "text": evidence_text,
+                    }
+                    if str(hit_paper_id) not in v_ids:
+                        v_ids.append(str(hit_paper_id))
                     continue
                 parent_id = meta.get("parent_id") or ""
                 key = f"{hit_paper_id}::{parent_id}" if parent_id else pid_key
@@ -1406,7 +977,6 @@ async def _tool_research_map(args: dict, session: ChatSession, progress_cb) -> T
         return err("research_map", ErrorCode.NO_PAPERS,
                    "还没有检索到论文。请先调用 search_papers。")
 
-    _sync_fulltext_status_from_summaries(session)
     policy = get_performance_policy()
     citation_mode = policy.map_citation_mode
     capability_skips: list[dict] = []
@@ -1440,7 +1010,7 @@ async def _tool_research_map(args: dict, session: ChatSession, progress_cb) -> T
     fingerprint_payload = [{
         "id": p.id, "title": p.title, "year": p.year,
         "citation_count": p.citation_count or 0,
-        "fulltext_status": getattr(p, "fulltext_status", "unknown"),
+        "abstract": getattr(p, "abstract", "") or "",
         "doi": p.doi or "",
     } for p in all_papers]
     fingerprint_payload.extend([
@@ -1503,9 +1073,44 @@ async def _tool_reading_path(args: dict, session: ChatSession, progress_cb) -> T
 async def _tool_write_review(args: dict, session: ChatSession, progress_cb) -> ToolResult:
     from agents.review_agent import review_agent
 
-    if not session.has_papers():
+    # A review may be based on uploaded papers alone.  Network papers are
+    # resolved strictly inside this session and are later filtered by the
+    # current abstract capability gate in review_agent.
+    requested_papers = [str(pid) for pid in (args.get("paper_ids") or []) if str(pid).strip()]
+    if requested_papers:
+        selected_papers = _select_session_papers(session, requested_papers)
+        if selected_papers is None:
+            return err("write_review", ErrorCode.VALIDATION_ERROR,
+                       "部分 paper_ids 不属于当前会话，已拒绝猜测或跨会话读取。")
+    else:
+        selected_papers = session.all_papers()
+    resolved_paper_ids = [p.id for p in selected_papers]
+
+    requested_attachments = [str(aid) for aid in (args.get("attachment_ids") or []) if str(aid).strip()]
+    if requested_attachments:
+        from tools.ingest.attachments import attachment_by_id
+        selected_attachments = [attachment_by_id(session, aid) for aid in requested_attachments]
+        if any(item is None for item in selected_attachments):
+            return err("write_review", ErrorCode.VALIDATION_ERROR,
+                       "部分 attachment_ids 不属于当前会话，已拒绝读取。")
+        selected_attachments = [item for item in selected_attachments if item is not None]
+    else:
+        selected_attachments = list(session.attachments or [])
+
+    if not selected_papers and not selected_attachments:
         return err("write_review", ErrorCode.NO_PAPERS,
-                   "还没有检索到论文。请先调用 search_papers。")
+                   "当前会话没有网络论文或上传附件。请先检索论文或上传 PDF/DOCX/TXT/MD/TEX。")
+
+    # Uploaded files are the sole full-text source. Ensure PDF/DOCX structure
+    # parsing and sidecar enrichment have run before the review reads them;
+    # text formats degrade to deterministic text-only handling.
+    if selected_attachments:
+        from tools.ingest.attachments import ensure_attachment_understood
+        focus = str(args.get("focus") or "").strip()
+        for attachment in selected_attachments:
+            if progress_cb:
+                progress_cb(f"正在准备上传全文：{attachment.get('filename', attachment.get('id', ''))[:60]}...")
+            await ensure_attachment_understood(attachment, session, focus=focus or session.topic)
 
     # Clusters come from the research map when available; otherwise one group.
     clusters_dict: dict = {}
@@ -1520,21 +1125,55 @@ async def _tool_write_review(args: dict, session: ChatSession, progress_cb) -> T
         "topic": session.topic,
         "user_conception": session.conception,
         "language": session.language,
-        "papers": session.papers,
+        "papers": [p for p in selected_papers if p.id in {x.id for x in session.papers}],
+        "candidates": [p for p in selected_papers if p.id in {x.id for x in session.candidates}],
+        "candidate_papers": [p for p in selected_papers if p.id in {x.id for x in session.candidates}],
         "paper_summaries": session.paper_summaries,
+        "attachments": selected_attachments,
+        "session": session,
+        "paper_ids": resolved_paper_ids if requested_papers else [],
+        "attachment_ids": requested_attachments,
+        "focus": str(args.get("focus") or "").strip(),
+        "target_length": int(args.get("target_length") or 0),
         "citation_graph_data": {"clusters": clusters_dict},
-        "review_rounds": 0,
-        "review_cluster_count": len(clusters_dict),
     }
     result = await review_agent(state, progress_callback=progress_cb)
     session.literature_review = result.get("literature_review", "")
 
+    stats = result.get("review_stats", {})
+    digest_cache = dict((session.review_metadata or {}).get("_upload_chunk_digests") or {})
+    session.review_metadata = {
+        "evidence": result.get("review_evidence", []),
+        "exclusions": result.get("review_exclusions", []),
+        "stats": stats,
+        "focus": state["focus"],
+        "_upload_chunk_digests": digest_cache,
+    }
+
+    # write_review is itself an export-producing operation.  This ensures a
+    # successful generation always has both formats, regardless of whether
+    # the user later invokes export_report.
+    from tools.export.report import write_reports
+    files = write_reports(session, {"write_review"})
+    for item in files:
+        item.setdefault("url", f"/files/{item['fileName']}")
+
+    included = int(stats.get("included_count") or 0)
+    excluded = int(stats.get("excluded_count") or 0)
+    formats = "、".join(str(f.get("fileType") or "").upper() for f in files)
+    target = int(stats.get("target_length") or 0)
+
     return ok(
         "write_review",
-        f"文献综述已生成（{len(session.literature_review)} 字符，"
-        f"按 {len(clusters_dict)} 个主题簇组织）。",
+        f"文献综述已生成（{len(session.literature_review)} 字符，纳入 {included} 条、跳过 {excluded} 条，"
+        f"实际篇幅目标 {target}；{stats.get('length_note', '按材料自适应')}）。"
+        + (f"已同时生成 {formats} 文件。" if files else "文件导出未完成，可稍后调用 export_report 重试。"),
         literature_review=session.literature_review,
         review_chars=len(session.literature_review),
+        review_stats=stats,
+        review_evidence=result.get("review_evidence", []),
+        review_exclusions=result.get("review_exclusions", []),
+        files=files,
     )
 
 
@@ -1938,7 +1577,7 @@ async def _tool_bib_import(args: dict, session: ChatSession, progress_cb) -> Too
         msg += f"（{enriched} 篇经 Crossref 补全元数据）"
     if failures:
         msg += f"，{len(failures)} 条跳过"
-    msg += "。导入的论文已并入候选集，可对其 deep_read / write_review / citation_export。"
+    msg += "。导入记录已并入候选集，可用于元数据组织与 citation_export；只有存在有效摘要时才进入 write_review，全文分析请上传原文。"
     return ok("bib_import", msg,
               report={"imported": len(imported), "enriched": enriched,
                       "failed": len(failures), "failures": failures},
@@ -1949,70 +1588,37 @@ async def _tool_bib_import(args: dict, session: ChatSession, progress_cb) -> Too
 # exhibit_index (deterministic figure/table caption extraction, zero LLM)
 # ---------------------------------------------------------------------------
 
-def _captions_for(paper: Paper, session: ChatSession) -> list[dict]:
-    """Page-accurate (PDF) → text (full_text) caption extraction, best-effort."""
-    from pathlib import Path
-
-    from core.reading_policy import is_full_text
-    from tools.pdf.caption import extract_captions, extract_captions_from_pdf
-
-    pdf_path = getattr(paper, "pdf_path", None)
-    if pdf_path and Path(pdf_path).exists():
-        caps = extract_captions_from_pdf(pdf_path)
-        if caps:
-            return caps
-    summary = session.paper_summaries.get(paper.id)
-    full_text = getattr(summary, "full_text", None) if summary else None
-    if is_full_text(full_text):
-        return extract_captions(full_text)
-    return []
-
-
 async def _tool_exhibit_index(args: dict, session: ChatSession, progress_cb) -> ToolResult:
-    """List paper captions plus persisted multimodal elements from uploads."""
+    """List figures/tables/formulas created by uploaded attachments only."""
     from core.config import get_settings
     from tools.ingest.attachments import (
         attachment_by_id, attachment_document_id, ensure_attachment_understood,
     )
     from tools.storage.database import Database
 
-    paper_ids = [pid for pid in (args.get("paper_ids") or []) if pid]
-    attachment_ids = [aid for aid in (args.get("attachment_ids") or []) if aid]
-    pool = (_select_session_papers(session, paper_ids)
-            if paper_ids else ([] if attachment_ids else session.all_papers()))
-    if pool is None:
-        return err("exhibit_index", ErrorCode.VALIDATION_ERROR,
-                   "部分 paper_ids 不在当前会话。")
-
-    if attachment_ids:
-        attachments = [attachment_by_id(session, aid) for aid in attachment_ids]
+    requested = [aid for aid in (args.get("attachment_ids") or []) if aid]
+    if requested:
+        attachments = [attachment_by_id(session, aid) for aid in requested]
         if any(a is None for a in attachments):
             return err("exhibit_index", ErrorCode.VALIDATION_ERROR,
                        "部分 attachment_ids 不属于当前会话。")
         attachments = [a for a in attachments if a is not None]
-    elif not paper_ids:
-        attachments = list(session.attachments or [])
     else:
-        attachments = []
-    if not pool and not attachments:
+        attachments = list(session.attachments or [])
+    if not attachments:
         return err("exhibit_index", ErrorCode.NO_PAPERS,
-                   "当前会话没有论文或上传附件。")
+                   "当前会话没有上传附件。网络论文不提供远程图表解析；请上传原文。")
 
     exhibits: list[dict] = []
     missing: list[dict] = []
     attachment_results: list[dict] = []
-    for paper in pool:
-        caps = _captions_for(paper, session)
-        if caps:
-            exhibits.append({"paper_id": paper.id, "title": paper.title, "captions": caps})
-        elif paper_ids:
-            missing.append({"id": paper.id, "title": paper.title})
-
-    db = Database(storage_context=session.storage_context) if session.storage_context is not None else Database(get_settings().storage.sqlite_path)
+    db = (Database(storage_context=session.storage_context)
+          if session.storage_context is not None
+          else Database(get_settings().storage.sqlite_path))
     try:
         for attachment in attachments:
             if progress_cb:
-                progress_cb(f"正在按需解析上传文件图表：{attachment.get('filename', '')[:40]}...")
+                progress_cb(f"正在按需解析上传文件图表：{attachment.get('filename', '')[:60]}...")
             understood = await ensure_attachment_understood(attachment, session, focus="图表导览")
             attachment_results.append({"filename": attachment.get("filename", ""), **understood})
             doc_id = attachment_document_id(attachment["id"])
@@ -2033,17 +1639,14 @@ async def _tool_exhibit_index(args: dict, session: ChatSession, progress_cb) -> 
                                 "title": attachment.get("filename", attachment["id"])})
     finally:
         db.close()
-
     total = sum(len(group["captions"]) for group in exhibits)
     if total == 0:
         return partial_result(
             "exhibit_index",
-            "未提取到图、表或公式；文本仍可正常问答，扫描件在未配置 VLM 时会自动降级。",
-            exhibits=[], missing_fulltext=missing, attachments=attachment_results)
-    return ok("exhibit_index",
-              f"图表导览完成：从 {len(exhibits)} 个文档提取 {total} 个元素。",
-              exhibits=exhibits, missing_fulltext=missing,
-              attachments=attachment_results)
+            "未提取到上传文件中的图、表或公式；网络论文不提供远程图表解析。",
+            exhibits=[], missing=missing, attachments=attachment_results)
+    return ok("exhibit_index", f"上传文件图表导览完成：{total} 个元素。",
+              exhibits=exhibits, missing=missing, attachments=attachment_results)
 
 
 # ---------------------------------------------------------------------------
@@ -2091,8 +1694,8 @@ async def _tool_explain_element(args: dict, session: ChatSession, progress_cb) -
         return err("explain_element", ErrorCode.VALIDATION_ERROR,
                    "无法从 element_id 解析出 paper_id，请显式传入 paper_id。")
 
-    # Session isolation covers both network papers and collision-proof upload
-    # namespaces.  Never authorize an upload merely because its global row exists.
+    # Only collision-proof upload namespaces are eligible. Never authorize an
+    # element merely because its global cache row exists.
     from tools.ingest.attachments import (
         attachment_by_id, ensure_attachment_understood, session_element_scope,
     )

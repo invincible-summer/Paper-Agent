@@ -3,7 +3,7 @@
 Produces the JSON the frontend SVG component renders — NO pyvis/HTML:
 
   nodes: [{id, title, year, citation_count, cluster, role, layer,
-           authors, url, abstract, venue, fulltext, fulltext_status}]
+           authors, url, abstract, venue}]
   edges: [{source, target, type}]   type = "cites" (real, directed) | "semantic"
 
 Edge policy:
@@ -28,10 +28,6 @@ from typing import Any
 from core.embeddings import embed_texts
 from core.models import Paper
 from core.paper_search_settings_store import paper_abstract_text
-from core.reading_policy import (
-    fulltext_available,
-    normalize_fulltext_status,
-)
 
 logger = logging.getLogger(__name__)
 _CITATION_ENRICHMENT_TIMEOUT_SECONDS = 8.0
@@ -191,7 +187,6 @@ async def build_genealogy(papers: list[Paper], cluster_of: dict[str, int],
 
     nodes = []
     for p in papers:
-        status = normalize_fulltext_status(getattr(p, "fulltext_status", ""))
         nodes.append({
             "id": p.id,
             "title": p.title,
@@ -204,11 +199,6 @@ async def build_genealogy(papers: list[Paper], cluster_of: dict[str, int],
             "url": _best_url(p),
             "abstract": paper_abstract_text(p)[:200],
             "venue": p.venue or "",
-            # Only a verified live-PDF probe (or a real full_text summary)
-            # may show as full-text available. A metadata pdf_url is often a
-            # paywalled landing page and must never light up this badge.
-            "fulltext": fulltext_available(p),
-            "fulltext_status": status,
         })
     edges = (
         [{"source": s, "target": t, "type": "cites", "weight": 1.0}
@@ -237,4 +227,4 @@ def _best_url(p: Paper) -> str:
                 return u
     if p.doi:
         return f"https://doi.org/{p.doi.lstrip('/')}"
-    return p.pdf_url or ""
+    return ""

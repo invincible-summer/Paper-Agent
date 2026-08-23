@@ -16,7 +16,6 @@ import {
 import {
   AdminApiError,
   cleanupAccount,
-  cleanupWebPaperCache,
   listAccountStorage,
   type AccountStorageItem,
 } from "@/lib/admin-api";
@@ -32,14 +31,6 @@ const HELP: Record<string, HelpEntry> = {
       ["删除范围", "该账号的历史会话、上传文件、Trace 记录、会话向量；API Key 还会删除其 API 会话 / Checkpoint / 私有文件，并撤销该密钥。"],
       ["不可恢复", "删除立即执行且无法撤销；账号本身（登录凭据）不会被删除。"],
       ["判断依据", "「历史 / 上传 / Trace / API 私有」各列显示了将被清除的内容规模，删除前请核对。"],
-    ],
-  },
-  paperCache: {
-    title: "清理拉取论文缓存",
-    entries: [
-      ["删除范围", "web 渠道 data/pdfs 与 data/assets 中的论文 PDF 和图表资产（全局共享缓存）。"],
-      ["不影响账号", "不删除任何账号的历史会话与上传文件。"],
-      ["自动重建", "后续深读某篇论文时会自动重新下载并提取，仅产生一次网络与解析耗时。"],
     ],
   },
 };
@@ -69,7 +60,6 @@ export default function AccountsDataAdminPage() {
   const [notice, setNotice] = useState("");
   const [helpItem, setHelpItem] = useState<HelpEntry | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<AccountStorageItem | null>(null);
-  const [confirmCache, setConfirmCache] = useState(false);
 
   useEffect(() => {
     void useAuthStore.getState().hydrate();
@@ -126,21 +116,6 @@ export default function AccountsDataAdminPage() {
     }
   };
 
-  const cleanPaperCache = async () => {
-    setBusy("paper-cache");
-    setError("");
-    setNotice("");
-    try {
-      const result = await cleanupWebPaperCache();
-      setNotice(`论文缓存已清理：${result.files} 个文件 / ${bytes(result.bytes)}`);
-      await refresh();
-    } catch (err) {
-      handleApiError(err);
-    } finally {
-      setBusy(null);
-    }
-  };
-
   if (!checked || (user?.role === "administrator" && loading)) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-bg">
@@ -176,7 +151,7 @@ export default function AccountsDataAdminPage() {
         {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
         {notice && <div className="rounded-lg border border-success/40 bg-success/10 p-3 text-sm text-success">{notice}</div>}
 
-        <section className="grid gap-4 md:grid-cols-3">
+        <section className="grid gap-4 md:grid-cols-2">
           <div className="rounded-xl border border-border-light bg-surface p-4">
             <Database className="mb-2 h-5 w-5 text-accent" />
             <div className="tnum text-2xl font-bold">{items.length}</div>
@@ -186,16 +161,6 @@ export default function AccountsDataAdminPage() {
             <HardDrive className="mb-2 h-5 w-5 text-accent" />
             <div className="tnum text-2xl font-bold">{bytes(totalOwned)}</div>
             <div className="text-sm text-muted">账号私有文件与历史占用</div>
-          </div>
-          <div className="rounded-xl border border-warning/40 bg-warning/5 p-4">
-            <div className="mb-2 flex items-center justify-between">
-              <Trash2 className="h-5 w-5 text-warning" />
-              <InfoButton onClick={() => setHelpItem(HELP.paperCache)} label="清理论文缓存说明" />
-            </div>
-            <button onClick={() => setConfirmCache(true)} disabled={busy !== null}
-              className="text-lg font-bold text-warning transition-opacity hover:opacity-80 disabled:opacity-50">
-              清理拉取论文缓存
-            </button>
           </div>
         </section>
 
@@ -282,13 +247,6 @@ export default function AccountsDataAdminPage() {
             + "。此操作无法撤销。"}
           onConfirm={() => { const item = confirmDelete; setConfirmDelete(null); void deleteAccount(item); }}
           onClose={() => setConfirmDelete(null)} />
-      )}
-      {confirmCache && (
-        <ConfirmModal title="清理全部拉取论文缓存" danger confirmLabel="确认清理"
-          busy={busy === "paper-cache"}
-          body="将不可恢复地删除 data/pdfs 与 data/assets 中的论文 PDF 和图表资产；不删除账号历史，后续深读时会自动重新下载。"
-          onConfirm={() => { setConfirmCache(false); void cleanPaperCache(); }}
-          onClose={() => setConfirmCache(false)} />
       )}
       <HelpModal item={helpItem} onClose={() => setHelpItem(null)} />
     </main>

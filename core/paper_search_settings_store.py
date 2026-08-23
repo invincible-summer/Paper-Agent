@@ -1,9 +1,8 @@
-"""Runtime paper-platform capability and remote-fulltext policy in ``data/users.db``.
+"""Runtime paper-platform search and abstract policy in ``data/users.db``.
 
-The single policy row is the authoritative administrator configuration.  Each
-registered source has independent persistent ``search``, ``abstract`` and
-``fulltext`` capability state.  Diagnostics may close a capability, but a
-successful re-check never re-enables it; only an administrator can do that.
+The single policy row is authoritative.  Legacy full-text columns may remain
+in old SQLite schemas solely so the migration can read them; they are never
+loaded into runtime policy or public responses.
 """
 from __future__ import annotations
 
@@ -21,13 +20,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DB_PATH = _PROJECT_ROOT / "data" / "users.db"
 _CACHE_TTL_SECONDS = 5.0
 
-FETCH_MODES = ("enabled", "explicit_only", "probe_only", "disabled")
-DISCLOSURE_MODES = ("affected_only", "silent")
 ROUTING_MODES = ("smart", "all_enabled")
-PAPER_CAPABILITIES = ("search", "abstract", "fulltext")
-AUXILIARY_SOURCE_IDS = ("unpaywall", "doi")
+PAPER_CAPABILITIES = ("search", "abstract")
+AUXILIARY_SOURCE_IDS = ()
 CAPABILITY_SOURCE_IDS = SOURCE_IDS + AUXILIARY_SOURCE_IDS
-_AUXILIARY_DISPLAY_NAMES = {"unpaywall": "Unpaywall", "doi": "doi.org"}
 DIAGNOSTIC_STATUSES = ("ok", "slow", "failed", "not_applicable", "not_configured", "empty", None)
 
 
@@ -49,22 +45,18 @@ def _empty_capability(enabled: bool) -> dict:
 
 
 def _supports(source: str, capability: str) -> bool:
-    if source == "unpaywall":
-        return capability == "fulltext"
-    if source == "doi":
-        return False
     spec = SOURCE_SPECS[source]
     if capability == "search":
         return True
     if capability == "abstract":
         return bool(getattr(spec, "supports_abstract", True))
-    return bool(getattr(spec, "supports_fulltext", spec.supports_pdf_probe))
+    return False
 
 
 def _display_name(source: str) -> str:
     if source in SOURCE_SPECS:
         return SOURCE_SPECS[source].display_name
-    return _AUXILIARY_DISPLAY_NAMES.get(source, source)
+    return SOURCE_SPECS[source].display_name if source in SOURCE_SPECS else source
 
 
 def source_capability_supported(source: str, capability: str) -> bool:
@@ -137,11 +129,6 @@ class PaperSearchPolicy:
     capabilities: dict[str, dict[str, dict]] = field(default_factory=dict)
     search_deadline_seconds: int = 30
     per_source_timeout_seconds: int = 12
-    verify_fulltext: bool = True
-    fulltext_verify_timeout_seconds: int = 30
-    force_fulltext_probe: bool = True
-    paper_fetch_mode: str = "enabled"
-    fetch_policy_disclosure: str = "affected_only"
     routing_mode: str = "smart"
     version: int = 1
     updated_by: str = "bootstrap"
@@ -163,33 +150,59 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(_DB_PATH), timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS paper_search_policy (
-               id INTEGER PRIMARY KEY CHECK (id = 1),
-               sources_json TEXT NOT NULL,
-               capabilities_json TEXT NOT NULL DEFAULT '{}',
-               search_deadline_seconds INTEGER NOT NULL,
-               per_source_timeout_seconds INTEGER NOT NULL,
-               verify_fulltext INTEGER NOT NULL,
-               fulltext_verify_timeout_seconds INTEGER NOT NULL,
-               force_fulltext_probe INTEGER NOT NULL DEFAULT 1,
-               paper_fetch_mode TEXT NOT NULL,
-               fetch_policy_disclosure TEXT NOT NULL,
-               routing_mode TEXT NOT NULL DEFAULT 'smart',
-               version INTEGER NOT NULL,
-               updated_by TEXT NOT NULL,
-               updated_at REAL NOT NULL
-           )"""
+    current_columns = (
+        "id", "sources_json", "capabilities_json", "search_deadline_seconds",
+        "per_source_timeout_seconds", "routing_mode", "version", "updated_by",
+        "updated_at",
     )
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_search_policy)")}
-    if "routing_mode" not in columns:
-        conn.execute("ALTER TABLE paper_search_policy ADD COLUMN routing_mode TEXT NOT NULL DEFAULT 'smart'")
-    if "force_fulltext_probe" not in columns:
-        conn.execute("ALTER TABLE paper_search_policy ADD COLUMN force_fulltext_probe INTEGER NOT NULL DEFAULT 1")
-    if "capabilities_json" not in columns:
-        conn.execute("ALTER TABLE paper_search_policy ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '{}'")
+    create_sql = """CREATE TABLE paper_search_policy (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        sources_json TEXT NOT NULL,
+        capabilities_json TEXT NOT NULL DEFAULT '{}',
+        search_deadline_seconds INTEGER NOT NULL,
+        per_source_timeout_seconds INTEGER NOT NULL,
+        routing_mode TEXT NOT NULL DEFAULT 'smart',
+        version INTEGER NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at REAL NOT NULL
+    )"""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_search_policy'"
+    ).fetchone()
+    if not exists:
+        conn.execute(create_sql)
+    else:
+        info = list(conn.execute("PRAGMA table_info(paper_search_policy)"))
+        columns = [str(row[1]) for row in info]
+        if tuple(columns) != current_columns:
+            # Rebuild old policy tables instead of carrying retired PDF/fulltext
+            # knobs into new installations.  Only current search/abstract state
+            # and generic timing/version fields survive this idempotent migration.
+            row = conn.execute("SELECT * FROM paper_search_policy WHERE id=1").fetchone()
+            legacy = dict(zip(columns, row)) if row is not None else {}
+            conn.execute("DROP TABLE IF EXISTS paper_search_policy_retired_v1")
+            conn.execute(
+                "ALTER TABLE paper_search_policy RENAME TO paper_search_policy_retired_v1"
+            )
+            conn.execute(create_sql)
+            if legacy:
+                values = (
+                    1,
+                    legacy.get("sources_json") or "{}",
+                    legacy.get("capabilities_json") or "{}",
+                    int(legacy.get("search_deadline_seconds") or 30),
+                    int(legacy.get("per_source_timeout_seconds") or 12),
+                    legacy.get("routing_mode") or "smart",
+                    int(legacy.get("version") or 1),
+                    legacy.get("updated_by") or "migration",
+                    float(legacy.get("updated_at") or 0),
+                )
+                conn.execute(
+                    "INSERT INTO paper_search_policy VALUES(?,?,?,?,?,?,?,?,?)",
+                    values,
+                )
+            conn.execute("DROP TABLE paper_search_policy_retired_v1")
     conn.execute("UPDATE paper_search_policy SET search_deadline_seconds=30 WHERE search_deadline_seconds>30")
-    conn.execute("UPDATE paper_search_policy SET fulltext_verify_timeout_seconds=30 WHERE fulltext_verify_timeout_seconds>30")
 
     row = conn.execute("SELECT sources_json, capabilities_json FROM paper_search_policy WHERE id=1").fetchone()
     if row:
@@ -238,9 +251,6 @@ def _seed() -> PaperSearchPolicy:
             sources=sources, capabilities=capability_defaults(sources),
             search_deadline_seconds=int(getattr(search, "search_deadline_seconds", 30)),
             per_source_timeout_seconds=int(getattr(search, "per_source_timeout_seconds", 12)),
-            verify_fulltext=bool(getattr(search, "verify_fulltext", True)),
-            fulltext_verify_timeout_seconds=int(getattr(search, "fulltext_verify_timeout_seconds", 30)),
-            force_fulltext_probe=bool(getattr(search, "force_fulltext_probe", True)),
         )
     except Exception:
         sources = source_defaults()
@@ -285,12 +295,8 @@ def _row_to_policy(row) -> PaperSearchPolicy:
     return PaperSearchPolicy(
         sources=sources, capabilities=capabilities,
         search_deadline_seconds=int(row[2]), per_source_timeout_seconds=int(row[3]),
-        verify_fulltext=bool(row[4]), fulltext_verify_timeout_seconds=int(row[5]),
-        paper_fetch_mode=str(row[6]) if row[6] in FETCH_MODES else "enabled",
-        fetch_policy_disclosure=str(row[7]) if row[7] in DISCLOSURE_MODES else "affected_only",
-        routing_mode=str(row[8]) if row[8] in ROUTING_MODES else "smart",
-        version=int(row[9]), updated_by=str(row[10] or "bootstrap"), updated_at=float(row[11] or 0),
-        force_fulltext_probe=bool(row[12]),
+        routing_mode=str(row[4]) if row[4] in ROUTING_MODES else "smart",
+        version=int(row[5]), updated_by=str(row[6] or "bootstrap"), updated_at=float(row[7] or 0),
     )
 
 
@@ -303,8 +309,7 @@ def get_paper_search_policy() -> PaperSearchPolicy:
     try:
         row = conn.execute(
             "SELECT sources_json, capabilities_json, search_deadline_seconds, per_source_timeout_seconds, "
-            "verify_fulltext, fulltext_verify_timeout_seconds, paper_fetch_mode, fetch_policy_disclosure, "
-            "routing_mode, version, updated_by, updated_at, force_fulltext_probe FROM paper_search_policy WHERE id=1"
+            "routing_mode, version, updated_by, updated_at FROM paper_search_policy WHERE id=1"
         ).fetchone()
         if row is None:
             seed = _seed()
@@ -312,25 +317,37 @@ def get_paper_search_policy() -> PaperSearchPolicy:
             conn.execute(
                 """INSERT INTO paper_search_policy
                 (id,sources_json,capabilities_json,search_deadline_seconds,per_source_timeout_seconds,
-                 verify_fulltext,fulltext_verify_timeout_seconds,paper_fetch_mode,fetch_policy_disclosure,
-                 routing_mode,force_fulltext_probe,version,updated_by,updated_at)
-                VALUES(1,?,?,?,?,?,?,?,?,?,?,1,'bootstrap',?)""",
+                 routing_mode,version,updated_by,updated_at)
+                VALUES(1,?,?,?,?,?,1,'bootstrap',?)""",
                 (json.dumps(seed.sources, sort_keys=True), json.dumps(capabilities, ensure_ascii=False, sort_keys=True),
-                 seed.search_deadline_seconds, seed.per_source_timeout_seconds, int(seed.verify_fulltext),
-                 seed.fulltext_verify_timeout_seconds, seed.paper_fetch_mode, seed.fetch_policy_disclosure,
-                 seed.routing_mode, int(seed.force_fulltext_probe), time.time()),
+                 seed.search_deadline_seconds, seed.per_source_timeout_seconds,
+                 seed.routing_mode, time.time()),
             )
             conn.commit()
             row = conn.execute(
                 "SELECT sources_json, capabilities_json, search_deadline_seconds, per_source_timeout_seconds, "
-                "verify_fulltext, fulltext_verify_timeout_seconds, paper_fetch_mode, fetch_policy_disclosure, "
-                "routing_mode, version, updated_by, updated_at, force_fulltext_probe FROM paper_search_policy WHERE id=1"
+                "routing_mode, version, updated_by, updated_at FROM paper_search_policy WHERE id=1"
             ).fetchone()
         policy = _row_to_policy(row)
     finally:
         conn.close()
     _cache = (str(_DB_PATH), now, policy)
     return policy
+
+
+def policy_dict(policy: PaperSearchPolicy | None = None) -> dict:
+    """Public/admin representation: search and abstract controls only."""
+    current = policy or get_paper_search_policy()
+    return {
+        "sources": dict(current.sources),
+        "capabilities": _normalize_capabilities(current.capabilities, current.sources),
+        "search_deadline_seconds": current.search_deadline_seconds,
+        "per_source_timeout_seconds": current.per_source_timeout_seconds,
+        "routing_mode": current.routing_mode,
+        "version": current.version,
+        "updated_by": current.updated_by,
+        "updated_at": current.updated_at,
+    }
 
 
 def _validate_policy(candidate: PaperSearchPolicy) -> None:
@@ -340,17 +357,13 @@ def _validate_policy(candidate: PaperSearchPolicy) -> None:
         raise PaperSearchSettingsError("单渠道时限必须为 3–30 秒")
     if candidate.per_source_timeout_seconds > candidate.search_deadline_seconds:
         raise PaperSearchSettingsError("单渠道时限不能大于检索总时限")
-    if not 0 <= candidate.fulltext_verify_timeout_seconds <= 30:
-        raise PaperSearchSettingsError("全文验证时限必须为 0–30 秒")
-    if candidate.paper_fetch_mode not in FETCH_MODES or candidate.fetch_policy_disclosure not in DISCLOSURE_MODES or candidate.routing_mode not in ROUTING_MODES:
-        raise PaperSearchSettingsError("论文检索策略枚举值无效")
+    if candidate.routing_mode not in ROUTING_MODES:
+        raise PaperSearchSettingsError("论文检索路由策略枚举值无效")
 
 
 def update_paper_search_policy(changes: dict, *, expected_version: int, updated_by: str) -> PaperSearchPolicy:
     current = get_paper_search_policy()
-    allowed = {"sources", "search_deadline_seconds", "per_source_timeout_seconds", "verify_fulltext",
-               "fulltext_verify_timeout_seconds", "force_fulltext_probe", "paper_fetch_mode",
-               "fetch_policy_disclosure", "routing_mode"}
+    allowed = {"sources", "search_deadline_seconds", "per_source_timeout_seconds", "routing_mode"}
     unknown = set(changes) - allowed
     if unknown:
         raise PaperSearchSettingsError(f"未知设置字段：{', '.join(sorted(unknown))}")
@@ -386,14 +399,12 @@ def _write_policy(candidate: PaperSearchPolicy, expected_version: int, conn: sql
     try:
         cursor = conn.execute(
             """UPDATE paper_search_policy SET sources_json=?, capabilities_json=?,
-            search_deadline_seconds=?, per_source_timeout_seconds=?, verify_fulltext=?,
-            fulltext_verify_timeout_seconds=?, force_fulltext_probe=?, paper_fetch_mode=?,
-            fetch_policy_disclosure=?, routing_mode=?, version=version+1, updated_by=?, updated_at=?
+            search_deadline_seconds=?, per_source_timeout_seconds=?, routing_mode=?,
+            version=version+1, updated_by=?, updated_at=?
             WHERE id=1 AND version=?""",
             (json.dumps(candidate.sources, sort_keys=True), json.dumps(candidate.capabilities, ensure_ascii=False, sort_keys=True),
-             candidate.search_deadline_seconds, candidate.per_source_timeout_seconds, int(candidate.verify_fulltext),
-             candidate.fulltext_verify_timeout_seconds, int(candidate.force_fulltext_probe), candidate.paper_fetch_mode,
-             candidate.fetch_policy_disclosure, candidate.routing_mode, candidate.updated_by, candidate.updated_at,
+             candidate.search_deadline_seconds, candidate.per_source_timeout_seconds,
+             candidate.routing_mode, candidate.updated_by, candidate.updated_at,
              int(expected_version)),
         )
         if cursor.rowcount != 1:
@@ -445,7 +456,7 @@ def set_source_capability(source: str, capability: str, enabled: bool, *, expect
     row["enabled"] = enabled
     row["disabled_by"] = None if enabled else "administrator"
     row["reason_code"] = None if enabled else "administrator_disabled"
-    labels = {"search": "论文搜索", "abstract": "摘要获取", "fulltext": "全文获取"}
+    labels = {"search": "论文搜索", "abstract": "摘要获取"}
     row["reason"] = (
         None if enabled
         else f"管理员已关闭 {_display_name(source)} 的{labels[capability]}能力。"
@@ -463,8 +474,7 @@ _DIAGNOSTIC_ITEM_FIELDS = {
     "source", "target", "capability", "status", "latency_ms", "elapsed_ms",
     "http_status", "request_count", "redirect_count", "redirects",
     "final_domain", "domain", "result_count", "valid_abstract_count",
-    "abstract_length", "sample_id", "bytes_read", "kb_per_second",
-    "pdf_magic_valid", "exit_code", "error_code", "message",
+    "abstract_length", "sample_id", "error_code", "message",
     "auto_disable", "connectivity_failed",
 }
 
@@ -485,7 +495,7 @@ def _sanitize_diagnostic_item(item: dict) -> dict:
 
 def _sanitize_platform(platform: dict) -> dict:
     safe = {"source": _diagnostic_scalar(platform.get("source"), limit=80)}
-    for key in ("connectivity", "search", "abstract", "fulltext"):
+    for key in ("connectivity", "search", "abstract"):
         value = platform.get(key)
         safe[key] = _sanitize_diagnostic_item(value) if isinstance(value, dict) else {}
     auto = platform.get("auto_disabled_capabilities")
@@ -562,8 +572,7 @@ def apply_diagnostic_results(
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT sources_json, capabilities_json, search_deadline_seconds, per_source_timeout_seconds, "
-            "verify_fulltext, fulltext_verify_timeout_seconds, paper_fetch_mode, fetch_policy_disclosure, "
-            "routing_mode, version, updated_by, updated_at, force_fulltext_probe FROM paper_search_policy WHERE id=1"
+            "routing_mode, version, updated_by, updated_at FROM paper_search_policy WHERE id=1"
         ).fetchone()
         if row is None:
             conn.rollback()
@@ -585,8 +594,6 @@ def apply_diagnostic_results(
             cap["last_checked_at"] = finished_at
             cap["last_diagnostic_status"] = item.get("status")
             cap["last_latency_ms"] = item.get("latency_ms", item.get("elapsed_ms"))
-            if capability == "fulltext":
-                cap["last_kb_per_second"] = item.get("kb_per_second")
             if item.get("auto_disable"):
                 newly_disabled = bool(cap["enabled"])
                 if cap.get("disabled_by") != "administrator":
@@ -708,25 +715,11 @@ def source_enabled(source: str | None, policy: PaperSearchPolicy | None = None) 
     return source_capability_enabled(source, "search", policy)[0]
 
 
-def remote_probe_allowed(policy: PaperSearchPolicy | None = None) -> bool:
-    return (policy or get_paper_search_policy()).paper_fetch_mode != "disabled"
-
-
-def remote_download_allowed(origin: str = "automatic", policy: PaperSearchPolicy | None = None) -> bool:
-    mode = (policy or get_paper_search_policy()).paper_fetch_mode
-    return mode == "enabled" or (mode == "explicit_only" and origin == "explicit")
-
-
-def disclose_fetch_policy(policy: PaperSearchPolicy | None = None) -> bool:
-    return (policy or get_paper_search_policy()).fetch_policy_disclosure == "affected_only"
-
 
 def paper_capability_source(paper, capability: str) -> str:
     """Return the evidence-producing source after cross-source dedup."""
     if capability == "abstract":
         return getattr(paper, "abstract_source", "") or getattr(paper, "source", "")
-    if capability == "fulltext" and getattr(paper, "pdf_url", None):
-        return getattr(paper, "pdf_source", "") or getattr(paper, "source", "")
     return getattr(paper, "source", "")
 
 
@@ -751,7 +744,7 @@ def paper_abstract_text(paper, policy: PaperSearchPolicy | None = None) -> str:
 
 def capability_skip_result(source: str, capability: str, reason: str | None = None) -> dict:
     display = _display_name(source)
-    labels = {"search": "论文搜索", "abstract": "摘要获取", "fulltext": "全文获取"}
+    labels = {"search": "论文搜索", "abstract": "摘要获取"}
     return {"source": source, "capability": capability, "status": "skipped",
             "reason_code": "source_capability_disabled",
-            "reason": reason or f"{display} 的{labels.get(capability, capability)}能力已关闭，已跳过远程访问。"}
+            "reason": reason or f"{display} 的{labels.get(capability, capability)}能力已关闭。"}

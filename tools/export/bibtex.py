@@ -149,10 +149,10 @@ def papers_to_bibtex(papers: list[Paper], extras: dict[str, dict] | None = None)
 
 
 def _paper_url(paper: Paper) -> str | None:
-    """Best available URL for the paper (doi.org > source urls > pdf_url)."""
+    """Best available landing-page URL (never a remote PDF fallback)."""
     if paper.doi:
         return f"https://doi.org/{paper.doi}"
     for url in (paper.urls or {}).values():
         if url:
             return url
-    return paper.pdf_url
+    return None

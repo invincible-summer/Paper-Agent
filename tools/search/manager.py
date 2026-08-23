@@ -77,8 +77,6 @@ class SearchManager:
             for paper in outcome.papers:
                 if paper.abstract and not paper.abstract_source:
                     paper.abstract_source = source
-                if paper.pdf_url and not paper.pdf_source:
-                    paper.pdf_source = source
                 if not abstract_allowed:
                     paper.abstract = ""
                     paper.abstract_source = source
@@ -216,9 +214,6 @@ def _merge(existing: Paper, new: Paper) -> None:
         existing.abstract_policy_reason = new.abstract_policy_reason
     if new.citation_count > existing.citation_count:
         existing.citation_count = new.citation_count
-    if new.pdf_url and not existing.pdf_url:
-        existing.pdf_url = new.pdf_url
-        existing.pdf_source = new.pdf_source or new.source
     if new.doi and not existing.doi:
         existing.doi = new.doi
     if new.keywords:

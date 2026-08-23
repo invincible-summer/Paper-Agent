@@ -34,7 +34,7 @@ Modules 0–8 completed on August 14, 2026. Requirement-by-requirement completio
 - API root: `data/openai_api/`.
 - Default session/upload TTL: 7 days.
 - Default export TTL: 24 hours.
-- Public PDF TTL is 3 days: scheduled cleanup deletes expired copies, and the next deep_read automatically re-downloads and re-extracts the paper.
+- Legacy network public-PDF retention and automatic re-download are retired. Explicitly supplied user files are stored privately, parsed on demand, and never treated as network-paper evidence.
 - Default semantic/vision cache TTL: 90 days.
 - Default API trace mode: off.
 - Disk thresholds: 75/85/95/98 percent.
@@ -50,7 +50,7 @@ The API storage implementation does not alter or clean:
 
 - `/api/v1/*` behavior;
 - `history_record/chat_*.json`;
-- web uploads, PDFs, assets, exports or Chroma data;
+- web uploads, legacy network PDFs, assets, exports or Chroma data;
 - browser accounts, browser tokens, administrator identity or Agent API Key lifecycle.
 
 The API cleanup root is containment-checked and restricted to `data/openai_api/`. Emergency eviction, legacy scan and administrator cleanup cannot cross into web storage.
@@ -59,7 +59,7 @@ The API cleanup root is containment-checked and restricted to `data/openai_api/`
 
 - `core/storage_context.py` and `core/api_storage_store.py` provide channel-aware paths and an API-only SQLite database using WAL, foreign keys, schema migrations, restrictive permissions and parameterized SQL.
 - `core/api_checkpoint.py` stores a bounded zlib JSON structural checkpoint instead of complete message transcripts. It restores topic, paper set, read summaries, maps and RAG state, uses HMAC message-chain aliases, rejects ambiguous aliases and quarantines corrupt checkpoints.
-- `core/api_artifact_store.py` provides private session-HMAC uploads, public PDF SHA-256 deduplication, content-addressed blobs, unique public aliases, streaming URL ingest with redirect-by-redirect SSRF checks and API-only metadata/Chroma/vision caches.
+- `core/api_artifact_store.py` provides private session-HMAC uploads, content-addressed blobs, unique public export aliases, streaming user-file URL ingest with redirect-by-redirect SSRF checks and API-only metadata/Chroma/vision caches; legacy public network-PDF deduplication is not a runtime feature.
 - `core/api_storage_cleanup.py`, `core/storage_pressure.py` and `scripts/cleanup_openai_api_storage.py` implement expiry, reconcile, one-time preview tokens, in-flight/protected-file guards, pressure admission and safe cleanup.
 - API Trace supports `off`, `metadata` and redacted `full`; web Trace retains its prior path and behavior. API Trace retention is capped at 7 days.
 - Administrator APIs and `/admin/api-storage` expose policy, usage, status, cleanup history, preview/execute and legacy scan with browser-admin authorization, optimistic version conflicts, help modals and dangerous-action confirmation.
@@ -103,7 +103,7 @@ The answer correctly explained “文献综述”.
 Retrieval-Augmented Generation for Large Language Models: A Survey
 ```
 
-- `ChatSession.context_summary()` now carries the stable paper-id catalogue for both core and candidate papers across all channels, so the model can directly call deep_read/ask_papers on a named paper instead of re-running search_papers; entries also carry the verified fulltext status (全文✓/仅摘要/待验证). API channel additionally lists up to five deeply-read titles.
+- `ChatSession.context_summary()` carries the stable paper-id catalogue for both core and candidate papers across all channels, so the model can directly call `ask_papers` on a named paper instead of re-running `search_papers`; network entries are abstract-only and full-text analysis starts from uploaded attachments. API channel additionally lists uploaded files that have been parsed.
 
 ### Real self-hosted frontend and multimodal acceptance
 

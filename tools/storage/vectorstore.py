@@ -2,7 +2,7 @@
 
 Two cosine collections over a local PersistentClient:
   - summaries: one doc per (session, paper) — title + abstract (+ findings)
-  - fulltext_chunks: per-section chunks of full-text papers / uploaded files
+  - fulltext_chunks: per-section chunks of user-uploaded documents only
 
 Every record carries a `session_id` metadata field and every read is filtered
 by it: one conversation can never retrieve another conversation's papers.
@@ -73,9 +73,21 @@ def build_fulltext_chunks(parsed_sections=None, full_text: str | None = None) ->
 
 
 def _summary_document(summary, paper) -> str:
-    """Level-1 document text: title + abstract (+ key findings when read)."""
-    parts = [paper.title or "", paper_abstract_text(paper)]
-    if summary is not None:
+    """Build a level-1 document without crossing the evidence boundary.
+
+    Network papers are indexed only from their *currently enabled, non-empty*
+    abstract.  A restored ``PaperSummary`` may have been derived from the old
+    remote-PDF path, so none of its fields are eligible for network indexing.
+    Uploaded papers may still add their private full-document summary fields.
+    """
+    is_upload = getattr(paper, "source", "") == "upload" or str(
+        getattr(paper, "id", "") or ""
+    ).startswith("upload:")
+    abstract = paper_abstract_text(paper).strip()
+    if not is_upload and not abstract:
+        return ""
+    parts = [paper.title or "", abstract]
+    if is_upload and summary is not None:
         findings = getattr(summary, "key_findings", None) or []
         if isinstance(findings, list) and findings:
             parts.append(" ".join(str(f) for f in findings[:5]))
@@ -254,7 +266,7 @@ class VectorStore:
 
     def upsert_fulltext_chunks(self, paper, session_id: str = "",
                                parsed_sections=None, full_text: str | None = None) -> int:
-        """Index per-section chunks of a full-text paper. Returns n chunks.
+        """Index per-section chunks of a user-uploaded document. Returns n chunks.
 
         Idempotent: clears prior chunks for the (session, paper) first.
         """
@@ -365,7 +377,7 @@ class VectorStore:
 
     def search_chunks(self, query: str, session_id: str | None = None,
                       paper_id: str | None = None, top_k: int = 5) -> list[SearchHit]:
-        """Level-2 retrieval: full-text chunks in this session (+ optional paper)."""
+        """Level-2 retrieval: uploaded-document chunks in this session."""
         if not self._ensure():
             return []
         qv = embed_texts([query])

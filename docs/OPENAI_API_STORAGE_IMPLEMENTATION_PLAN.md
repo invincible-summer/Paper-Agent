@@ -119,7 +119,7 @@ class StorageContext:
 - `api_cleanup_previews`：10 分钟一次性确认 token。
 - `api_runtime_state`：重任务暂停、原因、磁盘占用和最后清理。
 
-默认：session/upload 7d、export 24h、public PDF 3d（过期即清理，后续 deep_read 自动重下重提取）、cache 90d、trace off、clean 60min、75/85/95/98、continuous_evict、pause_heavy。
+默认：session/upload 7d、export 24h、legacy network-PDF retention retired（不再自动重下；用户明确提供的上传文件按私有上传生命周期处理）、cache 90d、trace off、clean 60min、75/85/95/98、continuous_evict、pause_heavy。
 
 测试：建库/迁移/WAL/外键/策略版本、web/API 路径隔离、路径逃逸与 symlink 拒绝、API 策略不能读取 web 历史。
 
@@ -139,7 +139,7 @@ HMAC secret 首次随机生成、保存 state.db、权限 600、无环境变量�
 
 正常结束前，根据“本轮输入 messages + 最终 assistant content”建立下一轮 alias；reasoning 不参与；异常断流不建立最终 alias。一个 alias 指向不同 session 时标记 ambiguous，未来一律新建，避免串会话。
 
-Checkpoint 保存：topic/conception/language/field_profile、papers/candidates/summaries、map/path/review、sub-directions/search queries、附件引用、loaded skills、full_read_count、RAG session。明确排除完整 messages、reasoning、思维链、Key、文件 bytes、完整 PDF 正文、完整 Trace。
+Checkpoint 保存：topic/conception/language/field_profile、papers/candidates/summaries、map/path/review、sub-directions/search queries、附件引用、loaded skills、RAG session。明确排除完整 messages、reasoning、思维链、Key、文件 bytes、完整 PDF 正文、完整 Trace 和任何网络全文状态。
 
 格式：版本化 JSON + zlib，无 pickle，未压缩上限 8 MiB；单个大字段超过 256 KiB 时外置为 private/generated `state_payload` artifact。
 
@@ -149,33 +149,33 @@ orchestrator 增加可选 `checkpoint_cb`，成功工具批次、Skill 状态变
 
 ## 6. 模块 3：API 文件库、PDF、多模态和向量隔离
 
-类别：upload、upload_sidecar、public_pdf、element_asset、export、state_payload、temporary。
+类别：upload、upload_sidecar、legacy_public_pdf（仅迁移兼容，不得新增运行时路径）、element_asset、export、state_payload、temporary。
 
-- 公开 PDF 用 SHA-256，在 API 会话间复用。
+- 网络论文公开 PDF 不再创建或复用；仅保留历史数据清理迁移。
 - 私有上传用 `HMAC(secret, session_id + SHA256(bytes))`，不跨私有 session 自动共享。
 - 导出产物使用唯一公开 alias，展示名与物理名分离，默认 24h。
 - URL 文件流式写 tmp，边下载边 hash，继续 SSRF/公网 IP/重定向/MIME/50 MiB 限制；不把 50 MiB 全放内存；成功 atomic rename，失败清 tmp；摄取阶段零 VLM。
-- 上传、PDF fetcher、Docling assets、OCR/VLM、metadata、Chroma、报告/文稿导出、`/files` 和 element asset 全部按 StorageContext；无 context 时继续 web 旧路径。
+- 上传、用户文件解析器、Docling assets、OCR/VLM、metadata、Chroma、报告/文稿导出、`/files` 和 element asset 全部按 StorageContext；无 context 时继续 web 旧路径。
 - API 使用独立 metadata.db/chroma；清 API session 不影响 web；私有元素只在所属 session 检索。
 - `/files/{filename}` 保持协议：先解析 API public alias，未命中再查 web export；basename/MIME/Unicode 保持；不暴露物理 hash 路径；API 过期 404，清理不删 web。
 
-测试：公共去重、私有隔离、流式下载和中断、API/web Chroma/metadata/文件隔离、PDF/DOCX/PNG/VLM 降级、Unicode DOCX PK、MD/TXT/TEX/SVG、web 旧文件回归。
+测试：网络论文全文/PDF 路径不存在；显式用户文件上传隔离、私有隔离、用户附件流式下载和中断、API/web Chroma/metadata/文件隔离、PDF/DOCX/PNG/VLM 降级、Unicode DOCX PK、MD/TXT/TEX/SVG、web 旧文件回归。
 
 ## 7. 模块 4：生命周期和磁盘自治
 
 新增 `scripts/cleanup_openai_api_storage.py`，支持 `--scheduled`、`--preview`、`--execute-token`、`--reconcile`。
 
-正常顺序：过期 preview、tmp、exports、API traces、aliases、checkpoints、API Chroma session、引用、零引用 private、public PDF、assets、孤立对账。删除幂等；数据库/文件中断可 reconcile。
+正常顺序：过期 preview、tmp、exports、API traces、aliases、checkpoints、API Chroma session、引用、零引用 private、legacy public-PDF、assets、孤立对账。删除幂等；数据库/文件中断可 reconcile。
 
 保护：in-flight session、下载/OCR/VLM/export 中 artifact、protected_until、最近 1h 未完成登记文件。
 
 阈值：
 
 - 75%：告警、删过期。
-- 85%：continuous eviction：过期、tmp、最旧可重建公共 PDF/资产/向量/视觉缓存；不提前删未过期私有上传。
+- 85%：continuous eviction：过期、tmp、旧版遗留公共缓存/资产/向量/视觉缓存；不提前删未过期私有上传，也不创建新的网络论文 PDF。
 - 95% 管理员可选：
   - 默认 pause_heavy：暂停上传、下载、deep_read、OCR、VLM 文件理解和导出；普通文字问答继续。
-  - emergency_evict：先删未过期公共缓存和生成物，再删无 in-flight、24h 未访问的非活跃私有上传；标记 evicted，后续公共文件重下、私有文件要求重传。
+  - emergency_evict：先删未过期公共缓存和生成物，再删无 in-flight、24h 未访问的非活跃私有上传；标记 evicted。旧网络文件不得重下，私有上传丢失时要求用户重传。
 - 98%：不可关闭的最终保护，强制暂停文件写入型重任务，文本问答继续，空间恢复自动解除。
 
 统一 `StoragePressureGuard.ensure_allowed(operation, context)`，新增 `ErrorCode.STORAGE_PRESSURE`。操作：upload/download/deep_read/ocr/vision/export/text_chat。
@@ -254,7 +254,7 @@ POST    /api/v1/admin/api-storage/legacy-scan
 - 单台云服务器本地 ESSD；不依赖个人电脑、OSS、Redis、PostgreSQL 或外部向量库。
 - 只改 `/v1`；web 持久化不变。
 - API 独立 `data/openai_api`。
-- Checkpoint/upload 7d、export 24h、public PDF 3d（过期即清理，deep_read 自动重下提取）、cache 90d。
+- Checkpoint/upload 7d、export 24h、legacy network-PDF retention retired（不再清理后重下，deep_read 只解析当前会话上传文件）、cache 90d。
 - 不重复保存完整 messages，不保存 reasoning/思维链。
 - Trace 默认 off。
 - 85% continuous eviction。

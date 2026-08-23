@@ -10,7 +10,7 @@ import pytest
 
 from core.api_artifact_store import ApiArtifactStore
 from core.api_storage_cleanup import ApiStorageCleanup
-from core.api_storage_store import SCHEMA_VERSION, ApiStorageStore
+from core.api_storage_store import ApiStorageStore
 from core.storage_context import StorageContext
 from core.storage_pressure import StoragePressureError, StoragePressureGuard
 
@@ -128,94 +128,14 @@ def test_protected_and_inflight_artifacts_survive_cleanup(tmp_path: Path):
     assert inflight.path.exists()
 
 
-def test_85_evicts_rebuildable_but_not_unexpired_private_upload(tmp_path: Path):
+def test_85_evicts_exports_but_not_unexpired_private_upload(tmp_path: Path):
     store = _storage(tmp_path)
     private = _artifact(store, "private")
-    public = _artifact(store, "public-owner", category="public_pdf")
     export = _artifact(store, "export-owner", category="export")
     result = ApiStorageCleanup(store, disk_percent=lambda: 86).run()
     assert private.path.exists()
-    assert not public.path.exists()
     assert not export.path.exists()
-    assert result.deleted_artifacts >= 2
-
-
-def test_public_pdf_has_3_day_expiry_and_scheduled_cleanup_deletes_it(tmp_path: Path):
-    store = _storage(tmp_path)
-    public = _artifact(store, "public-owner", category="public_pdf")
-    with store.connect() as conn:
-        row = conn.execute(
-            "SELECT expires_at FROM api_artifacts WHERE id=?", (public.id,)
-        ).fetchone()
-    assert row is not None and row[0] is not None
-    with store.connect() as conn:
-        created_at = conn.execute(
-            "SELECT created_at FROM api_artifacts WHERE id=?", (public.id,)
-        ).fetchone()[0]
-    assert 0 < row[0] - created_at <= 3 * 24 * 3600 + 5
-
-    # Expire the row manually (what scheduled cleanup does after 3 days) and
-    # verify the file is removed; a later deep_read re-downloads + re-saves it.
-    with store.connect() as conn:
-        conn.execute("UPDATE api_artifacts SET expires_at=0 WHERE id=?", (public.id,))
-        conn.commit()
-    ApiStorageCleanup(store, disk_percent=lambda: 50).run()
-    assert not public.path.exists()
-    assert ApiArtifactStore(store).find_active(
-        category="public_pdf", scope="public", logical_name="public-owner.pdf") is None
-
-
-def test_expired_public_pdf_is_re_saved_with_fresh_expiry(tmp_path: Path):
-    """After cleanup deletes an expired public PDF, the next deep_read download
-    automatically re-registers it (the same SHA-256 blob) with a fresh TTL."""
-    store = _storage(tmp_path)
-    public = _artifact(store, "public-owner", category="public_pdf")
-    with store.connect() as conn:
-        conn.execute("UPDATE api_artifacts SET expires_at=0 WHERE id=?", (public.id,))
-        conn.commit()
-    assert ApiArtifactStore(store).find_active(
-        category="public_pdf", scope="public", logical_name="public-owner.pdf") is None
-
-    source = public.path
-    re_saved = ApiArtifactStore(store).save_public_pdf(
-        source, logical_name="public-owner.pdf")
-    assert re_saved.id == public.id
-    assert re_saved.path.exists()
-    with store.connect() as conn:
-        row = conn.execute(
-            "SELECT expires_at FROM api_artifacts WHERE id=?", (public.id,)
-        ).fetchone()
-    assert row is not None and row[0] is not None and row[0] > time.time()
-    assert ApiArtifactStore(store).find_active(
-        category="public_pdf", scope="public", logical_name="public-owner.pdf") is not None
-
-
-def test_v4_migration_shortens_existing_public_pdf_ttl_to_3_days(tmp_path: Path):
-    context = StorageContext.openai_api(root_dir=tmp_path / "openai-api")
-    store = ApiStorageStore(context)
-    store.initialize()
-    public = _artifact(store, "old-public", category="public_pdf")
-    with store.connect() as conn:
-        conn.execute("UPDATE api_artifacts SET expires_at=? WHERE id=?", (time.time() + 100000, public.id))
-        conn.execute("UPDATE api_storage_policy SET public_pdf_ttl_seconds=2592000 WHERE id=1")
-        conn.execute("UPDATE api_schema_meta SET schema_version=3 WHERE id=1")
-        conn.commit()
-
-    migrated = ApiStorageStore(context)
-    migrated.initialize()
-    assert migrated.schema_version() == SCHEMA_VERSION
-    assert migrated.get_policy().public_pdf_ttl_seconds == 3 * 24 * 3600
-    with migrated.connect() as conn:
-        row = conn.execute(
-            "SELECT expires_at FROM api_artifacts WHERE id=?", (public.id,)
-        ).fetchone()
-    # Existing rows are clamped to created_at + 3 days (not cleared).
-    with migrated.connect() as conn:
-        created_at = conn.execute(
-            "SELECT created_at FROM api_artifacts WHERE id=?", (public.id,)
-        ).fetchone()[0]
-    assert row is not None and row[0] is not None
-    assert row[0] <= created_at + 3 * 24 * 3600
+    assert result.deleted_artifacts >= 1
 
 
 def test_95_pause_policy_preserves_private_but_emergency_evicts_inactive(tmp_path: Path):

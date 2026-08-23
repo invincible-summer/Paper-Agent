@@ -2,8 +2,8 @@
 
 The request, OAuth2 client-credentials flow, anonymous allowance and response
 shape are kept aligned with OpenAIRE's official Graph API documentation.  The
-Graph response is metadata-only here: an ``instances`` URL is not treated as a
-verified PDF unless the API explicitly publishes a PDF field in the future.
+Graph response is metadata/abstract-only here: repository instance URLs are
+not parsed as document candidates and never enter a download path.
 """
 from __future__ import annotations
 
@@ -114,7 +114,6 @@ def parse_results(data: dict) -> list[Paper]:
             doi=doi,
             source="openaire",
             abstract=_first(item.get("description") or item.get("descriptions")),
-            pdf_url=None,
             urls={
                 "openaire": (
                     "https://explore.openaire.eu/search/publication?pid="

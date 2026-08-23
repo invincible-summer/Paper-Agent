@@ -15,9 +15,7 @@ from tools.search import diagnostics
 
 
 def test_official_contract_registry_covers_every_matrix_target():
-    assert set(diagnostics.OFFICIAL_PROVIDER_CONTRACTS) == (
-        set(diagnostics.SOURCE_IDS) | {"unpaywall", "doi"}
-    )
+    assert set(diagnostics.OFFICIAL_PROVIDER_CONTRACTS) == set(diagnostics.SOURCE_IDS)
     required = {
         "docs", "endpoint", "method", "parameters", "response_list",
         "authentication", "rate_policy",
@@ -43,9 +41,8 @@ def test_official_contracts_pin_documented_auth_parameters_and_rate_rules():
     assert contracts["openaire"]["authentication"] == "anonymous_or_oauth2_client_credentials"
     assert contracts["openaire"]["rate_policy"] == "anonymous_60_per_hour_authenticated_7200_per_hour"
     assert contracts["core"]["authentication"] == "bearer_header"
-    assert contracts["unpaywall"]["authentication"] == "contact_email_query"
-    assert contracts["biorxiv"]["custom_pdf_fallback"] is True
-    assert contracts["medrxiv"]["custom_pdf_fallback"] is True
+    assert "custom_pdf_fallback" not in contracts["biorxiv"]
+    assert "custom_pdf_fallback" not in contracts["medrxiv"]
 
 
 def test_fixed_queries_use_documented_provider_syntax_for_oa_samples():
@@ -160,8 +157,9 @@ def test_rxiv_documented_details_schema_is_parsed_not_just_http_200(monkeypatch)
     outcome = asyncio.run(diagnostics._rxiv_official_search("biorxiv"))
     assert outcome.status == "ok"
     assert outcome.papers[0].abstract == "non-empty abstract"
-    assert outcome.papers[0].pdf_url == (
-        "https://www.biorxiv.org/content/10.1101/396846v1.full.pdf"
+    assert outcome.papers[0].pdf_url is None
+    assert outcome.papers[0].urls["biorxiv"] == (
+        "https://www.biorxiv.org/content/10.1101/396846v1"
     )
 
 

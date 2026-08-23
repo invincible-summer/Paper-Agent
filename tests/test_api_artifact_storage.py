@@ -34,14 +34,22 @@ def _ensure_session(store: ApiArtifactStore, session_id: str) -> None:
         )
         conn.commit()
 
-def test_public_pdf_deduplicates_but_private_uploads_do_not_cross_sessions(tmp_path: Path):
+def test_public_pdf_artifacts_are_retired_and_private_uploads_do_not_cross_sessions(tmp_path: Path):
     store = _artifact_store(tmp_path)
     source = tmp_path / "paper.pdf"
     source.write_bytes(b"%PDF-1.4\nsame")
-    public_a = store.save_public_pdf(source, logical_name="paper-a.pdf")
-    public_b = store.save_public_pdf(source, logical_name="paper-b.pdf")
-    assert public_a.id == public_b.id
-    assert public_a.path == public_b.path
+    with pytest.raises(RuntimeError, match="retired"):
+        store.save_public_pdf(source, logical_name="paper-a.pdf")
+    with pytest.raises(RuntimeError, match="retired"):
+        store.save_file(
+            source, category="public_pdf", scope="public", logical_name="paper-a.pdf",
+            mime_type="application/pdf", ttl_seconds=60,
+        )
+    with pytest.raises(RuntimeError, match="retired"):
+        store.save_file(
+            source, category="element_asset", scope="public", logical_name="figure.png",
+            mime_type="image/png", ttl_seconds=60,
+        )
 
     _ensure_session(store, "session-a")
     _ensure_session(store, "session-b")

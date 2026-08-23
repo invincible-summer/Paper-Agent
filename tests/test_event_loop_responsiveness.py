@@ -73,7 +73,8 @@ def test_auth_bootstrap_responds_while_pdf_parser_is_busy(monkeypatch):
             return ParsedPaperDocument(raw_text="digital text", is_scanned=False)
 
     monkeypatch.setattr(ra, "get_structure_parser", lambda: SlowParser())
-    paper = Paper(id="P1", title="Slow PDF", pdf_path="/fake/slow.pdf")
+    paper = Paper(id="upload:P1", title="Slow PDF", source="upload",
+                  pdf_path="/fake/slow.pdf")
 
     async def scenario():
         parse_task = asyncio.create_task(

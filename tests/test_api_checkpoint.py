@@ -119,7 +119,6 @@ def test_checkpoint_restart_restores_structured_state_but_not_messages(tmp_path:
     session.paper_summaries = {"p1": PaperSummary(paper_id="p1", key_findings=["k"])}
     session.map_data = {"clusters": [{"label": "理论"}]}
     session.loaded_skills = {"skill_a", "skill_b"}
-    session.full_read_count = 3
     session.messages = [{"role": "user", "content": "must not persist"}]
     store.save_checkpoint_sync(session)
 
@@ -140,10 +139,9 @@ def test_checkpoint_restart_restores_structured_state_but_not_messages(tmp_path:
     assert restored.session.papers[0].abstract_source == "openaire"
     assert restored.session.papers[0].abstract_policy_status == "disabled"
     assert restored.session.papers[0].abstract_policy_reason == "network"
-    assert restored.session.papers[0].pdf_source == "arxiv"
+    assert restored.session.papers[0].pdf_source == ""
     assert restored.session.map_data["clusters"][0]["label"] == "理论"
     assert restored.session.loaded_skills == {"skill_a", "skill_b"}
-    assert restored.session.full_read_count == 3
     assert restored.session.messages == []
 
 
@@ -265,23 +263,28 @@ def test_stale_store_writer_gets_optimistic_conflict(tmp_path: Path):
         second.save_checkpoint_sync(loaded)
 
 
-def test_api_pdf_path_is_checkpointed_only_as_relative_reference(tmp_path: Path):
+def test_api_network_pdf_fields_are_omitted_from_checkpoint(tmp_path: Path):
     store = _store(tmp_path)
     session = store.get_or_create(_principal(), None, [{"role": "user", "content": "x"}]).session
-    pdf = store.context.blob_dir / "public_pdf" / "aa" / "paper.pdf"
-    pdf.parent.mkdir(parents=True, exist_ok=True)
-    pdf.write_bytes(b"%PDF")
-    session.papers = [Paper(id="p", title="P", pdf_path=str(pdf))]
+    session.papers = [Paper(
+        id="p", title="P", pdf_path="/legacy/paper.pdf",
+        pdf_url="https://example.org/p.pdf", pdf_source="arxiv",
+        fulltext_status="available",
+    )]
     store.save_checkpoint_sync(session)
     with store.storage.connect() as conn:
         blob = conn.execute("SELECT checkpoint_blob FROM api_sessions WHERE id = ?", (session.session_id,)).fetchone()[0]
     import zlib
     decoded = zlib.decompress(blob).decode("utf-8")
     assert str(store.context.root_dir) not in decoded
-    assert "@api/blobs/public_pdf/aa/paper.pdf" in decoded
+    assert "pdf_path" not in decoded
+    assert "pdf_url" not in decoded
+    assert "pdf_source" not in decoded
+    assert "fulltext_status" not in decoded
     restored = store._load_checkpoint_sync(session.session_id)
     assert restored is not None
-    assert restored.papers[0].pdf_path == str(pdf)
+    assert restored.papers[0].pdf_path is None
+    assert restored.papers[0].pdf_url is None
 
 
 def test_stable_session_id_is_immediate_hmac_primary_and_credential_isolated(tmp_path: Path):

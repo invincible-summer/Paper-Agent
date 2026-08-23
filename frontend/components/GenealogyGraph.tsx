@@ -63,22 +63,6 @@ function truncateToWidth(s: string, max: number, fs: number): string {
 
 const ROLE_LABEL: Record<string, string> = { foundational: "奠基", bridge: "桥梁" };
 
-function fulltextStatusText(status?: string): string {
-  if (status === "available") return "全文可获取（已探测 OA PDF 可访问，深读时才下载）";
-  if (status === "unavailable") return "全文暂不可获取（已探测 OA 路径）· 仅摘要";
-  return "全文状态未验证（深读时探测/下载）";
-}
-
-function FulltextBadge({ status }: { status?: string }) {
-  if (status === "available") {
-    return <span className="badge badge-success" title="已探测 OA PDF 可访问（不下载全文）">全文可获取</span>;
-  }
-  if (status === "unavailable") {
-    return <span className="badge badge-muted" title="已探测 OA 路径不可获取">仅摘要</span>;
-  }
-  return <span className="badge badge-accent2" title="尚未探测">全文待验证</span>;
-}
-
 export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clusterLabels?: Record<number, string> }) {
   const [selection, setSelection] = useState<Selection>(null);
   const [focus, setFocus] = useState<string | null>(null);
@@ -267,9 +251,7 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
         lines: [
           truncateToWidth(pn.title || "（无标题）", 262, 10),
           `${pn.year > 0 ? pn.year : "年份未知"} · 被引 ${pn.citation_count} · ${labelOf(pn.cluster)}${role}`,
-          fulltextStatusText(pn.fulltext_status),
         ],
-        lineColors: [null, null, pn.fulltext_status === "available" ? "#3b7a4a" : pn.fulltext_status === "unavailable" ? null : "#b07e0c"],
       };
     }
     const ag = layout.aggregates.find((a) => a.id === hover);
@@ -675,7 +657,6 @@ function PaperDetail({ paper, edges, fullById, clusterLabel, onJump, onClose, on
             {paper.venue && ` · ${paper.venue}`}
             {` · 被引 `}<span className="tnum">{paper.citation_count}</span>
             {` · `}{clusterLabel}
-            <FulltextBadge status={paper.fulltext_status} />
             {paper.role === "foundational" && <span className="badge-accent2 badge ml-1.5">奠基</span>}
             {paper.role === "bridge" && <span className="badge-accent badge ml-1.5">桥梁</span>}
             {paper.layer !== "core" && <span className="badge ml-1.5 border border-border-light text-muted">候选</span>}
@@ -684,7 +665,7 @@ function PaperDetail({ paper, edges, fullById, clusterLabel, onJump, onClose, on
         <div className="flex shrink-0 items-center gap-1.5">
           {paper.url && (
             <a href={paper.url} target="_blank" rel="noreferrer"
-              title="出版页面/原文链接（不代表系统已取得全文）"
+              title="出版页面链接"
               className="rounded-lg border border-border-light px-2 py-1 text-[11px] text-fg-secondary transition-colors hover:border-accent/40 hover:text-accent">
               原文链接
             </a>

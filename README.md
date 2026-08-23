@@ -8,12 +8,12 @@
 
 对话（`/chat`，唯一入口）中自然语言驱动全部能力，Agent 自主调度 13 个原子工具 + 技能层：
 
-- **search_papers** — 意图理解 → 研究方向拆解 → 多源检索（OpenAlex / Semantic Scholar / arXiv / Crossref / Europe PMC / DOAJ / HAL / OpenAIRE / CORE，全部免费合法官方 API）→ 本地嵌入语义重排 → 自适应分层（核心集 / 候选集，无需手动设置数量）。**检索完成前对每篇论文轻量探测 OA PDF 是否可访问**（只读取响应头/PDF 文件头，不下载全文；`fulltext_status`: available / unavailable / unknown；源 API 的 `pdf_url` 绝不直接当作“可获取全文”，付费墙落地页会被判为仅摘要），前端检索卡片逐篇显示「全文可获取 / 仅摘要 / 待验证」。探测完成后执行 **best-effort 核心层全文保障**：若核心层已验证可读论文不足 5 篇，就按相关性将候选层中已验证 `available` 的论文提升进核心层，目标为 `min(5, 本次全部可读论文数)`；原核心论文保留、核心可扩容、候选删除提升项但不补位。会话已有论文时，用户点名其中某篇（DOI/标题）不会重复检索，而是直接走 deep_read / ask_papers
-- **deep_read** — 结构化深读（`core/reading_policy.py`）：网络论文只走合法 OA 渠道，并遵守管理员的四档全文拉取策略（完全开启 / 仅明确深读时拉取 / 仅探测不下载 / 完全关闭远程全文）；本地缓存始终可复用。没有真实全文时只按摘要级处理，绝不把摘要冒充全文。核心集与候选集 id 均可直接传入；上传的 PDF / DOCX / PNG / JPG / WebP 不受网络论文拉取开关影响，布局、OCR 与视觉理解按需启动并复用缓存。
+- **search_papers** — 意图理解 → 研究方向拆解 → 多源论文检索（OpenAlex / Semantic Scholar / arXiv / Crossref / Europe PMC / DOAJ / HAL / OpenAIRE / CORE 等官方元数据 API）→ 本地语义重排 → 自适应核心集/候选集。网络论文只保留元数据与当前有效的非空摘要；没有摘要的论文不进入摘要问答或综述，也不会触发全文探测、Unpaywall 查询或 PDF 下载。
+- **deep_read** — 仅解析当前会话上传的 PDF / DOCX / TXT / MD / TEX / 图片；上传文件经过完整文本、结构、分块和可选多模态理解。网络论文只能基于有效摘要回答，需要全文级分析时请上传原文。
 - **ask_papers** — 会话级 RAG 问答：章节目录/“有哪些部分”问题会注入受保护的完整 `section_outline` 证据，不会被普通 top-k 精排淘汰；其他问题继续走查询改写 → 向量 + BM25 混合检索（RRF 融合）→ 本地 cross-encoder 精排 → 父子扩展；答案带引用来源并经防幻觉校验。上传文档与图片留在当前会话附件域，图/表/公式问题会按需补充多模态理解，不会伪装成网络论文
-- **research_map** — 研究地图：主题聚类 + 领域脉络 + 时间脉络 + **论文谱系图**（真实引用边来自 OpenAlex；固定画布确定性布局、节点详情面板、思想源流高亮、「深问这篇」直达问答）。谱系图节点的「全文可获取」标记沿用 search_papers / deep_read 的**已验证状态**，节点悬停与详情面板均显示；不再按元数据 `pdf_url` 猜测
+- **research_map** — 研究地图：主题聚类 + 领域脉络 + 时间脉络 + 论文谱系图；网络论文只展示元数据/摘要级证据，不显示远程全文状态。
 - **reading_path** — 推荐阅读路径（奠基 → 桥梁 → 前沿，每篇附理由）
-- **write_review** — 文献综述：按主题簇组织，引用经防幻觉校验并渲染为标题链接
+- **write_review** — 多阶段文献综述：默认覆盖核心集与候选集全部有效摘要及当前会话全部可解析上传全文；支持 paper_ids、attachment_ids、focus、target_length，输出固定结构并同时生成 Markdown 与 DOCX。
 - **check_structure** — 上传草稿结构体检（`tools/writing/structure_check.py`，纯代码零模型消耗）：章节树（markdown/数字/中文/LaTeX 标题）/ IMRaD 缺失章节 / 章节比例失衡 / 摘要长度 / 引用卫生 / 图表统计，前端专用卡片渲染体检报告
 - **check_format** — 格式检查（纯代码）：图表编号连续性与正文引用、引用风格混用、GB/T 7714 规范度、关键词数量、标题断号；LaTeX 源查 \cite/\ref/参考文献块配对；支持传入用户格式要求逐条对照，排版项诚实列入人工核对清单
 - **export_manuscript** — 写作产物导出：初稿/润色稿/修改清单 → docx / tex（ctexart 中文可编译）/ md 下载文件，清小搭侧经 x_soda 附件下发
@@ -21,7 +21,7 @@
 - **清小搭展示边界与卡片仿真** — 自有前端的 React 工具卡和交互式 `GenealogyGraph` 不会随 OpenAI 协议跨端执行；`/v1` 通道在正文中插入一行式工具状态、确定性检索结果表格、技能提示，以及管理员可选的实验性 Mermaid 研究图谱；文件卡通过 `x_soda.attachments` 下发。研究图谱由四个独立开关组合：美化 SVG 附件、正文 Mermaid、可下载的自包含交互 HTML、普通 Markdown 关系说明。SVG / Mermaid / HTML 至少启用一种，Markdown 可独立关闭；新安装默认仅 SVG。HTML 只作为附件下载，使用 CSP、内联数据与原生 JavaScript，下载后在浏览器打开，不在主站同源内联执行。
 - **integrity_sweep** — 可靠性质检（纯官方 API，零模型）：逐篇查撤稿（OpenAlex `is_retracted`）/ 勘误或关切声明（Crossref `relation`）/ arXiv 预印本是否已有正式版；写综述、投稿导出前必跑
 - **bib_import** — 导入 .bib 文献库（Zotero/EndNote/Mendeley 导出）到候选集，DOI 经 Crossref 自动补全，与会话论文去重后并入；与 citation_export 双向互通
-- **exhibit_index** — 图表导览：列出网络论文或上传 PDF / DOCX / 图片里的图、表、公式（编号/类型/页码/缩略图）；上传附件按需解析并复用缓存，点击元素可继续追问
+- **exhibit_index** — 图表导览：只列出上传 PDF / DOCX / 图片里的图、表、公式（编号/类型/页码/缩略图）；上传附件按需解析并复用缓存，点击元素可继续追问
 - **field_census** — 领域宏观计量（OpenAlex `group_by` 聚合 + 1 句画像）：近 15 年年度发文趋势、高产学/机构/期刊 top10；与 research_map 互补（前者看整个领域，后者看你手里这批论文）
 
 技能层（`skills/builtin/`，Anthropic Agent Skills 模式：元数据常驻 prompt、完整指令按需加载、会话内去重、声明式前置门控、完成前自检契约）：
@@ -50,7 +50,7 @@
 - Prompt 注册表（`core/prompts/registry.py`）：全部 prompt 带版本号，trace 可溯源
 - 中英双语 UI；「纸墨书院」设计风格（宣纸底 + 黛青主色 + 朱砂点缀）
 - Eval 质量护栏：`tests/eval/` 黄金集，改 prompt / 换模型后对比检索召回率
-- 数据合规：论文渠道按官方 API/OAI/元数据许可分为开放、条件启用和暂不接入；全文 OA-only（付费墙无代码路径）；CORE/Semantic Scholar 需要额外许可门禁；bioRxiv/medRxiv 只通过官方 metadata API 建立本地索引；ChinaXiv 暂不接入。详见 [Official_Paper_Platform_License_Description.md](Official_Paper_Platform_License_Description.md)
+- 数据合规：论文渠道按官方 API/OAI/元数据许可分为开放、条件启用和暂不接入；网络论文只获取元数据与当前有效摘要，不探测或下载全文；CORE/Semantic Scholar 需要额外许可门禁；bioRxiv/medRxiv 只通过官方 metadata API 建立本地索引；ChinaXiv 暂不接入。详见 [Official_Paper_Platform_License_Description.md](docs/Official_Paper_Platform_License_Description.md)
 
 ## OpenAI 兼容端点（清小搭接入）
 
@@ -60,7 +60,7 @@
 - 多轮对话：清小搭 `sessionId` 经服务器 HMAC 后作为稳定 Checkpoint 主别名，并在首轮开始时立即绑定，因此流式中断后也能恢复已经保存的论文集等部分状态；原始 `sessionId` 不落库，别名继续按 Agent API credential 隔离。缺失 `sessionId` 时回退到 credential/user/message-chain HMAC alias
 - 每轮都从请求携带的完整可见 `messages` 重建临时文本历史（排除当前最后一条 user），所以“可以 / 继续”等短确认能读取上一轮助手的明确提议；Checkpoint 仍只保存论文、摘要、地图、附件引用等白名单结构化状态，完整 messages/reasoning 不落盘。调用方 `system` 指令会在服务端安全规则之后受限加入上下文，外部 `tool` 历史可安全忽略
 - `/v1` 工具调度执行最少必要原则：一次模型决策批次最多实际执行一个公开工具，整轮最多启动三个；首个必要工具达到 5/10/15 秒（轻/中/重）最低可用时间时可按剩余预算裁剪，后续工具必须完整容纳管理员预算与收尾预留。任一 TIMEOUT 或 `budget_exhausted` partial 会关闭本轮后续工具，只总结已有证据；Web 通道原有并行安全工具行为不变
-- 检索超时采用部分成功：多源检索保留已完成来源，时间紧时切换词项重合 + 被引 + 时效的确定性快速重排，分层后立即发布可恢复 snapshot；OA 全文探测默认强制预留（`force_fulltext_probe`：时间紧张时检索/重排提前收口，最多为探测预留 12 秒，管理员可关闭后回到“剩余不足即跳过”），SQLite/Chroma 增强可跳过。`partial` 结果仍输出标准论文表、工具状态行并写入 Checkpoint，不会因后续增强超时丢弃论文列表
+- 检索超时采用部分成功：多源检索保留已完成来源，时间紧时切换词项重合 + 被引 + 时效的确定性快速重排，分层后立即发布可恢复 snapshot；网络论文全文能力已下线，SQLite/Chroma 增强可跳过。`partial` 结果仍输出标准论文表、工具状态行并写入 Checkpoint，不会因后续增强超时丢弃论文列表
 - 多模态输入：支持 OpenAI content 数组——`file.url` 存在时始终作为实际下载地址（与 `file_id` 同时存在也不例外），`file_id` 只保留为来源标识，绝不拼接成本地路径或猜测公网 URL；仅有 `file_id` 时不联网、不报 500，而是在本轮明确提示缺少可下载 URL。`file` 与 `image_url`（URL 或 data URI）统一注册为会话附件，HTTP(S) 下载逐跳执行 SSRF 公网校验。`/v1` 文件上限默认 200 MiB，可由管理员在 `/admin/api-storage` 下调但不能超过 200 MiB；Web `/chat/upload` 仍为 20 MiB。PDF/DOCX/TEX/TXT/MD/BIB/PNG/JPG/JPEG/WebP 按原能力处理；DOC/XLS/XLSX 可安全保存到 API 私有会话并生成空 sidecar，但标记为 `deferred`、当前不解析；PPT/PPTX 和其他未知格式继续拒绝。`input_audio` 当前明确降级为不支持音频解析
 - 文件产物输出：研究地图按管理员四开关组合生成唯一美化 SVG（`fileType: image`、`mimeType: image/svg+xml`）、自包含可下载 HTML（`fileType: text`、`mimeType: text/html`）和/或普通 Markdown 关系说明（`fileType: text`、`mimeType: text/markdown`）；正文 Mermaid 是可选源码块，不是附件。美化 SVG 无脚本、外链资源或 Mermaid 依赖；HTML 下载后才在浏览器执行。综述可生成为 markdown；`export_manuscript` 可导出 md / docx / tex，下载路由支持 `.txt` 与 `.html` 文本产物。所有文件均由 `GET /files/{name}` 下载，长中文文件名受 basename 与后缀白名单保护并可正常获取
 - 富展示（按接口文档能力实现）：工具完成时正文插入一行式 Markdown 状态行；文献检索完成后确定性生成完整论文清单表格，不受卡片开关控制；技能加载触发思考折叠提示 + 正文技能行。管理员在 `/admin/display-policy` 配置工具/技能提示与研究图谱四开关（`api_display_policy` 单行表，schema v9，5 秒读缓存、乐观锁）：`research_map_svg_enabled`、`research_map_mermaid_enabled`、`research_map_html_enabled`、`research_map_markdown_enabled`。Mermaid 进入正文和下一轮回显，不进入附件；SVG、HTML、Markdown 只在非流式顶层或流式唯一 stop 帧的 `x_soda.attachments` 中出现。显式 `export_report` 固定导出美化 SVG + Markdown，不受展示策略影响。
@@ -129,16 +129,16 @@ cd frontend && pnpm build                     # 前端类型检查 + 构建
 
 ## 清小搭 / OpenAI API 独立存储
 
-`/v1/models` 与 `/v1/chat/completions` 使用独立 `data/openai_api/` 根目录，不会改变自制前端的历史、上传、论文、附件、图谱和长期保留。默认策略：7 天结构化 Checkpoint/私有上传、24 小时导出、3 天公共 PDF、90 天语义/视觉缓存、API Trace 关闭，以及单文件 200 MiB 的远程下载/私有保存上限。公共 PDF 过期即由计划清理删除，后续需要时 deep_read 会自动重新下载并提取。完整 messages、reasoning/思维链、API Key、raw bytes 和完整 PDF 正文不会写入 Checkpoint。
+`/v1/models` 与 `/v1/chat/completions` 使用独立 `data/openai_api/` 根目录，不会改变自制前端的历史、上传、论文、附件、图谱和长期保留。默认策略：7 天结构化 Checkpoint/私有上传、24 小时导出、90 天语义/视觉缓存、API Trace 关闭，以及单文件 200 MiB 的远程文件保存上限。上传论文是全文分析唯一入口；网络论文不下载 PDF。完整 messages、reasoning/思维链、API Key、raw bytes 和完整 PDF 正文不会写入 Checkpoint。
 
 管理员页面：`/admin/auth-settings`（访问控制）。运行时开关账号登录、游客访问、开放注册，三档选择注册邮箱要求（不要求 / 仅填写 / 邮箱 + 验证码），显示 SMTP 配置状态并支持发送测试邮件；带版本乐观锁，关账号登录需输入「确认」二次确认。各开关的说明都收在问号帮助弹窗里。
 
 
-管理员页面：`/admin/paper-search` 使用统一的**论文平台能力矩阵**。每个平台在同一行独立管理“论文搜索 / 摘要获取 / 全文获取”三个持久能力，显示基础连通、最近检测、结果数/摘要长度/PDF 魔数/延迟/KB/s、配置门禁和关闭原因；支持单能力、单平台、选中平台和全部平台检测。诊断优先严格走各平台官方文档规定的 API、认证方式、参数与响应结构，矩阵同时展示每个平台的官方文档依据和诊断方法；Unpaywall 和 doi.org 作为辅助目标同表展示，Unpaywall 全文候选能力也持久化独立开关，官方没有对应能力的平台明确显示“不适用”。基础连通硬失败会关闭该平台全部适用能力，搜索/摘要/PDF 硬失败只关闭对应能力，配置缺失、`not_applicable` 和有效但缓慢的 PDF 不自动关闭。检测成功只更新记录，不会自动恢复；管理员必须确认后手动恢复。普通 Agent、Web 和 `/v1` 在联网前统一读取能力状态：搜索关闭不创建任务，摘要关闭会从模型上下文剥离平台摘要，全文关闭会在 Unpaywall/doi.org、probe 和下载前停止，Unpaywall 自身关闭时直连来源仍可用但不会发起其 DOI→OA 查询；已经验证的本地缓存和上传附件仍可使用。arXiv 的探测、测速和真实下载统一通过不使用 shell 的受控 `wget --user-agent=Lynx` 适配器，继续执行 SSRF、重定向、大小、超时和 `%PDF-` 校验。
+管理员页面：`/admin/paper-search` 只管理“论文搜索 / 摘要获取”两项能力。诊断只测试连通、搜索和有效摘要，网络论文全文探测、Unpaywall、PDF 魔数、下载测速与全文策略均不再存在；上传文件解析不受该矩阵控制。
 
-管理员页面：`/admin/api-storage`。可查看分类容量、磁盘状态、清理记录，选择 privacy/balanced/performance、自定义 TTL、1–200 MiB 的 API 远程文件上限、95% pause/emergency 和 off/metadata/full Trace；文件上限只影响后续 `/v1` 下载/私有保存，不影响 Web 20 MiB 上传，修改不会删除或重处理已保存文件。每项都有隐私、磁盘、延迟、费用、连续性、重下载/OCR/VLM、生效与恢复默认说明。缩短 TTL、Full Trace、紧急删除、立即清理和遗留扫描必须预览并二次确认。
+管理员页面：`/admin/api-storage`。可查看分类容量、磁盘状态、清理记录，选择 privacy/balanced/performance、自定义 TTL、1–200 MiB 的 API 远程文件上限、95% pause/emergency 和 off/metadata/full Trace；文件上限只影响后续 `/v1` 下载/私有保存，不影响 Web 20 MiB 上传，修改不会删除或重处理已保存文件。每项都有隐私、磁盘、延迟、费用、连续性、重算或重传/OCR/VLM、生效与恢复默认说明。缩短 TTL、Full Trace、紧急删除、立即清理和遗留扫描必须预览并二次确认。
 
-管理员页面：`/admin/accounts-data`。统一列出各 web 账号和 Agent API Key 的历史会话、上传文件、Trace、会话向量、API 私有文件占用；管理员可**彻底删除**某个账号的全部数据（文件先覆写再删除、SQLite secure_delete + VACUUM，无法恢复），也可一键清理共享的论文 PDF/元素资产缓存。
+管理员页面：`/admin/accounts-data`。统一列出各 web 账号和 Agent API Key 的历史会话、上传文件、Trace、会话向量、API 私有文件占用；管理员可**彻底删除**某个账号的全部数据（文件先覆写再删除、SQLite secure_delete + VACUUM，无法恢复）。旧网络论文 PDF/元素资产由版本化退役迁移清理，不再提供共享缓存或重下载入口。
 
 ```bash
 # API-only hourly cleanup；生产应安装 deploy/systemd 中的 service/timer。
@@ -176,7 +176,7 @@ agents/          orchestrator（ReAct 循环）· session · chat_tools · tools
                  search_agent · reader_agent · review_agent · map_agent
 core/            llm · prompts/（注册表）· embeddings · API checkpoint/artifact/cleanup/pressure
                  tool_protocol · circuit_breaker · trace · history_store · storage_context · config · models
-tools/           search/（9 数据源 + OpenAlex 引用边）· pdf/（OA-only 下载 + Unpaywall）· ingest/（URL 下载 + 上传附件注册/按需多模态）
+tools/           search/（元数据与摘要数据源 + OpenAlex 引用边）· pdf/（上传文件结构解析与安全兼容边界）· ingest/（用户上传注册/按需多模态）
                  retrieval/（结构化切块 · BM25+RRF · cross-encoder 精排）· storage/（SQLite · 会话级向量库 · 谱系图数据）· export/
 frontend/        Next.js chat 单页：对话 + 工具卡片 + 谱系图 v2（确定性布局纯函数 + 详情面板）
 tests/           pytest（纯函数 + stubbed LLM/VLM/Docling）+ eval/ 黄金集
@@ -186,6 +186,6 @@ tests/           pytest（纯函数 + stubbed LLM/VLM/Docling）+ eval/ 黄金�
 
 管理员可在 `/admin/performance` 配置启动预热（`blocking`、`background`、`role_first`、`off`）和研究地图引文增强（`fast`、`quality`、`off`）。预热只做本地 Python 导入与客户端构造，不调用模型或下载文件；`role_first` 的流式 `/v1` 请求会先发送标准 `role` 帧，非流式请求仍需在处理时完成冷加载。地图引文由后端批量请求 OpenAlex，默认最多等待 3 秒，策略关闭或 OpenAlex 搜索源关闭时不会发起请求。
 
-同一页面还提供「工具时限预算」：每个工具（中文名 + 用途说明 + 建议上限，不暴露裸 id）的单次调用预算可单独调整，区间 5 秒至当前 `/v1` 硬时限，另有作用于所有工具的整轮预留量（建议 8 秒）、清小搭 `/v1` 整轮软时限（默认 95 秒）与整轮硬时限（默认 105 秒）——软/硬时限均无固定数值上限，唯一约束是软 ≤ 硬 − 5 秒（为软超时后的降级总结收尾留时间），硬时限最小 35 秒，逐工具预算与默认预算的上限跟随硬时限自动放开；经清小搭网关转发的请求仍受网关 120 秒总超时限制，超过 120 秒的设置只有直连 `/v1` 的调用能真正用满。实际生效值 = min(工具预算, 整轮剩余 − 预留量)；超过当前 `/v1` 软时限的预算部分仅在 Web 通道（240/300 秒）生效。保存后下一次工具调用立即生效，无需重启。每行内联显示工具级熔断状态并可一键恢复。`search_papers` 内部各阶段（意图理解 LLM 10 秒子超时、多源检索、全文探测）共享该工具预算，探测预算自动钳制为剩余时间，检索成功后不会再因探测段超时作废整次调用；默认开启的强制探测会为全文探测预留最多 12 秒（检索与嵌入重排提前在 pre-probe deadline 收口，剩余仅 1 秒以上时也兜底执行短探测），慢源不再把探测挤掉。
+同一页面还提供「工具时限预算」：每个工具（中文名 + 用途说明 + 建议上限，不暴露裸 id）的单次调用预算可单独调整，区间 5 秒至当前 `/v1` 硬时限，另有作用于所有工具的整轮预留量（建议 8 秒）、清小搭 `/v1` 整轮软时限（默认 95 秒）与整轮硬时限（默认 105 秒）——软/硬时限均无固定数值上限，唯一约束是软 ≤ 硬 − 5 秒（为软超时后的降级总结收尾留时间），硬时限最小 35 秒，逐工具预算与默认预算的上限跟随硬时限自动放开；经清小搭网关转发的请求仍受网关 120 秒总超时限制，超过 120 秒的设置只有直连 `/v1` 的调用能真正用满。实际生效值 = min(工具预算, 整轮剩余 − 预留量)；超过当前 `/v1` 软时限的预算部分仅在 Web 通道（240/300 秒）生效。保存后下一次工具调用立即生效，无需重启。每行内联显示工具级熔断状态并可一键恢复。`search_papers` 的意图理解、来源检索、去重与重排共享预算并支持 partial snapshot；`write_review` 的代码默认预算为 75 秒，管理员已有自定义值不会被覆盖。
 
-研究地图的聚类和语义边共享一次嵌入，地图概述与领域脉络共享一次有预算的 utility 调用，并与可选引文增强并发。嵌入、LLM、OpenAlex 任一失败都会保留节点、时间线、SVG/HTML/Markdown 附件并返回降级状态；相同论文/全文状态/提示版本/引文策略指纹会跨轮复用地图。Web 渠道使用 240 秒软时限/300 秒硬时限，`/v1` 默认 95 秒/105 秒且两值管理员可调；`search_papers` 与 `research_map` 每轮最多实际开始一次，超时后当前轮不会再次调用。
+研究地图的聚类和语义边共享一次嵌入，地图概述与领域脉络共享一次有预算的 utility 调用，并与可选引文增强并发。嵌入、LLM、OpenAlex 任一失败都会保留节点、时间线、SVG/HTML/Markdown 附件并返回降级状态；相同论文元数据/摘要、提示版本和引文策略指纹会跨轮复用地图。Web 渠道使用 240 秒软时限/300 秒硬时限，`/v1` 默认 95 秒/105 秒且两值管理员可调；`search_papers` 与 `research_map` 每轮最多实际开始一次，超时后当前轮不会再次调用。

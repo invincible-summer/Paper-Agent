@@ -30,6 +30,7 @@ class ChatSession:
     map_data: dict = field(default_factory=dict)             # research_map 产物
     reading_path: list[dict] = field(default_factory=list)   # reading_path 产物
     literature_review: str = ""
+    review_metadata: dict = field(default_factory=dict)
     sub_directions: list = field(default_factory=list)       # 意图理解产物
     search_queries: list = field(default_factory=list)
     history_summary: str = ""                                # 旧消息压缩摘要
@@ -39,7 +40,6 @@ class ChatSession:
     trace_ids: list[str] = field(default_factory=list)
     session_id: str = ""                                     # RAG 隔离键
     loaded_skills: set[str] = field(default_factory=set)     # 本会话已加载的指令技能（去重，省 token；不持久化）
-    full_read_count: int = 0                                 # 自适应深读预算计数（软上限，见 core/reading_policy）
     channel: str = "web"                                    # Storage/lifecycle channel; web remains the default.
     owner_id: str = ""                                      # Web artifact owner; never persisted as public content.
     storage_context: StorageContext | None = field(default=None, repr=False, compare=False)
@@ -119,23 +119,11 @@ class ChatSession:
         return matches[0] if len(matches) == 1 else None
 
     def context_summary(self) -> str:
-        """Session state summary injected into every turn's LLM context.
+        """Compact session catalogue for the model.
 
-        Includes the stable paper-id catalogue (core + candidates) because
-        tool-result messages from earlier turns are not replayed into the
-        model context; without the catalogue the model re-runs search_papers
-        just to "locate" a paper the session already owns. Catalogue entries
-        also carry the verified full-text status so a later "哪些能看全文"
-        question can be answered directly from session context.
+        Network papers are addressable for metadata/abstract questions only;
+        uploaded attachments are the only full-document entry point.
         """
-        from core.reading_policy import normalize_fulltext_status
-
-        def mark(paper: Paper) -> str:
-            return {
-                "available": "全文✓",
-                "unavailable": "仅摘要",
-            }.get(normalize_fulltext_status(paper.fulltext_status), "全文待验证")
-
         parts = []
         if self.topic:
             parts.append(f"主题: {self.topic}")
@@ -144,20 +132,19 @@ class ChatSession:
             catalog: list[str] = []
             if self.papers:
                 catalog.append(
-                    "核心集 paper_ids（左侧 id 可直接用于 deep_read/ask_papers/"
-                    "citation_export 等；不要为这些论文再次 search_papers；"
-                    "全文✓=已验证可获取全文，仅摘要=已验证取不到 OA 全文）："
+                    "核心集 paper_ids（可直接用于 ask_papers/citation_export；"
+                    "不要为这些论文再次 search_papers；网络论文只提供摘要证据）："
                 )
                 catalog.extend(
-                    f"- {p.id} | {mark(p)} | {p.title}" for p in self.papers if p.id
+                    f"- {p.id} | {p.title}" for p in self.papers if p.id
                 )
             if self.candidates:
                 catalog.append(
-                    "候选集 paper_ids（同样可直接使用；用户给出候选论文的 DOI/"
-                    "标题时直接传对应 id，禁止再次 search_papers）："
+                    "候选集 paper_ids（同样可用于摘要级 ask_papers；"
+                    "禁止再次 search_papers）："
                 )
                 catalog.extend(
-                    f"- {p.id} | {mark(p)} | {p.title}" for p in self.candidates[:25] if p.id
+                    f"- {p.id} | {p.title}" for p in self.candidates[:25] if p.id
                 )
                 if len(self.candidates) > 25:
                     catalog.append(f"... 其余 {len(self.candidates) - 25} 篇候选未列出")
@@ -209,6 +196,7 @@ def save_chat_history(session: ChatSession, filepath: str | None = None,
         "map_data": session.map_data,
         "reading_path": session.reading_path,
         "literature_review": session.literature_review,
+        "review_metadata": session.review_metadata,
         "sub_directions": session.sub_directions,
         "search_queries": session.search_queries,
         "history_summary": session.history_summary,
@@ -253,6 +241,7 @@ def load_chat_history(filepath: str, user_id: str | None = None) -> ChatSession 
         map_data=data.get("map_data", {}),
         reading_path=data.get("reading_path", []),
         literature_review=data.get("literature_review", ""),
+        review_metadata=data.get("review_metadata", {}),
         sub_directions=data.get("sub_directions", data.get("subtopics", [])),
         search_queries=data.get("search_queries", []),
         history_summary=data.get("history_summary", ""),

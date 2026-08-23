@@ -90,8 +90,8 @@ def _tool_progress_text(name: str, args: dict) -> str:
     """Args-aware progress line for the thinking fold."""
     if name == "search_papers" and args.get("topic"):
         return f"🔎 正在检索：{_clip(args['topic'], 40)}…"
-    if name == "deep_read" and args.get("paper_ids"):
-        return f"📖 正在深读 {len(args['paper_ids'])} 篇论文…"
+    if name == "deep_read" and args.get("attachment_ids"):
+        return f"📖 正在深读 {len(args['attachment_ids'])} 个上传文件…"
     if name == "ask_papers" and args.get("query"):
         return f"💬 正在查阅文献：{_clip(args['query'], 40)}…"
     if name == "explain_element" and args.get("element_id"):
@@ -766,10 +766,14 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                         if tool == "use_skill":
                             continue
                         tool_results.append(result)
-                        if tool in _ARTIFACT_TOOLS and result.get("status") == "success":
-                            artifact_kinds.add(tool)
-                        elif result.get("status") == "success":
-                            result_files.extend(_tool_result_files(request, result))
+                        if result.get("status") == "success":
+                            files = _tool_result_files(request, result)
+                            if files:
+                                result_files.extend(files)
+                            elif tool in _ARTIFACT_TOOLS:
+                                # Compatibility fallback for older tool results
+                                # that did not create their own export records.
+                                artifact_kinds.add(tool)
                         table = (render_search_table(result)
                                  if tool == "search_papers" and result.get("status") != "error"
                                  and prepared["table_allowed"] else None)
@@ -1077,10 +1081,14 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                 if tool == "use_skill":
                     return None
                 tool_results.append(result)
-                if tool in _ARTIFACT_TOOLS and result.get("status") == "success":
-                    artifact_kinds.add(tool)
-                elif result.get("status") == "success":
-                    result_files.extend(_tool_result_files(request, result))
+                if result.get("status") == "success":
+                    files = _tool_result_files(request, result)
+                    if files:
+                        result_files.extend(files)
+                    elif tool in _ARTIFACT_TOOLS:
+                        # Compatibility fallback for older tool results that
+                        # did not create their own export records.
+                        artifact_kinds.add(tool)
                 table = (render_search_table(result)
                          if tool == "search_papers" and result.get("status") != "error"
                          and state.get("table_allowed") else None)

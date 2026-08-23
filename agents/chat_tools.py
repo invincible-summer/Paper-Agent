@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 
 class SearchPapersArgs(BaseModel):
-    """从管理员启用的多源渠道检索学术论文，语义重排后自适应分出核心集与候选集。检索按运行时单源/总时限返回部分结果；管理员可关闭渠道或全文探测。启用探测时只读 OA PDF 文件头并标注 fulltext_status: available/unavailable/unknown，不下载全文。用户问“哪些能看全文”时使用最近标记，不要为清点状态调用 deep_read。会话已有论文而用户只是点名其中某篇时不要重复检索。"""
+    """从管理员启用的多源渠道检索论文并获取元数据与摘要；网络论文不探测、下载或升级全文。会话已有论文而用户只是点名其中某篇时不要重复检索。"""
     topic: str = Field(description="研究主题或问题。必填。")
     conception: str = Field(default="",
         description="可选：用户的研究构想/角度/预期贡献，用于引导查询拆解。")
@@ -29,13 +29,15 @@ class SearchPapersArgs(BaseModel):
 
 
 class DeepReadArgs(BaseModel):
-    """对核心集论文或用户上传的 PDF/DOCX/图片做结构化深读。网络论文遵守管理员全文拉取策略：可完全开启、仅显式深读下载、仅探测不下载或完全关闭；不能取得全文时使用本地缓存/摘要并保持证据边界，绝不把摘要冒充全文。上传附件不受网络论文拉取开关影响，按需启动布局/OCR/VLM并复用缓存。"""
-    paper_ids: list[str] = Field(default_factory=list,
-        description="可选：只读指定 paper_id 的论文（核心集或候选集均可）；空列表 = 整个核心集。用户直接给出 DOI 时原样传入，不要先 search_papers 定位。")
+    """只对当前会话上传的 PDF/DOCX/TXT/Markdown/TeX 文件做完整文本深读。
+
+    网络搜索论文只支持摘要级问答；需要章节、数字、实验或图表细节时，
+    请让用户上传原文后再调用本工具。
+    """
     attachment_ids: list[str] = Field(default_factory=list,
-        description="可选：按需深读当前会话上传附件的 id（PDF/DOCX/PNG/JPG/WebP）。可与 paper_ids 同时使用。")
+        description="可选：按需深读当前会话上传附件的 id；为空时覆盖当前会话全部可解析附件。")
     focus: str = Field(default="",
-        description="可选：本次深读要获取的信息重点（如「实验数据集与指标数值」）。网络论文无论 focus 是否为空都会尝试全文；focus 会作为上传附件按需理解的侧重点。")
+        description="可选：本次深读要获取的信息重点，如实验指标、方法细节或局限。")
 
 
 class AskPapersArgs(BaseModel):
@@ -60,8 +62,14 @@ class ReadingPathArgs(BaseModel):
 
 
 class WriteReviewArgs(BaseModel):
-    """撰写文献综述（按主题簇组织，引用经防幻觉校验）。建议先 deep_read。无参数。"""
-    pass
+    """撰写结构化文献综述。网络论文只纳入有效摘要，上传附件纳入完整可解析文本。"""
+    paper_ids: list[str] = Field(default_factory=list,
+        description="可选：限定网络论文 paper_id；为空时使用核心集与候选集的全部有效摘要。")
+    attachment_ids: list[str] = Field(default_factory=list,
+        description="可选：限定上传附件；为空时使用当前会话全部可解析上传论文。")
+    focus: str = Field(default="", description="可选：综述重点，如方法比较、应用场景或研究空白。")
+    target_length: int = Field(default=0, ge=0, le=20000,
+        description="可选：期望中文字符数；过短时会按证据覆盖所需最低篇幅自动提高。")
 
 
 class UseSkillArgs(BaseModel):
@@ -80,7 +88,7 @@ class CitationExportArgs(BaseModel):
 
 
 class ExportReportArgs(BaseModel):
-    """把研究成果导出为可下载的 markdown 文件（研究地图报告/文献综述）。用户要求"导出报告/下载综述/保存研究地图/给我文件"时调用。返回文件下载链接。"""
+    """把研究成果导出为可下载文件（研究地图报告/文献综述；综述固定同时输出 Markdown 与 DOCX）。用户要求"导出报告/下载综述/保存研究地图/给我文件"时调用。返回文件下载链接。"""
     kind: Literal["research_map", "write_review", "all"] = Field(default="all",
         description="导出内容：research_map（需已生成研究地图）| write_review（需已写综述）| all（默认，有什么导什么）。")
 
@@ -120,15 +128,13 @@ class BibImportArgs(BaseModel):
 
 
 class ExhibitIndexArgs(BaseModel):
-    """列出当前会话论文或上传 PDF/DOCX/图片里的图、表、公式。上传附件会按需解析且复用缓存；无参数时覆盖可用论文及上传附件。"""
-    paper_ids: list[str] = Field(default_factory=list,
-        description="可选：只列出指定网络论文。")
+    """列出用户上传 PDF/DOCX/图片中的图、表、公式；不处理网络论文。"""
     attachment_ids: list[str] = Field(default_factory=list,
-        description="可选：只列出指定上传附件；空且 paper_ids 也空时覆盖当前会话全部附件。")
+        description="可选：只列出指定上传附件；为空时覆盖当前会话全部附件。")
 
 
 class ExplainElementArgs(BaseModel):
-    """查看当前会话论文或上传附件中某个图/表/公式的多模态详细解读。上传元素 id 形如 `upload:<attachment_id>::figure::1`；调用前必须确保该附件属于当前会话。"""
+    """查看用户上传附件产生的某个图/表/公式的详细解读；不处理网络论文元素。"""
     element_id: str = Field(description="要解读的元素 id，形如 `{paper_id}::figure::3`（来自 deep_read 的 elements 或 exhibit_index）。必填。")
     paper_id: str = Field(default="",
         description="可选：元素所属论文的 paper_id（用于校验归属）。空时从 element_id 自动解析。")

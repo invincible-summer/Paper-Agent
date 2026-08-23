@@ -22,8 +22,30 @@ def _prewarm_agent_stack(mode: str = "blocking") -> dict:
     return prewarm_agent_stack(mode)
 
 
+def _retire_remote_fulltext_cache() -> dict:
+    """Testable wrapper for the one-time legacy cache migration."""
+    from core.remote_fulltext_retirement import retire_remote_fulltext
+    return retire_remote_fulltext(_PROJECT_ROOT, dry_run=False)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # One-time, idempotent retirement of legacy network-paper full-text
+    # derivatives.  It is intentionally best-effort so a corrupt old cache
+    # never prevents the API from becoming healthy; uploads and exports are
+    # outside the migration's deletion boundary.
+    try:
+        # Use the process-wide daemon I/O workers rather than asyncio's
+        # per-loop default executor.  Lifespan tests and repeated app startup
+        # create short-lived event loops; a default-executor job can otherwise
+        # make ``asyncio.run`` wait indefinitely during loop shutdown.
+        from core.blocking import run_io_bound
+        await run_io_bound(_retire_remote_fulltext_cache)
+    except Exception:  # noqa: BLE001
+        # Keep startup resilient; the CLI remains available for an explicit
+        # retry/audit and logs can be inspected by operators.
+        import logging
+        logging.getLogger(__name__).exception("remote full-text retirement migration failed")
     # Runtime policy is stored in users.db.  Warmup is local-only and best
     # effort; failure must never prevent the HTTP server from becoming ready.
     background_task = None

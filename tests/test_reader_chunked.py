@@ -80,6 +80,7 @@ def test_section_chunked_extraction_reads_latter_half(monkeypatch):
     _patch_parser(monkeypatch, parsed)
 
     paper = _paper()
+    paper.source = "upload"
     paper.pdf_path = "/fake/p1.pdf"
     db = Database(":memory:")
     summary, reason = asyncio.run(
@@ -218,8 +219,8 @@ def test_full_mode_without_oa_pdf_stays_abstract_in_cache(monkeypatch):
     assert calls["n"] == 1
 
 
-def test_invalid_full_cache_is_discarded_and_refetched(monkeypatch):
-    """Older builds cached abstract summaries under full mode; heal that row."""
+def test_network_full_cache_is_ignored(monkeypatch):
+    """A legacy full-mode row cannot promote a network paper above its abstract."""
     import json
 
     calls = {"n": 0}
@@ -247,11 +248,10 @@ def test_invalid_full_cache_is_discarded_and_refetched(monkeypatch):
     assert summary is not None
     assert not summary.full_text
     assert calls["n"] == 1  # poisoned cache did not short-circuit the fetch
-    assert db.get_cached_summary(paper.id, "general", "full") is None
     assert db.get_cached_summary(paper.id, "general", "abstract") is not None
 
 
-def test_full_cache_containing_only_abstract_is_discarded(monkeypatch):
+def test_network_full_cache_containing_abstract_is_ignored(monkeypatch):
     """Old code could store the abstract itself as full_text after a parse
     failure; that row must not be served as a full-text cache hit."""
     import json
@@ -284,7 +284,6 @@ def test_full_cache_containing_only_abstract_is_discarded(monkeypatch):
     assert reason is None
     assert summary is not None and not summary.full_text
     assert calls["n"] == 1
-    assert db.get_cached_summary(paper.id, "general", "full") is None
 
 
 def test_downloaded_pdf_parse_failure_does_not_fake_full_text(monkeypatch):

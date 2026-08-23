@@ -80,10 +80,12 @@ def test_missing_year_and_doi_handled():
     assert "url" not in entry
 
 
-def test_url_fallback_to_pdf():
-    p = _paper(doi=None, pdf_url="https://example.org/paper.pdf")
+def test_url_uses_landing_page_and_never_falls_back_to_pdf():
+    p = _paper(doi=None, pdf_url="https://example.org/paper.pdf",
+               urls={"openalex": "https://openalex.org/W1"})
     entry = paper_to_bibtex(p)
-    assert "url = {https://example.org/paper.pdf}" in entry
+    assert "url = {https://openalex.org/W1}" in entry
+    assert "paper.pdf" not in entry
 
 
 def test_dedup_cite_keys():

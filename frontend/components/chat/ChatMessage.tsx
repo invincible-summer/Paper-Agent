@@ -149,7 +149,7 @@ function FileChip({ attach }: { attach: ChatAttachment }) {
   );
 }
 
-function paperUrl(p: { urls?: Record<string, string>; doi?: string | null; pdf_url?: string | null }): string {
+function paperUrl(p: { urls?: Record<string, string>; doi?: string | null }): string {
   if (p.urls) {
     for (const k of ["doi", "openalex", "arxiv", "crossref", "europepmc", "doaj"]) {
       const u = p.urls[k];
@@ -159,19 +159,9 @@ function paperUrl(p: { urls?: Record<string, string>; doi?: string | null; pdf_u
     if (first && first.startsWith("http")) return first;
   }
   if (p.doi) return `https://doi.org/${p.doi.replace(/^\//, "")}`;
-  return p.pdf_url || "";
+  return "";
 }
 
-function FulltextBadge({ status, title }: { status?: string; title?: string }) {
-  const s = status || "unknown";
-  if (s === "available") {
-    return <span className="badge badge-success shrink-0" title={title ?? "已探测到可访问的 OA PDF（深读时才实际下载全文）"}>全文可获取</span>;
-  }
-  if (s === "unavailable") {
-    return <span className="badge badge-muted shrink-0" title={title ?? "已探测 OA 路径不可获取，仅摘要"}>仅摘要</span>;
-  }
-  return <span className="badge badge-accent2 shrink-0" title={title ?? "尚未完成探测（深读时会实际下载尝试）"}>全文待验证</span>;
-}
 
 /* ---------- search_papers ---------- */
 
@@ -183,25 +173,14 @@ function SearchResultCard({ result }: { result: Record<string, unknown> }) {
   const subdirs = (result.sub_directions || []) as { name: string }[];
   const sourceNotices = (result.source_notices || []) as string[];
   const isError = Boolean(result.error);
-  const availableCount = papers.filter(p => p.fulltext_status === "available").length
-    + candidates.filter(c => c.fulltext_status === "available").length;
-  const promotedCount = Number(result.promoted_fulltext_core_count || 0);
-  const readableCore = Number(result.fulltext_core_available || papers.filter(p => p.fulltext_status === "available").length);
-  const readableTarget = Number(result.fulltext_core_target || 0);
 
   return (
     <div className="my-2">
       <CardHeader name="search_papers" result={result} expanded={expanded}
         onToggle={() => setExpanded(!expanded)}
-        meta_text={isError ? undefined : `核心集 ${papers.length} 篇 · 候选 ${candidates.length} 篇 · 全文可获取 ${availableCount} 篇`} />
+        meta_text={isError ? undefined : `核心集 ${papers.length} 篇 · 候选 ${candidates.length} 篇 · 仅展示元数据与有效摘要`} />
       {expanded && !isError && (
         <div className="mt-1.5 space-y-2 pl-1">
-          {(readableTarget > 0 || promotedCount > 0) && (
-            <div className="rounded-lg border border-success/20 bg-success/5 px-2.5 py-2 text-[11px] text-fg-secondary">
-              核心层全文保障：{readableCore}/{readableTarget} 篇全文可读
-              {promotedCount > 0 ? ` · 从候选提升 ${promotedCount} 篇，候选不补位` : ""}
-            </div>
-          )}
           {sourceNotices.map((notice, index) => (
             <div key={`source-notice-${index}`} className="rounded-lg border border-warning/25 bg-warning/5 px-2.5 py-2 text-[11px] text-fg-secondary">
               {notice}
@@ -228,7 +207,6 @@ function SearchResultCard({ result }: { result: Record<string, unknown> }) {
                   </p>
                 </div>
                 <div className="mt-0.5 flex shrink-0 items-center gap-1.5">
-                  <FulltextBadge status={p.fulltext_status} />
                   {paperUrl(p) && (
                     <a href={paperUrl(p)} target="_blank" rel="noreferrer"
                       className="text-muted/50 transition-colors hover:text-accent" title="打开原文">
@@ -253,7 +231,6 @@ function SearchResultCard({ result }: { result: Record<string, unknown> }) {
                       <span className="text-muted">- </span>
                       <span className="min-w-0 truncate">{c.title}</span>
                       <span className="text-muted/60 tnum shrink-0">{c.year || ""}</span>
-                      <FulltextBadge status={c.fulltext_status} />
                     </li>
                   ))}
                 </ul>
@@ -384,13 +361,7 @@ function ReviewCard({ result }: { result: Record<string, unknown> }) {
   const review = (result.literature_review || "") as string;
   const isError = Boolean(result.error);
 
-  const handleExport = () => {
-    const blob = new Blob([review], { type: "text/markdown" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = "literature_review.md"; a.click();
-    URL.revokeObjectURL(url);
-  };
+  const files = (result.files || []) as { fileName: string; url?: string; displayName?: string }[];
 
   return (
     <div className="my-2">
@@ -400,13 +371,14 @@ function ReviewCard({ result }: { result: Record<string, unknown> }) {
       {expanded && !isError && review && (
         <div className="mt-1.5 space-y-2 pl-1">
           <div className="flex justify-end">
-            <button onClick={handleExport}
-              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface-hover hover:text-fg"
-              title="导出 Markdown"
-            >
-              <Download className="h-3.5 w-3.5" />
-              导出
-            </button>
+              {files.map((file) => (
+                <button key={file.fileName} onClick={() => void downloadProtectedFile(file.url || `/files/${file.fileName}`, file.fileName)}
+                  className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface-hover hover:text-fg"
+                  title={`下载 ${file.displayName || file.fileName}`}>
+                  <Download className="h-3.5 w-3.5" />
+                  {file.displayName || file.fileName}
+                </button>
+              ))}
           </div>
           <div className="max-h-[520px] overflow-y-auto rounded-xl border border-border-light bg-surface p-4">
             <div className="chat-prose text-sm leading-relaxed text-fg-secondary">
@@ -438,7 +410,7 @@ const SUMMARY_FIELDS: { key: string; label: { en: string; zh: string } }[] = [
 
 interface SectionOutlineEntry { title: string; page_start?: number; page_end?: number }
 interface DocumentInfo {
-  read_level?: string; pdf_fetched?: boolean; parse_status?: string; parser_backend?: string;
+  read_level?: string; document_ready?: boolean; parse_status?: string; parser_backend?: string;
   page_count?: number; text_chars?: number; section_count?: number;
   is_scanned?: boolean; ocr_status?: string; ocr_chars?: number;
   element_count?: number; vision_understood_count?: number;
@@ -475,12 +447,9 @@ function DeepReadCard({ result }: { result: Record<string, unknown> }) {
   const failures = (result.failures || []) as { paper_id: string; title: string; reason: string }[];
   const isError = Boolean(result.error);
   const [expanded, setExpanded] = useState(summaries.length + attachments.length <= 3);
-  const fullCount = summaries.filter(([, s]) =>
-    typeof s.full_text === "string" && s.full_text.trim().length > 0
-  ).length;
   const metaParts = [
     summaries.length
-      ? `${summaries.length} 篇论文（${fullCount} 全文 · ${summaries.length - fullCount} 摘要）`
+      ? `${summaries.length} 个上传文档摘要`
       : "",
     attachments.length ? `${attachments.length} 个附件` : "",
     failures.length ? `失败 ${failures.length}` : "",
@@ -554,10 +523,7 @@ function DeepReadPaperEntry({ pid, summary, lang }: { pid: string; summary: Deep
   const title = summary.title || pid;
   const fieldCount = fields.length;
   const elemCount = elements.length;
-  const isFullText = typeof summary.full_text === "string" && summary.full_text.trim().length > 0;
-  const levelLabel = isFullText
-    ? (lang === "zh" ? "全文级" : "full text")
-    : (lang === "zh" ? "摘要级" : "abstract");
+  const levelLabel = lang === "zh" ? "上传全文级" : "uploaded full text";
   const fieldLabel = fieldCount
     ? `${fieldCount} ${lang === "zh" ? "字段" : "fields"}`
     : (lang === "zh" ? "无字段" : "no fields");
@@ -575,7 +541,7 @@ function DeepReadPaperEntry({ pid, summary, lang }: { pid: string; summary: Deep
         className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-surface-hover/60">
         <BookOpen className="h-3.5 w-3.5 shrink-0 text-accent" />
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-fg">{title}</span>
-        <span className={`shrink-0 text-[11px] ${isFullText ? "text-success" : "text-muted"}`}>
+        <span className="shrink-0 text-[11px] text-success">
           {preview}
         </span>
         {elemCount > 0 && (
@@ -590,7 +556,7 @@ function DeepReadPaperEntry({ pid, summary, lang }: { pid: string; summary: Deep
           {Object.keys(info).length > 0 && (
             <div className="rounded-lg bg-surface-hover/40 p-2 text-[11px] text-muted">
               <div className="flex flex-wrap gap-x-3 gap-y-1">
-                <span>{info.pdf_fetched ? (lang === "zh" ? "PDF 已获取" : "PDF fetched") : (lang === "zh" ? "未获取 PDF" : "PDF not fetched")}</span>
+                <span>{info.document_ready ? (lang === "zh" ? "文档已解析" : "Document parsed") : (lang === "zh" ? "尚未完成解析" : "Not fully parsed")}</span>
                 {info.parse_status && <span>{lang === "zh" ? "解析状态" : "Parse"}: {info.parse_status}</span>}
                 {info.parser_backend && <span>{lang === "zh" ? "解析器" : "Parser"}: {info.parser_backend}</span>}
                 {(info.page_count || 0) > 0 && <span>{info.page_count} {lang === "zh" ? "页" : "pages"}</span>}
@@ -928,14 +894,14 @@ function BibImportCard({ result }: { result: Record<string, unknown> }) {
 
 interface ExhibitCaption { num: string; type: string; caption: string; page?: string; section?: string }
 interface ExhibitGroup { paper_id: string; title?: string; captions: ExhibitCaption[] }
-interface ExhibitMissing { id: string; title?: string }
+interface ExhibitMissing { id: string; title?: string; reason?: string }
 
 function ExhibitIndexCard({ result }: { result: Record<string, unknown> }) {
   const setComposerDraft = useUIStore((st) => st.setComposerDraft);
   const [expanded, setExpanded] = useState(true);
   const isError = Boolean(result.error);
   const groups = (result.exhibits || []) as ExhibitGroup[];
-  const missing = (result.missing_fulltext || []) as ExhibitMissing[];
+  const missing = (result.missing_attachments || []) as ExhibitMissing[];
   const total = groups.reduce((n, g) => n + g.captions.length, 0);
   const meta = isError ? undefined : `${total} 个图表 · ${groups.length} 篇`;
 
@@ -975,7 +941,7 @@ function ExhibitIndexCard({ result }: { result: Record<string, unknown> }) {
           {missing.length > 0 && (
             <div className="rounded-lg border border-border-light/60 bg-surface/40 p-2.5">
               <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted">
-                {missing.length} 篇无全文
+                {missing.length} 个附件未解析
               </div>
               <ul className="space-y-0.5">
                 {missing.slice(0, 8).map((m) => (
@@ -1035,7 +1001,7 @@ function ExplainElementCard({ result }: { result: Record<string, unknown> }) {
   if (!isError && !element) {
     return (
       <div className="my-2 rounded-xl border border-warning/30 bg-warning/5 p-3 text-xs text-fg-secondary">
-        未找到该元素。可先 exhibit_index 列出可用图表，或 deep_read 获取全文与图表。
+        未找到该元素。请先上传论文文件并使用 exhibit_index 列出可用图表。
       </div>
     );
   }
@@ -1240,7 +1206,7 @@ function ToolCard({ name, result }: { name: string; result?: unknown }) {
   if (toolName === "export_manuscript" && (r.files || r.error)) return <ReportCard result={r} name="export_manuscript" />;
   if (toolName === "integrity_sweep" && (r.report || r.error)) return <IntegritySweepCard result={r} />;
   if (toolName === "bib_import" && (r.report || r.entries || r.error)) return <BibImportCard result={r} />;
-  if (toolName === "exhibit_index" && (r.exhibits || r.missing_fulltext || r.error)) return <ExhibitIndexCard result={r} />;
+  if (toolName === "exhibit_index" && (r.exhibits || r.missing_attachments || r.error)) return <ExhibitIndexCard result={r} />;
   if (toolName === "explain_element" && (r.element !== undefined || r.error)) return <ExplainElementCard result={r} />;
   if (toolName === "field_census" && (r.yearly || r.top_authors || r.error)) return <FieldCensusCard result={r} />;
 

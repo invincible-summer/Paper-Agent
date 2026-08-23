@@ -22,7 +22,6 @@ class ResearchState(TypedDict, total=False):
     papers: list[Paper]
     reference_papers: list[Paper]       # local-ranked but not LLM-scored (DESIGN D-028)
     reserve_papers: list[Paper]         # search layer: X papers beyond core (DESIGN D-035)
-    pdf_paths: dict[str, str]     # paper_id -> local path
 
     # --- analysis phase ---
     paper_summaries: dict[str, PaperSummary]

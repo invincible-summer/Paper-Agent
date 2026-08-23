@@ -69,9 +69,6 @@ class ApiStoragePolicy:
     upload_ttl_seconds: int = 7 * 24 * 60 * 60
     max_upload_bytes: int = DEFAULT_API_UPLOAD_BYTES
     export_ttl_seconds: int = 24 * 60 * 60
-    # Deep-read OA PDFs are a rebuildable cache: scheduled cleanup deletes them
-    # after 3 days; the next deep_read downloads and extracts them again.
-    public_pdf_ttl_seconds: int = 3 * 24 * 60 * 60
     cache_ttl_seconds: int = 90 * 24 * 60 * 60
     trace_ttl_seconds: int = 7 * 24 * 60 * 60
     cleanup_interval_minutes: int = 60
@@ -98,7 +95,6 @@ POLICY_PRESETS: dict[str, dict[str, Any]] = {
         "session_ttl_seconds": 2 * 60 * 60,
         "upload_ttl_seconds": 2 * 60 * 60,
         "export_ttl_seconds": 2 * 60 * 60,
-        "public_pdf_ttl_seconds": 3 * 24 * 60 * 60,
         "cache_ttl_seconds": 30 * 24 * 60 * 60,
         "trace_mode": "off",
     },
@@ -108,7 +104,6 @@ POLICY_PRESETS: dict[str, dict[str, Any]] = {
         "session_ttl_seconds": 30 * 24 * 60 * 60,
         "upload_ttl_seconds": 30 * 24 * 60 * 60,
         "export_ttl_seconds": 7 * 24 * 60 * 60,
-        "public_pdf_ttl_seconds": 3 * 24 * 60 * 60,
         "cache_ttl_seconds": 180 * 24 * 60 * 60,
         "trace_mode": "metadata",
         "trace_ttl_seconds": 7 * 24 * 60 * 60,
@@ -124,7 +119,7 @@ _POLICY_ENUMS = {
 }
 _TTL_COLUMNS = {
     "session_ttl_seconds", "upload_ttl_seconds", "export_ttl_seconds",
-    "public_pdf_ttl_seconds", "cache_ttl_seconds", "trace_ttl_seconds",
+    "cache_ttl_seconds", "trace_ttl_seconds",
 }
 
 _SCHEMA = """
@@ -142,7 +137,7 @@ CREATE TABLE IF NOT EXISTS api_storage_policy (
     max_upload_bytes INTEGER NOT NULL DEFAULT 209715200
         CHECK (max_upload_bytes >= 1048576 AND max_upload_bytes <= 209715200),
     export_ttl_seconds INTEGER NOT NULL CHECK (export_ttl_seconds > 0),
-    public_pdf_ttl_seconds INTEGER NOT NULL CHECK (public_pdf_ttl_seconds > 0),
+    public_pdf_ttl_seconds INTEGER NOT NULL DEFAULT 259200 CHECK (public_pdf_ttl_seconds > 0),
     cache_ttl_seconds INTEGER NOT NULL CHECK (cache_ttl_seconds > 0),
     trace_ttl_seconds INTEGER NOT NULL CHECK (trace_ttl_seconds > 0),
     cleanup_interval_minutes INTEGER NOT NULL CHECK (cleanup_interval_minutes > 0),
@@ -408,22 +403,12 @@ class ApiStorageStore:
                     )
                 conn.execute("DROP TABLE api_display_policy_pre_v9")
             if previous_version < 4:
-                # v4: public PDF retention is shortened to 3 days. Shrink any
-                # existing rows that were written with the old 30-day policy;
-                # expired files are removed by scheduled cleanup and the next
-                # deep_read automatically downloads + extracts them again.
+                # Legacy public-paper PDF retention is no longer a runtime
+                # policy.  The retirement migration removes active artifacts;
+                # keep only this harmless schema compatibility checkpoint.
                 conn.execute(
-                    "UPDATE api_artifacts SET expires_at=created_at + ? "
-                    "WHERE category='public_pdf' AND status='active' "
-                    "AND expires_at IS NOT NULL",
-                    (3 * 24 * 60 * 60,),
-                )
-                conn.execute(
-                    "UPDATE api_storage_policy SET public_pdf_ttl_seconds=?, "
-                    "updated_by='migration-v4', updated_at=?, version=version+1 "
-                    "WHERE public_pdf_ttl_seconds IN (?, ?, ?)",
-                    (3 * 24 * 60 * 60, now,
-                     7 * 24 * 60 * 60, 30 * 24 * 60 * 60, 90 * 24 * 60 * 60),
+                    "UPDATE api_storage_policy SET updated_by='migration-v4', "
+                    "updated_at=?, version=version+1 WHERE id=1", (now,)
                 )
             conn.execute(
                 "INSERT INTO api_schema_meta(id, schema_version, applied_at) VALUES(1, ?, ?) "

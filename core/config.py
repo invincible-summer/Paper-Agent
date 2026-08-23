@@ -61,10 +61,6 @@ class SearchConfig:
     openaire_client_secret: str = ""
     search_deadline_seconds: float = 30.0            # 多源检索总时限，超时返回部分结果
     per_source_timeout_seconds: float = 12.0         # 单条渠道查询时限
-    verify_fulltext: bool = True                     # search_papers 探测 OA PDF 文件头
-    fulltext_verify_timeout_seconds: float = 30.0    # 全文探测总时限（超时余下=unknown）
-    force_fulltext_probe: bool = True                # 时间不足时仍为探测预留预算（管理员可关）
-    fulltext_status_ttl_days: int = 30               # 已验证状态的可复用天数
     sources: dict = field(default_factory=lambda: {
         "openalex": True,
         "semantic_scholar": True,
@@ -171,11 +167,6 @@ def load_settings() -> Settings:
             "search_deadline_seconds", s.search.search_deadline_seconds),
         per_source_timeout_seconds=search_raw.get(
             "per_source_timeout_seconds", s.search.per_source_timeout_seconds),
-        verify_fulltext=search_raw.get("verify_fulltext", s.search.verify_fulltext),
-        fulltext_verify_timeout_seconds=search_raw.get(
-            "fulltext_verify_timeout_seconds", s.search.fulltext_verify_timeout_seconds),
-        fulltext_status_ttl_days=search_raw.get(
-            "fulltext_status_ttl_days", s.search.fulltext_status_ttl_days),
         sources=search_raw.get("sources", s.search.sources),
     )
 

@@ -65,7 +65,7 @@ def _patch_langchain_reasoning() -> None:
 _patch_langchain_reasoning()
 
 
-async def ainvoke_utility(llm: Any, messages: list[BaseMessage]) -> Any:
+async def ainvoke_utility(llm: Any, messages: list[BaseMessage], **call_kwargs: Any) -> Any:
     """ainvoke with the thinking phase disabled; plain-call fallback on 400.
 
     langchain-openai forwards per-call kwargs into the request payload, and
@@ -74,11 +74,11 @@ async def ainvoke_utility(llm: Any, messages: list[BaseMessage]) -> Any:
     thinking parameter it answers 400, in which case we retry without it.
     """
     try:
-        return await llm.ainvoke(messages, extra_body=_UTILITY_EXTRA_BODY)
+        return await llm.ainvoke(messages, extra_body=_UTILITY_EXTRA_BODY, **call_kwargs)
     except Exception as e:  # noqa: BLE001
         msg = str(e)
         if "400" in msg or "thinking" in msg or "extra_body" in msg:
-            return await llm.ainvoke(messages)
+            return await llm.ainvoke(messages, **call_kwargs)
         raise
 
 

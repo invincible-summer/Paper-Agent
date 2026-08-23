@@ -35,11 +35,11 @@ def test_validate_choices_rejected():
     assert err_result.error_code == ErrorCode.VALIDATION_ERROR
 
 
-def test_validate_deep_read_focus_and_paper_ids():
+def test_validate_deep_read_focus_and_upload_schema():
     validated, err_result = validate_args("deep_read", {"focus": "实验数据集与指标数值"})
     assert err_result is None
     assert validated["focus"] == "实验数据集与指标数值"
-    assert validated["paper_ids"] == []
+    assert validated["attachment_ids"] == []
     validated, _ = validate_args("deep_read", {})
     assert validated["focus"] == ""
 
@@ -90,21 +90,22 @@ def test_session_context_lists_core_and_candidate_ids():
         candidates=[Paper(id="doi:10.1145/3661821", title="Candidate Survey")],
     )
     text = session.context_summary()
-    assert "doi:10.1/c | 全文待验证 | Core Paper" in text
-    assert "doi:10.1145/3661821 | 全文待验证 | Candidate Survey" in text
+    assert "doi:10.1/c | Core Paper" in text
+    assert "doi:10.1145/3661821 | Candidate Survey" in text
     assert "不要为这些论文再次 search_papers" in text
     assert "禁止再次 search_papers" in text
 
 
-def test_search_papers_result_carries_verified_fulltext_statuses(monkeypatch):
-    """The search tool must expose per-paper fulltext_status for the frontend
-    and the LLM, so '哪些论文能看全文' is answerable without deep_read-all."""
+def test_search_papers_reports_valid_abstracts_and_hides_legacy_fulltext_fields(monkeypatch):
     async def fake_search(state, progress_callback=None):
         return {
-            "papers": [Paper(id="P1", title="OA paper",
-                             fulltext_status="available")],
-            "candidates": [Paper(id="P2", title="Paywalled",
-                                 fulltext_status="unavailable")],
+            "papers": [Paper(
+                id="P1", title="Has abstract", abstract="usable evidence",
+                fulltext_status="available", pdf_url="https://legacy.invalid/p.pdf",
+            )],
+            "candidates": [Paper(
+                id="P2", title="No abstract", fulltext_status="unavailable",
+            )],
             "sub_directions": [], "search_queries": [],
             "fulltext_statuses": {"P1": "available", "P2": "unavailable"},
         }
@@ -114,16 +115,16 @@ def test_search_papers_result_carries_verified_fulltext_statuses(monkeypatch):
     result = asyncio.run(ti._tool_search_papers({"topic": "x"}, session, None))
 
     assert not result.is_error
-    assert result.data["papers"][0]["fulltext_status"] == "available"
-    assert result.data["candidates"][0]["fulltext_status"] == "unavailable"
-    assert "1 篇已探测到可访问的 OA PDF" in result.text
-    assert "1 篇已探测为不可获取" in result.text
-    assert session.papers[0].fulltext_status == "available"
+    assert result.data["valid_abstract_count"] == 1
+    assert result.data["skipped_no_abstract_count"] == 1
+    assert "1 篇具有有效摘要" in result.text
+    assert "1 篇缺少有效摘要" in result.text
+    assert "fulltext_status" not in result.data["papers"][0]
+    assert "pdf_url" not in result.data["papers"][0]
 
 
 def test_search_papers_rejects_relocating_an_owned_paper(monkeypatch):
-    """A search whose topic is a session paper title/DOI must fail fast and
-    direct the model to deep_read/ask_papers with the existing id."""
+    """An owned paper is answered from its abstract or a user upload."""
     called = {"n": 0}
 
     async def forbidden_search(state, progress_callback=None):
@@ -141,7 +142,8 @@ def test_search_papers_rejects_relocating_an_owned_paper(monkeypatch):
     }, session, None))
     assert result.is_error
     assert result.error_code == "VALIDATION_ERROR"
-    assert "deep_read" in result.error["message"]
+    assert "ask_papers" in result.error["message"]
+    assert "上传原文" in result.error["message"]
     assert called["n"] == 0
 
     # DOI alias form is caught by paper_by_id before search_agent runs too.

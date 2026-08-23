@@ -79,7 +79,6 @@ def parse_pubmed_xml(xml: str) -> list[Paper]:
             doi=doi,
             source="pubmed",
             abstract=abstract,
-            pdf_url=None,
             urls={
                 "pubmed": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
             } if pmid else {},
@@ -131,7 +130,6 @@ def parse_pubmed_summary(payload: dict) -> list[Paper]:
             doi=doi,
             source="pubmed",
             abstract="",
-            pdf_url=None,
             urls={
                 "pubmed": f"https://pubmed.ncbi.nlm.nih.gov/{uid}/"
             },

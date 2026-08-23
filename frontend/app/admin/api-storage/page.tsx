@@ -17,9 +17,9 @@ import {
 import { useAuthStore } from "@/stores/auth";
 
 const PRESETS: Record<string, Partial<ApiStoragePolicy>> = {
-  privacy: { preset: "privacy", session_ttl_seconds: 7200, upload_ttl_seconds: 7200, max_upload_bytes: 209715200, export_ttl_seconds: 7200, public_pdf_ttl_seconds: 259200, cache_ttl_seconds: 2592000, trace_mode: "off" },
-  balanced: { preset: "balanced", session_ttl_seconds: 604800, upload_ttl_seconds: 604800, max_upload_bytes: 209715200, export_ttl_seconds: 86400, public_pdf_ttl_seconds: 259200, cache_ttl_seconds: 7776000, trace_mode: "off" },
-  performance: { preset: "performance", session_ttl_seconds: 2592000, upload_ttl_seconds: 2592000, max_upload_bytes: 209715200, export_ttl_seconds: 604800, public_pdf_ttl_seconds: 259200, cache_ttl_seconds: 15552000, trace_mode: "metadata", trace_ttl_seconds: 604800 },
+  privacy: { preset: "privacy", session_ttl_seconds: 7200, upload_ttl_seconds: 7200, max_upload_bytes: 209715200, export_ttl_seconds: 7200, cache_ttl_seconds: 2592000, trace_mode: "off" },
+  balanced: { preset: "balanced", session_ttl_seconds: 604800, upload_ttl_seconds: 604800, max_upload_bytes: 209715200, export_ttl_seconds: 86400, cache_ttl_seconds: 7776000, trace_mode: "off" },
+  performance: { preset: "performance", session_ttl_seconds: 2592000, upload_ttl_seconds: 2592000, max_upload_bytes: 209715200, export_ttl_seconds: 604800, cache_ttl_seconds: 15552000, trace_mode: "metadata", trace_ttl_seconds: 604800 },
 };
 
 const PRESET_NAMES: Record<string, string> = {
@@ -30,7 +30,6 @@ const TTL_FIELDS = [
   ["session_ttl_seconds", "会话 Checkpoint"],
   ["upload_ttl_seconds", "私有上传"],
   ["export_ttl_seconds", "导出"],
-  ["public_pdf_ttl_seconds", "公共 PDF"],
   ["cache_ttl_seconds", "语义/视觉缓存"],
 ] as const;
 

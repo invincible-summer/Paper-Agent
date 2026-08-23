@@ -32,19 +32,6 @@ CREATE TABLE IF NOT EXISTS papers (
     urls TEXT
 );
 
--- Verified OA full-text availability (search-time PDF probe + deep_read
--- outcome cache). A URL-looking pdf_url is explicitly NOT stored as
--- ``available``; only a live-PDF probe, a local PDF, or a deep_read full
--- summary may write ``available`` here.
-CREATE TABLE IF NOT EXISTS fulltext_status (
-    paper_id TEXT PRIMARY KEY,
-    status TEXT NOT NULL,             -- available | unavailable | unknown
-    evidence TEXT,                    -- oa_download_verified / parse_degraded / no_oa_url ...
-    pdf_path TEXT,
-    candidate_url TEXT,
-    checked_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS error_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     paper_id TEXT,
@@ -143,6 +130,8 @@ class Database:
                     f"ALTER TABLE papers ADD COLUMN {name} {declaration}"
                 )
         now = datetime.datetime.utcnow().isoformat(timespec="seconds")
+        # Network-paper availability/status cache is retired; never recreate it.
+        self.conn.execute("DROP TABLE IF EXISTS fulltext_status")
         # Backfill existing rows so first_seen/last_seen are never null.
         self.conn.execute(
             "UPDATE papers SET first_seen=COALESCE(first_seen, ?), "
@@ -175,9 +164,9 @@ class Database:
                 paper.abstract_source,
                 paper.abstract_policy_status,
                 paper.abstract_policy_reason,
-                paper.pdf_url,
-                paper.pdf_source,
-                paper.pdf_path,
+                None,
+                None,
+                paper.pdf_path if paper.source == "upload" or paper.id.startswith("upload:") else None,
                 json.dumps(paper.keywords),
                 json.dumps(paper.urls),
             ),
@@ -233,50 +222,6 @@ class Database:
             "DELETE FROM summary_cache "
             "WHERE paper_id=? AND field_profile=? AND read_mode=?",
             (paper_id, field_profile, read_mode),
-        )
-        self.conn.commit()
-
-    # --- Verified full-text availability cache ---
-
-    def get_fulltext_statuses(self, paper_ids: list[str]) -> dict[str, dict]:
-        """Return persisted verification rows for a set of papers."""
-        if not paper_ids:
-            return {}
-        placeholders = ",".join("?" * len(paper_ids))
-        rows = self.conn.execute(
-            f"SELECT paper_id, status, evidence, pdf_path, candidate_url, checked_at "
-            f"FROM fulltext_status WHERE paper_id IN ({placeholders})",
-            paper_ids,
-        ).fetchall()
-        return {r["paper_id"]: dict(r) for r in rows}
-
-    def set_fulltext_status(
-        self, paper_id: str, status: str, *,
-        evidence: str = "", pdf_path: str = "", candidate_url: str = "",
-    ) -> None:
-        """Insert/replace one verification result (idempotent, safe to re-run)."""
-        import datetime
-        self.conn.execute(
-            "INSERT OR REPLACE INTO fulltext_status "
-            "(paper_id, status, evidence, pdf_path, candidate_url, checked_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (paper_id, status, evidence, pdf_path, candidate_url,
-             datetime.datetime.utcnow().isoformat(timespec="seconds")),
-        )
-        self.conn.commit()
-
-    def set_fulltext_statuses(self, rows: list[tuple[str, str, str, str, str]]) -> None:
-        """Bulk insert/replace of ``(paper_id, status, evidence, pdf_path, candidate_url)``."""
-        if not rows:
-            return
-        import datetime
-        now = datetime.datetime.utcnow().isoformat(timespec="seconds")
-        self.conn.executemany(
-            "INSERT OR REPLACE INTO fulltext_status "
-            "(paper_id, status, evidence, pdf_path, candidate_url, checked_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            [(pid, status, evidence, pdf_path, candidate_url, now)
-             for pid, status, evidence, pdf_path, candidate_url in rows],
         )
         self.conn.commit()
 
@@ -480,9 +425,7 @@ def _row_to_paper(row: sqlite3.Row) -> Paper:
         abstract_source=row["abstract_source"] or "",
         abstract_policy_status=row["abstract_policy_status"] or "available",
         abstract_policy_reason=row["abstract_policy_reason"] or "",
-        pdf_url=row["pdf_url"],
-        pdf_source=row["pdf_source"] or "",
-        pdf_path=row["pdf_path"],
+        pdf_path=(row["pdf_path"] if (row["source"] or "") == "upload" or str(row["id"]).startswith("upload:") else None),
         keywords=json.loads(row["keywords"]) if row["keywords"] else [],
         urls=json.loads(row["urls"]) if row["urls"] else {},
     )

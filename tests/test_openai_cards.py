@@ -45,12 +45,10 @@ def test_search_card_is_a_single_status_line():
         "status": "success", "tool": "search_papers",
         "papers": [
             {"title": "Paper A", "year": 2021, "citation_count": 5,
-             "fulltext_status": "available"},
-            {"title": "Paper B", "year": 2023, "citation_count": 0,
-             "fulltext_status": "unknown"},
+             "abstract": "abstract"},
+            {"title": "Paper B", "year": 2023, "citation_count": 0},
         ],
         "candidates": [{"title": "C"}] * 10,
-        "fulltext_core_available": 1, "fulltext_core_target": 8,
         "source_notices": ["PubMed/NLM 仅提供来源记录，不代表内容背书。"],
     }
     card = render_tool_card("search_papers", result)
@@ -64,33 +62,31 @@ def test_render_search_table_lists_all_papers_with_links():
         "status": "success", "tool": "search_papers",
         "papers": [
             {"title": "Paper A", "year": 2021, "citation_count": 5,
-             "fulltext_status": "available", "doi": "10.1234/a",
-             "pdf_url": "https://oa.example.com/a.pdf"},
+             "abstract": "usable", "doi": "10.1234/a"},
             {"title": "Paper B", "year": None, "citation_count": None,
-             "fulltext_status": "unknown", "urls": {"openalex": "https://openalex.org/w/1"}},
+             "urls": {"openalex": "https://openalex.org/w/1"}},
         ],
         "candidates": [
             {"title": "Cand | Pipe", "year": 2023, "citation_count": 0,
-             "fulltext_status": "unavailable"},
+             "abstract": "candidate abstract"},
         ],
     }
     table = render_search_table(result)
     assert table is not None
     lines = table.splitlines()
-    assert lines[0] == "| 分层 | 标题 | 年份 | 被引 | 全文 | 链接 |"
+    assert lines[0] == "| 分层 | 标题 | 年份 | 被引 | 摘要 | 链接 |"
     assert lines[1].startswith("| --- |")
     assert len(lines) == 5  # header + separator + every core and candidate row
-    assert ("| 核心 | Paper A | 2021 | 5 | [🟢](https://oa.example.com/a.pdf) "
-            "| [DOI](https://doi.org/10.1234/a) |") in lines
-    assert "| 核心 | Paper B | — | — | 🟡 | [来源](https://openalex.org/w/1) |" in lines
-    assert "| 候选 | Cand \\| Pipe | 2023 | 0 | ⚪ | — |" in lines
+    assert "| 核心 | Paper A | 2021 | 5 | 有 | [DOI](https://doi.org/10.1234/a) |" in lines
+    assert "| 核心 | Paper B | — | — | 无 | [来源](https://openalex.org/w/1) |" in lines
+    assert "| 候选 | Cand \\| Pipe | 2023 | 0 | 有 | — |" in lines
 
 
 def test_render_search_table_truncates_and_escapes_titles():
     result = {
         "status": "success", "tool": "search_papers",
         "papers": [{"title": "T" * 80, "year": 2020, "citation_count": 1,
-                    "fulltext_status": "available", "doi": "https://doi.org/10.1/x"}],
+                    "abstract": "a", "doi": "https://doi.org/10.1/x"}],
         "candidates": [],
     }
     table = render_search_table(result)
@@ -135,16 +131,13 @@ def test_reading_path_card_is_a_single_status_line():
 def test_deep_read_card_is_a_single_status_line():
     result = {
         "status": "success", "tool": "deep_read",
-        "full_text_paper_ids": ["a"], "abstract_fallback_papers": [{"paper_id": "b"}],
-        "summaries": {
-            "a": {"title": "Paper A", "research_problem": "如何高效压缩 KV 缓存",
-                  "methodology": "分层量化", "key_findings": "显存降低 40%"},
-            "b": {"title": "Paper B"},
-        },
+        "attachments": [
+            {"id": "a", "filename": "paper.pdf", "status": "ready"},
+            {"id": "b", "filename": "sheet.xlsx", "status": "deferred"},
+        ],
     }
     card = render_tool_card("deep_read", result)
-    assert card == "**📖 深度阅读 · 1 篇全文级 / 1 篇摘要级**"
-    assert "研究问题" not in card  # details no longer duplicated in the card
+    assert card == "**📖 上传文件深读 · 1/2 个已解析 / 1 个延期**"
 
 
 def test_explain_element_cards_by_kind():

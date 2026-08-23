@@ -1,7 +1,6 @@
-"""CORE search backend - world's largest aggregator of OA repository copies
-(core.ac.uk), 200M+ records. Free API key required (registration); the backend
-silently disables itself when CORE_API_KEY is not configured.
-downloadUrl is a CORE-hosted legal repository PDF.
+"""CORE metadata/abstract search backend.
+The backend silently disables itself when CORE_API_KEY or license confirmation
+is not configured; it never exposes repository PDF candidates.
 """
 from __future__ import annotations
 
@@ -48,7 +47,6 @@ def parse_results(data: dict) -> list[Paper]:
             language="en",
             citation_count=item.get("citationCount", 0) or 0,
             abstract=item.get("abstract") or "",
-            pdf_url=item.get("downloadUrl") or None,  # CORE-hosted OA PDF
             keywords=[],
             urls={"core": f"https://core.ac.uk/works/{work_id}"} if work_id else {},
         ))

@@ -13,7 +13,7 @@ API_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 
 FIELDS = (
     "paperId,title,abstract,year,venue,citationCount,authors,"
-    "externalIds,openAccessPdf,url"
+    "externalIds,url"
 )
 
 # S2 has strict rate limits: 3 concurrent, 1.5s min interval
@@ -67,8 +67,6 @@ class SemanticScholarBackend(SearchBackend):
             authors = [a.get("name", "") for a in item.get("authors", [])]
             year = item.get("year")
             doi = item.get("externalIds", {}).get("DOI")
-            pdf_info = item.get("openAccessPdf") or {}
-            pdf_url = pdf_info.get("url") if pdf_info else None
             first_author = authors[0] if authors else ""
 
             paper = Paper(
@@ -81,7 +79,6 @@ class SemanticScholarBackend(SearchBackend):
                 source=self.name,
                 citation_count=item.get("citationCount", 0),
                 abstract=item.get("abstract") or "",
-                pdf_url=pdf_url,
                 keywords=[],
                 urls={"semantic_scholar": item.get("url") or ""},
             )

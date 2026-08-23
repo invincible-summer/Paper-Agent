@@ -37,11 +37,9 @@ def _papers(n, prefix, start_year=2018):
             "year": start_year + i,
             "citation_count": [12000, 3000, 800, 90, 12, 3][i % 6],
             "cluster": i % 3,
-            "fulltext_status": ["available", "unknown", "unavailable"][i % 3],
             "layer": "core" if i % 4 else "candidate",
             "doi": f"10.1000/demo.{prefix}{i}",
             "urls": {"openalex": f"https://openalex.org/demo/{prefix}{i}"},
-            "pdf_url": f"https://demo.example.com/{prefix}{i}.pdf" if i % 3 == 0 else None,
         }
         for i in range(n)
     ]
@@ -70,7 +68,6 @@ SAMPLES: list[tuple[str, dict]] = [
     ("search_papers", {
         "status": "success", "tool": "search_papers",
         "papers": _papers(9, "p")[:8], "candidates": _papers(10, "c"),
-        "fulltext_core_available": 5, "fulltext_core_target": 8,
         "summary": "检索完成：核心集 8 篇，候选 10 篇。"}),
     ("research_map", {
         "status": "success", "tool": "research_map",
@@ -88,19 +85,16 @@ SAMPLES: list[tuple[str, dict]] = [
                   "role": "前沿", "reason": "当前多模态指令跟随的代表作"}]}),
     ("deep_read", {
         "status": "success", "tool": "deep_read",
-        "full_text_paper_ids": ["p0", "p3"],
-        "abstract_fallback_papers": [{"paper_id": "p7"}],
-        "summaries": {
-            "p0": {"title": "Attention Is All You Need",
-                   "research_problem": "RNN 序列建模无法并行，长距离依赖建模弱",
-                   "methodology": "纯自注意力 + 位置编码的编码器-解码器",
-                   "key_findings": "机器翻译 BLEU 提升，训练时间大幅缩短"},
-            "p3": {"title": "ViT", "research_problem": "CNN 归纳偏置是否必要",
-                   "methodology": "图像切分为 16x16 patch 序列输入标准 Transformer",
-                   "key_findings": "大数据预训练下超越 CNN"}}}),
+        "attachments": [
+            {"id": "upload-a", "filename": "用户上传论文.pdf",
+             "status": "ready", "element_count": 3},
+            {"id": "upload-b", "filename": "补充材料.docx",
+             "status": "text_only", "element_count": 0},
+        ],
+        "summary": "上传文件深读完成：2/2 个文件已纳入完整文本/结构化解析。"}),
     ("explain_element", {
         "status": "success", "tool": "explain_element",
-        "element": {"element_id": "p3::figure::2", "paper_id": "p3", "kind": "figure",
+        "element": {"element_id": "upload:upload-a::figure::2", "paper_id": "upload:upload-a", "kind": "figure",
                     "page": 5, "caption": "Figure 2: Overall architecture of ViT",
                     "understanding": {"description":
                                       "该图展示了 ViT 的整体流程：输入图像被切分为固定大小的 patch 序列，"

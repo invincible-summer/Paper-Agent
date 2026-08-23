@@ -3,7 +3,7 @@
 Keyed by (image_hash, task, prompt_version) — identical to the vision_cache
 table schema. The LRU front avoids hitting SQLite for the common case
 (re-analyzing the same image within one run); SQLite persists across runs so a
-second deep_read of the same paper costs zero VLM tokens. prompt_version is part
+second deep_read of the same uploaded document costs zero VLM tokens. prompt_version is part
 of the key, so a prompt bump cleanly invalidates stale entries.
 """
 

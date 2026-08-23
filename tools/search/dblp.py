@@ -33,7 +33,7 @@ def parse_results(data:dict)->list[Paper]:
         if url.startswith("db/"):url="https://dblp.org/rec/"+url[3:]
         out.append(Paper(id=generate_paper_id(title,authors[0] if authors else "",year,doi),title=title,
             authors=authors,year=year,venue=info.get("venue") or "",doi=doi,source="dblp",
-            abstract="",pdf_url=None,urls={"dblp":url} if url else {}))
+            abstract="",urls={"dblp":url} if url else {}))
     return out
 
 class DblpBackend(SearchBackend):

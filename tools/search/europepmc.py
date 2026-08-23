@@ -1,7 +1,4 @@
-"""Europe PMC search backend - free REST API, biomedicine / life sciences + preprints
-(DESIGN D-083). Covers PubMed content (via pmid) plus preprints and OA full text.
-Returns abstracts + OA PDF links. No API key needed.
-"""
+"""Europe PMC metadata and abstract search backend."""
 from __future__ import annotations
 
 import httpx
@@ -66,7 +63,6 @@ class EuropePmcBackend(SearchBackend):
             pmid = item.get("pmid")
             citation_count = item.get("citedByCount", 0) or 0
             abstract = item.get("abstractText", "") or ""
-            pdf_url = _extract_pdf_url(item)
             urls = {}
             src = item.get("source") or "MED"
             if item.get("id"):
@@ -85,26 +81,8 @@ class EuropePmcBackend(SearchBackend):
                 language="en",
                 citation_count=citation_count,
                 abstract=abstract,
-                pdf_url=pdf_url,
                 keywords=[],
                 urls=urls,
             )
             papers.append(paper)
         return papers
-
-
-def _extract_pdf_url(item: dict) -> str | None:
-    """OA PDF links only — subscription/paywalled links are never returned,
-    so the fetcher can never follow a non-OA publisher URL."""
-    urls = (item.get("fullTextUrlList") or {}).get("fullTextUrl", []) or []
-    oa_pdf = None
-    for link in urls:
-        style = (link.get("documentStyle") or "").lower()
-        if style != "pdf":
-            continue
-        avail = (link.get("availability") or "").lower()
-        if "open access" in avail or (link.get("availabilityCode") or "") == "OA":
-            return link.get("url")
-        if "oa" in avail and not oa_pdf:
-            oa_pdf = link.get("url")
-    return oa_pdf

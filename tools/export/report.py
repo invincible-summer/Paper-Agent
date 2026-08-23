@@ -636,7 +636,12 @@ def render_pretty_research_map_markdown(session: ChatSession) -> str:
 def render_review_report(session: ChatSession) -> str:
     """文献综述 as a standalone markdown document."""
     title = session.topic or "未命名主题"
-    return f"# 文献综述：{title}\n\n{session.literature_review}\n"
+    review = (session.literature_review or "").strip()
+    # The new writer already emits the fixed export-ready headings.  Do not
+    # prepend a second shallow title; legacy short reviews still get a title.
+    if review.startswith("# "):
+        return review + "\n"
+    return f"# 文献综述：{title}\n\n{review}\n"
 
 
 def write_reports(
@@ -681,9 +686,21 @@ def write_reports(
             if html_doc:
                 renders.append(("map_html", f"research_graph_{stamp}_{uuid.uuid4().hex[:6]}.html",
                                 html_doc, "text", "text/html"))
+    review_exports: list[dict] = []
     if "write_review" in kinds and session.literature_review:
-        renders.append(("review", f"literature_review_{stamp}_{uuid.uuid4().hex[:6]}.md",
-                        render_review_report(session), "text", "text/markdown"))
+        # Reuse the writing exporter so the two channels share the same
+        # Unicode-safe naming, ownership checks and Markdown→DOCX parser.
+        from tools.writing.manuscript_export import export_manuscript
+        review_title = f"文献综述_{session.topic or '未命名主题'}"
+        review_content = render_review_report(session)
+        for fmt in ("md", "docx"):
+            review_exports.append(export_manuscript(
+                review_title, review_content, fmt,
+                storage_context=api_context,
+                session_id=session.session_id,
+                owner_id=getattr(session, "owner_id", ""),
+                include_title=False,
+            ))
 
     for _kind, filename, text, file_type, mime_type in renders:
         try:
@@ -710,4 +727,5 @@ def write_reports(
                             "path": str(path), "size": path.stat().st_size})
         except OSError:
             continue
+    out.extend(review_exports)
     return out

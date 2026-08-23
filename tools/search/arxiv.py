@@ -47,16 +47,15 @@ def _parse_feed(xml: str) -> list[Paper]:
         if not title: continue
         authors = [a.get("name", "") for a in entry.get("authors", []) if a.get("name")]
         year = int(entry["published"][:4]) if entry.get("published", "")[:4].isdigit() else None
-        doi = None; pdf_url = None
+        doi = None
         for link in entry.get("links", []):
             href = link.get("href", "")
             if "doi.org" in href: doi = href.split("doi.org/", 1)[-1]
-            if link.get("title") == "pdf": pdf_url = href
         first_author = authors[0] if authors else ""
         papers.append(Paper(
             id=generate_paper_id(title, first_author, year, doi), title=title, authors=authors,
             year=year, venue="arXiv", doi=doi, source="arxiv", language="en",
-            abstract=entry.get("summary", "").strip().replace("\n", " "), pdf_url=pdf_url,
+            abstract=entry.get("summary", "").strip().replace("\n", " "),
             keywords=[t.get("term", "") for t in entry.get("tags", [])[:5] if t.get("term")],
             urls={"arxiv": entry.get("id", "")},
         ))

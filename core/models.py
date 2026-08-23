@@ -35,6 +35,10 @@ class Paper:
     abstract_source: str = ""
     abstract_policy_status: str = "available"  # available | disabled
     abstract_policy_reason: str = ""
+    # ``pdf_path`` is retained only for a user-uploaded local document while
+    # it is being parsed; network-paper PDF URLs/paths are not model fields.
+    # The following two attributes are migration-only constructor tolerance;
+    # they are never serialized or read by runtime behavior.
     pdf_url: str | None = None
     pdf_source: str = ""
     pdf_path: str | None = None
@@ -43,7 +47,7 @@ class Paper:
     relevance_score: float = -1.0     # LLM relevance score (-1 = not scored)
     layer: str = "reference"           # reference / search / core (DESIGN D-035)
     llm_reasoning: str = ""            # LLM scoring rationale (Pro mode, DESIGN D-035)
-    fulltext_status: str = "unknown"   # unknown | available | unavailable（已验证的 OA PDF 可获取状态）
+    fulltext_status: str = "unknown"   # legacy constructor/read compatibility only
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -60,15 +64,11 @@ class Paper:
             "abstract_source": self.abstract_source,
             "abstract_policy_status": self.abstract_policy_status,
             "abstract_policy_reason": self.abstract_policy_reason,
-            "pdf_url": self.pdf_url,
-            "pdf_source": self.pdf_source,
-            "pdf_path": self.pdf_path,
             "keywords": self.keywords,
             "urls": self.urls,
             "relevance_score": self.relevance_score,
             "layer": self.layer,
             "llm_reasoning": self.llm_reasoning,
-            "fulltext_status": self.fulltext_status,
         }
 
     @classmethod
@@ -77,8 +77,7 @@ class Paper:
         for k in ["id", "title", "authors", "year", "venue", "doi",
                   "source", "language", "citation_count", "abstract",
                   "abstract_source", "abstract_policy_status",
-                  "abstract_policy_reason", "pdf_url", "pdf_source",
-                  "pdf_path", "keywords", "urls"]:
+                  "abstract_policy_reason", "pdf_url", "pdf_source", "pdf_path", "keywords", "urls"]:
             v = d.get(k)
             if v is not None:
                 kwargs[k] = v
@@ -86,7 +85,13 @@ class Paper:
         p.relevance_score = d.get("relevance_score", -1.0)
         p.layer = d.get("layer", "reference")
         p.llm_reasoning = d.get("llm_reasoning", "")
-        p.fulltext_status = d.get("fulltext_status", "unknown")
+        # Legacy network PDF/status fields are deliberately ignored.  An
+        # upload path may be supplied only for the upload namespace.
+        if not (p.source == "upload" or p.id.startswith("upload:")):
+            p.pdf_url = None
+            p.pdf_source = ""
+            p.pdf_path = None
+        p.fulltext_status = "unknown"
         return p
 
 

@@ -6,10 +6,9 @@ Covers BOTH sides of the product:
   * OpenAI-compatible credentials (`agent_api_keys`) — API sessions, private
     uploads/exports and their checkpoint blobs, keyed by credential_id.
 
-Shared/rebuildable caches are deliberately NOT attributed to an account:
-web `data/pdfs`/`data/assets` and API `public_pdf` are content-addressed and
-shared; admin can clean them globally with ``cleanup_web_paper_cache`` or the
-API storage page respectively.
+Shared/rebuildable caches are deliberately NOT attributed to an account. Legacy
+network-paper cache retirement is handled by ``core.remote_fulltext_retirement``
+and its CLI, not by account deletion.
 """
 from __future__ import annotations
 
@@ -122,21 +121,6 @@ def _trace_file(project_root: Path, trace_id: str) -> Path:
     return project_root / "history_record" / "trace" / f"trace_{trace_id}.jsonl"
 
 
-def _pdf_candidates(project_root: Path, pdf_path: str) -> list[Path]:
-    if not pdf_path:
-        return []
-    raw = Path(pdf_path)
-    if raw.is_absolute():
-        return [raw] if raw.is_file() else []
-    bases = (project_root, project_root / "backend")
-    out = []
-    for base in bases:
-        fp = base / raw
-        if fp.is_file() and fp not in out:
-            out.append(fp)
-    return out
-
-
 def _paper_ids(data: dict) -> int:
     return len(data.get("papers") or []) + len(data.get("candidates") or [])
 
@@ -153,7 +137,6 @@ def _web_account_rows(project_root: Path) -> dict[str, dict]:
             "paper_count": 0, "attachment_ids": set(), "upload_count": 0,
             "upload_bytes": 0, "trace_ids": set(), "trace_count": 0,
             "trace_bytes": 0, "session_ids": set(),
-            "pdf_refs": set(), "pdf_ref_bytes": 0,
         })
         row["history_count"] += 1
         try:
@@ -173,9 +156,6 @@ def _web_account_rows(project_root: Path) -> dict[str, dict]:
             tid = str(tid or "")
             if tid:
                 row["trace_ids"].add(tid)
-        for paper in list(data.get("papers") or []) + list(data.get("candidates") or []):
-            if isinstance(paper, dict) and paper.get("pdf_path"):
-                row["pdf_refs"].add(str(paper["pdf_path"]))
 
     for row in rows.values():
         for aid in row["attachment_ids"]:
@@ -188,16 +168,6 @@ def _web_account_rows(project_root: Path) -> dict[str, dict]:
                 try:
                     row["trace_count"] += 1
                     row["trace_bytes"] += tf.stat().st_size
-                except OSError:
-                    pass
-        seen: set[Path] = set()
-        for rel in row["pdf_refs"]:
-            for fp in _pdf_candidates(project_root, str(rel)):
-                if fp in seen:
-                    continue
-                seen.add(fp)
-                try:
-                    row["pdf_ref_bytes"] += fp.stat().st_size
                 except OSError:
                     pass
     return rows
@@ -245,8 +215,7 @@ def _api_account_rows(api_root: Path) -> dict[str, dict]:
             "history_count": 0, "history_bytes": 0, "history_files": [],
             "paper_count": 0, "attachment_ids": set(), "upload_count": 0,
             "upload_bytes": 0, "trace_ids": set(), "trace_count": 0,
-            "trace_bytes": 0, "session_ids": set(), "pdf_refs": set(),
-            "pdf_ref_bytes": 0,
+            "trace_bytes": 0, "session_ids": set(),
             "api_sessions": 0, "api_checkpoint_bytes": 0,
             "api_private_artifacts": 0, "api_private_bytes": 0,
         }
@@ -288,8 +257,7 @@ def list_accounts_data(project_root: str | Path | None = None,
                 "history_count": 0, "history_bytes": 0, "history_files": [],
                 "paper_count": 0, "attachment_ids": set(), "upload_count": 0,
                 "upload_bytes": 0, "trace_ids": set(), "trace_count": 0,
-                "trace_bytes": 0, "session_ids": set(), "pdf_refs": set(),
-                "pdf_ref_bytes": 0,
+                "trace_bytes": 0, "session_ids": set(),
             }
         else:
             user_map = {str(u["id"]): u for u in list_users()}
@@ -305,7 +273,6 @@ def list_accounts_data(project_root: str | Path | None = None,
         item["attachment_count"] = len(item.pop("attachment_ids"))
         item["trace_id_count"] = len(item.pop("trace_ids"))
         item["session_count"] = len(item.pop("session_ids"))
-        item["pdf_ref_count"] = len(item.pop("pdf_refs"))
     return {
         "items": items,
         "totals": {
@@ -463,43 +430,3 @@ def delete_api_key_data(key_id: str,
     return {"deleted": True, "account_id": key_id, "bytes": deleted_bytes,
             "files": deleted_files, "sessions": len(sessions),
             "artifacts": len(artifact_ids), "revoked": revoked}
-
-
-def cleanup_web_paper_cache(project_root: str | Path | None = None) -> dict:
-    """Delete cached network-paper PDFs and their extracted element assets.
-
-    These are shared rebuildable caches, not account-private files; deep_read
-    re-downloads any paper that is needed again.
-    """
-    root = _root(project_root)
-    dirs: list[Path] = []
-    for base in (root, root / "backend"):
-        dirs.append(base / "data" / "pdfs")
-        dirs.append(base / "data" / "assets")
-    seen: set[Path] = set()
-    for d in dirs:
-        try:
-            resolved = d.resolve()
-        except OSError:
-            continue
-        if resolved in seen or not resolved.is_dir():
-            continue
-        seen.add(resolved)
-    deleted_files = 0
-    deleted_bytes = 0
-    for d in seen:
-        for fp in sorted(d.rglob("*"), reverse=True):
-            if not fp.is_file():
-                continue
-            ok, size = _secure_unlink(fp)
-            if ok:
-                deleted_bytes += size
-                deleted_files += 1
-        # remove now-empty directories except the root of each cache
-        for fp in sorted(d.rglob("*"), reverse=True):
-            if fp.is_dir() and fp != d:
-                try:
-                    fp.rmdir()
-                except OSError:
-                    pass
-    return {"deleted": True, "files": deleted_files, "bytes": deleted_bytes}

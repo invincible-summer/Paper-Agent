@@ -61,7 +61,7 @@ def _paper_url(paper: Paper) -> str:
     for url in (paper.urls or {}).values():
         if url:
             return url
-    return paper.pdf_url or ""
+    return ""
 
 
 def paper_to_gbt7714(paper: Paper, index: int, extra: dict | None = None) -> str:

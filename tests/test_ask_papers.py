@@ -72,10 +72,6 @@ def _patch(monkeypatch, store, llm_answer="ok"):
     monkeypatch.setattr(vsm, "VectorStore", lambda *a, **k: store)
     monkeypatch.setattr(ti, "get_llm", lambda tier="light": _FakeLLM())
 
-    async def _noop_fulltext(session, paper_id, progress_cb=None):
-        return None
-    monkeypatch.setattr(ti, "_ensure_fulltext", _noop_fulltext)
-
     async def _identity_rewrite(query):
         return query
     monkeypatch.setattr(ti, "_rewrite_query", _identity_rewrite)
@@ -112,7 +108,7 @@ def test_vector_track_retrieval_and_answer(monkeypatch):
         _hit("P1::c0", "P1", "Attention Paper", "Method", "uses scaled dot-product attention"),
         _hit("P2::c0", "P2", "RL Paper", "Method", "policy gradient"),
     ]
-    store = _FakeStore(chunks=chunks)
+    store = _FakeStore(summaries=chunks)
     _patch(monkeypatch, store, llm_answer="Answer cites [P1] and [P2].")
     session = _session(papers=_PAPERS)
     result = asyncio.run(ti._tool_ask_papers({"query": "what methods"}, session, None))
@@ -124,14 +120,14 @@ def test_vector_track_retrieval_and_answer(monkeypatch):
 
 def test_citation_hallucination_stripped(monkeypatch):
     chunks = [_hit("P1::c0", "P1", "Paper One", "Method", "method A")]
-    store = _FakeStore(chunks=chunks)
+    store = _FakeStore(summaries=chunks)
     _patch(monkeypatch, store,
            llm_answer="Based on [P1] and [doi:10.9999/fake] we conclude X.")
-    session = _session(papers=[Paper(id="P1", title="Paper One")])
+    session = _session(papers=[Paper(id="P1", title="Paper One", abstract="method A")])
     result = asyncio.run(ti._tool_ask_papers({"query": "q"}, session, None))
     assert "[P1]" in result.data["answer"]
     assert "[doi:10.9999/fake]" not in result.data["answer"]
-    assert "CITATION NEEDED" in result.data["answer"]
+    assert "证据不足" in result.data["answer"]
 
 
 def test_paper_id_filter(monkeypatch):
@@ -139,7 +135,7 @@ def test_paper_id_filter(monkeypatch):
         _hit("P1::c0", "P1", "T1", "Method", "target method detail"),
         _hit("P2::c0", "P2", "T2", "Method", "other paper detail"),
     ]
-    store = _FakeStore(chunks=chunks)
+    store = _FakeStore(summaries=chunks)
     _patch(monkeypatch, store, llm_answer="Only [P1].")
     session = _session(papers=_PAPERS)
     result = asyncio.run(ti._tool_ask_papers({"query": "q", "paper_id": "P1"}, session, None))
@@ -148,10 +144,10 @@ def test_paper_id_filter(monkeypatch):
     assert {s["paper_id"] for s in result.data["sources"]} == {"P1"}
 
 
-def test_paper_id_fulltext_missing_is_stated_in_tool_text(monkeypatch):
-    """Targeted ask on a paper without OA full text must say the boundary."""
-    store = _FakeStore(chunks=[_hit("P1::c0", "P1", "Paywalled Paper",
-                                    "abstract", "abstract only evidence")])
+def test_paper_id_abstract_detail_gap_is_stated_in_tool_text(monkeypatch):
+    """Detailed questions stay bounded by the network paper's abstract."""
+    store = _FakeStore(summaries=[_hit("P1", "P1", "Paywalled Paper",
+                                       "abstract", "abstract only evidence")])
     _patch(monkeypatch, store, llm_answer="Abstract evidence [P1].")
     session = _session(papers=[Paper(id="P1", title="Paywalled Paper",
                                      abstract="abstract only evidence")])
@@ -161,8 +157,8 @@ def test_paper_id_fulltext_missing_is_stated_in_tool_text(monkeypatch):
         {"query": "exact dataset size", "paper_id": "P1"}, session, None))
 
     assert not result.is_error
-    assert "未能取得 OA 全文" in result.text
-    assert "仅基于摘要级证据" in result.text
+    assert "仅依据有效摘要" in result.text
+    assert "上传论文原文" in result.text
 
 
 def test_no_relevant_passages_partial(monkeypatch):
@@ -186,7 +182,7 @@ def test_bm25_fallback_without_store(monkeypatch):
     _patch(monkeypatch, store, llm_answer="From [S1].")
     summary = PaperSummary(paper_id="S1", research_problem="the core problem",
                            methodology="m1")
-    session = _session(summaries={"S1": summary})
+    session = _session(papers=[Paper(id="S1", title="S1", abstract="the core problem m1")])
     result = asyncio.run(ti._tool_ask_papers({"query": "problem"}, session, None))
     assert not result.is_error
     assert result.data["answer"] == "From [S1]."
@@ -196,9 +192,9 @@ def test_bm25_fallback_without_store(monkeypatch):
 def test_tool_result_message_includes_answer(monkeypatch):
     from agents.orchestrator import _build_tool_result_message
     chunks = [_hit("P1::c0", "P1", "T", "Method", "m")]
-    _patch(monkeypatch, _FakeStore(chunks=chunks),
+    _patch(monkeypatch, _FakeStore(summaries=chunks),
            llm_answer="A long grounded answer body.")
-    session = _session(papers=[Paper(id="P1", title="T")])
+    session = _session(papers=[Paper(id="P1", title="T", abstract="m")])
     result = asyncio.run(ti._tool_ask_papers({"query": "q"}, session, None))
     msg = _build_tool_result_message("ask_papers", result)
     assert "A long grounded answer body." in msg
@@ -209,17 +205,16 @@ def test_rewritten_query_feeds_retrieval_not_generation(monkeypatch):
     seen = {"retrieval": [], "generation": []}
 
     class _RecordingStore(_FakeStore):
-        def search_chunks(self, query, session_id=None, paper_id=None, top_k=5):
+        def search_summaries(self, query, session_id=None, top_k=20):
             seen["retrieval"].append(query)
-            return super().search_chunks(query, session_id=session_id,
-                                         paper_id=paper_id, top_k=top_k)
+            return super().search_summaries(query, session_id=session_id, top_k=top_k)
 
     class _RecordingLLM:
         async def ainvoke(self, messages):
             seen["generation"].append(messages[0].content)
             return _Resp("Answer [P1].")
 
-    store = _RecordingStore(chunks=[_hit("P1::c0", "P1", "T", "Method", "m")])
+    store = _RecordingStore(summaries=[_hit("P1", "P1", "T", "abstract", "m")])
     monkeypatch.setattr(vsm, "VectorStore", lambda *a, **k: store)
     monkeypatch.setattr(ti, "get_llm", lambda tier="light": _RecordingLLM())
 
@@ -229,7 +224,7 @@ def test_rewritten_query_feeds_retrieval_not_generation(monkeypatch):
     import tools.retrieval.rerank as rr
     monkeypatch.setattr(rr, "get_reranker", lambda: None)
 
-    session = _session(papers=[Paper(id="P1", title="T")])
+    session = _session(papers=[Paper(id="P1", title="T", abstract="m")])
     result = asyncio.run(ti._tool_ask_papers({"query": "口语化的问题"}, session, None))
     assert not result.is_error
     assert seen["retrieval"] == ["rewritten academic keywords"]
@@ -256,13 +251,10 @@ def test_rewrite_failure_falls_back_to_raw_query(monkeypatch):
     monkeypatch.setattr(vsm, "VectorStore", lambda *a, **k: store)
     monkeypatch.setattr(ti, "get_llm", lambda tier="light": _SelectiveLLM())
 
-    async def _noop_fulltext(session, paper_id, progress_cb=None):
-        return None
-    monkeypatch.setattr(ti, "_ensure_fulltext", _noop_fulltext)
     import tools.retrieval.rerank as rr
     monkeypatch.setattr(rr, "get_reranker", lambda: None)
 
-    session = _session(papers=[Paper(id="P1", title="T")])
+    session = _session(papers=[Paper(id="P1", title="T", abstract="m")])
     result = asyncio.run(ti._tool_ask_papers({"query": "raw question"}, session, None))
     assert not result.is_error
     assert seen["retrieval"] == ["raw question"]
@@ -270,13 +262,14 @@ def test_rewrite_failure_falls_back_to_raw_query(monkeypatch):
 
 def test_parent_dedup_and_parent_text_used(monkeypatch):
     """Two child hits of one parent collapse to a single parent-text passage."""
+    aid = "a" * 32
     parent = "Full parent passage with complete context about attention."
     hits = [
-        SearchHit(id="sess::P1::c0", document="child fragment 1",
-                  metadata={"paper_id": "P1", "title": "T", "section": "Method",
+        SearchHit(id=f"sess::{aid}::c0", document="child fragment 1",
+                  metadata={"paper_id": aid, "title": "T", "section": "Method",
                             "parent_id": "s0::p0", "parent_text": parent}),
-        SearchHit(id="sess::P1::c1", document="child fragment 2",
-                  metadata={"paper_id": "P1", "title": "T", "section": "Method",
+        SearchHit(id=f"sess::{aid}::c1", document="child fragment 2",
+                  metadata={"paper_id": aid, "title": "T", "section": "Method",
                             "parent_id": "s0::p0", "parent_text": parent}),
     ]
     seen = {"generation": []}
@@ -284,11 +277,12 @@ def test_parent_dedup_and_parent_text_used(monkeypatch):
     class _RecordingLLM:
         async def ainvoke(self, messages):
             seen["generation"].append(messages[0].content)
-            return _Resp("Answer [P1].")
+            return _Resp(f"Answer [{aid}].")
 
     _patch(monkeypatch, _FakeStore(chunks=hits))
     monkeypatch.setattr(ti, "get_llm", lambda tier="light": _RecordingLLM())
-    session = _session(papers=[Paper(id="P1", title="T")])
+    session = _session()
+    session.attachments = [{"id": aid, "filename": "paper.txt", "ext": "txt"}]
     result = asyncio.run(ti._tool_ask_papers({"query": "q"}, session, None))
     assert not result.is_error
     ctx = seen["generation"][-1]
@@ -299,32 +293,19 @@ def test_parent_dedup_and_parent_text_used(monkeypatch):
 
 def test_rerank_order_applied(monkeypatch):
     """When the reranker is available its ordering wins over RRF order."""
-    chunks = [
-        _hit("P1::c0", "P1", "T1", "Method", "first passage"),
-        _hit("P2::c0", "P2", "T2", "Method", "second passage"),
-    ]
-    seen = {"generation": []}
-
-    class _RecordingLLM:
-        async def ainvoke(self, messages):
-            seen["generation"].append(messages[0].content)
-            return _Resp("A [P1] [P2].")
-
     class _ReverseRanker:
         def predict(self, pairs):
             # reverse relevance: later passages score higher
             return [float(i) for i, _ in enumerate(pairs)]
 
-    _patch(monkeypatch, _FakeStore(chunks=chunks))
-    monkeypatch.setattr(ti, "get_llm", lambda tier="light": _RecordingLLM())
     import tools.retrieval.rerank as rr
     monkeypatch.setattr(rr, "get_reranker", lambda: _ReverseRanker())
-
-    session = _session(papers=_PAPERS)
-    result = asyncio.run(ti._tool_ask_papers({"query": "q", "top_k": 2}, session, None))
-    assert not result.is_error
-    ctx = seen["generation"][-1]
-    assert ctx.index("second passage") < ctx.index("first passage")
+    passages = [
+        {"paper_id": "P1", "title": "T1", "section": "abstract", "text": "first passage"},
+        {"paper_id": "P2", "title": "T2", "section": "abstract", "text": "second passage"},
+    ]
+    ranked = ti._rerank_passages("q", passages, 2)
+    assert [item["text"] for item in ranked] == ["second passage", "first passage"]
 
 
 def test_index_self_heal_reindexes_empty_session(monkeypatch):
@@ -348,12 +329,11 @@ def test_index_self_heal_skipped_when_index_populated(monkeypatch):
     assert store.upserted == []  # already indexed — no redundant work
 
 
-def test_structure_query_protects_complete_outline_from_rerank(monkeypatch):
-    """A whole-paper organization query must always carry the authoritative
-    ordered outline, even when semantic retrieval returns only method snippets."""
+def test_network_structure_query_ignores_legacy_fulltext_outline(monkeypatch):
+    """A restored network outline must never bypass the abstract boundary."""
     chunks = [_hit("P1::c0", "P1", "PinSage", "3.4 Node Embeddings via MapReduce",
                    "MapReduce inference details")]
-    store = _FakeStore(chunks=chunks)
+    store = _FakeStore(summaries=chunks)
     captured = {}
 
     async def fake_generate(query, passages):
@@ -378,18 +358,38 @@ def test_structure_query_protects_complete_outline_from_rerank(monkeypatch):
         ],
         document_info={"read_level": "full", "section_count": 15},
     )
-    session = _session(papers=[Paper(id="P1", title="PinSage")], summaries={"P1": summary})
+    session = _session(
+        papers=[Paper(id="P1", title="PinSage", abstract="paper organization and method")],
+        summaries={"P1": summary},
+    )
     result = asyncio.run(ti._tool_ask_papers(
         {"query": "仔细说明这篇论文有哪些部分，每个章节讲什么", "paper_id": "P1", "top_k": 3},
         session, None,
     ))
     assert not result.is_error
-    assert captured["passages"][0]["section"] == "section_outline"
-    text = captured["passages"][0]["text"]
-    for heading in ["1 INTRODUCTION", "2 RELATED WORK", "3 METHOD", "3.1", "3.5",
-                    "4 EXPERIMENTS", "4.1", "4.5", "5 CONCLUSION"]:
-        assert heading in text
-    assert result.data["sources"][0]["sections"][0] == "section_outline"
+    assert captured["passages"][0]["section"] == "abstract"
+    assert "1 INTRODUCTION" not in captured["passages"][0]["text"]
+    assert result.data["sources"][0]["sections"][0] == "abstract"
+
+
+def test_uploaded_structure_outline_remains_available():
+    aid = "b" * 32
+    doc_id = f"upload:{aid}"
+    session = _session(summaries={
+        doc_id: PaperSummary(
+            paper_id=doc_id,
+            section_outline=[
+                {"title": "1 INTRODUCTION", "page_start": 1, "page_end": 2},
+                {"title": "2 METHOD", "page_start": 3, "page_end": 4},
+            ],
+        )
+    })
+    session.attachments = [{"id": aid, "filename": "上传论文.pdf", "ext": "pdf"}]
+    passage = ti._section_outline_passage(session, doc_id)
+    assert passage is not None
+    assert passage["section"] == "section_outline"
+    assert "1 INTRODUCTION" in passage["text"]
+    assert "2 METHOD" in passage["text"]
 
 
 def test_deferred_attachment_rag_returns_explicit_degradation(monkeypatch):

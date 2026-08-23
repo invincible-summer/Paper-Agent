@@ -193,7 +193,6 @@ async def _summarize_map(clusters: list[dict], papers_by_id: dict[str, Paper],
 
 
 def _fallback_graph(papers: list[Paper], cluster_of: dict[str, int], status: str) -> dict:
-    from core.reading_policy import fulltext_available, normalize_fulltext_status
     from tools.storage.genealogy import _best_url
     nodes = [{
         "id": p.id, "title": p.title, "year": p.year or 0,
@@ -201,8 +200,6 @@ def _fallback_graph(papers: list[Paper], cluster_of: dict[str, int], status: str
         "role": "", "layer": "core" if p.layer == "core" else "candidate",
         "authors": (p.authors or [])[:3], "url": _best_url(p),
         "abstract": paper_abstract_text(p)[:200], "venue": p.venue or "",
-        "fulltext": fulltext_available(p),
-        "fulltext_status": normalize_fulltext_status(getattr(p, "fulltext_status", "")),
     } for p in papers]
     return {"nodes": nodes, "edges": [], "citation_enrichment_status": status}
 

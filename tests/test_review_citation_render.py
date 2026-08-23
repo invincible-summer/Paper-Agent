@@ -2,8 +2,8 @@
 
 The review LLM emits [paper_id] tokens (anti-hallucination keys on stable
 ids). review_agent post-processes the assembled review to render each valid
-[paper_id] as `Title ([Link](url))`, leaving unknown ids and
-[CITATION NEEDED] untouched. Covers the pure helper + the full pipeline with
+[paper_id] as `Title ([Link](url))`, rejecting unknown ids as evidence-insufficient while leaving the
+explicit [CITATION NEEDED] marker untouched. Covers the pure helper + the full pipeline with
 a stubbed LLM so no network/tokens are spent.
 """
 import asyncio
@@ -28,7 +28,7 @@ def test_render_replaces_known_ids_with_title_and_link():
     assert "Enlightenment Reason ([Link](https://openalex.org/W1))" in out
     assert "Feminist Theory ([Link](https://arxiv.org/abs/1))" in out
     assert "No Link Paper" in out
-    # Unknown id token and the anti-hallucination marker must survive untouched.
+    # Pure rendering only handles known IDs; validation is tested separately.
     assert "[zzz]" in out
     assert "[CITATION NEEDED]" in out
 
@@ -70,8 +70,10 @@ def _stub_llm(monkeypatch):
 
 def test_review_agent_renders_citations_as_titles(monkeypatch):
     _stub_llm(monkeypatch)
-    p1 = _mk("aaa", "Enlightenment Reason", urls={"openalex": "https://openalex.org/W1"})
-    p2 = _mk("bbb", "Feminist Theory", urls={"arxiv": "https://arxiv.org/abs/1"})
+    p1 = _mk("aaa", "Enlightenment Reason", abstract="Reason and modernity.",
+             urls={"openalex": "https://openalex.org/W1"})
+    p2 = _mk("bbb", "Feminist Theory", abstract="Feminist theoretical approaches.",
+             urls={"arxiv": "https://arxiv.org/abs/1"})
     state = {
         "topic": "test",
         "user_conception": "",
@@ -86,8 +88,9 @@ def test_review_agent_renders_citations_as_titles(monkeypatch):
     # Known ids are rendered as Title ([Link](url)).
     assert "Enlightenment Reason ([Link](https://openalex.org/W1))" in review
     assert "Feminist Theory ([Link](https://arxiv.org/abs/1))" in review
-    # Unknown id and the marker are left intact (no title, no link).
-    assert "[zzz]" in review
+    # Unknown ids are rejected; the explicit anti-hallucination marker remains.
+    assert "[zzz]" not in review
+    assert "[证据不足]" in review
     assert "[CITATION NEEDED]" in review
     # No raw known-id token should remain.
     assert "[aaa]" not in review

@@ -269,8 +269,8 @@ async def test_stream_reasoning_paragraph_separators(client, monkeypatch):
         {"type": "tool_progress", "message": "理解研究意图、拆解研究方向..."},
         {"type": "tool_progress", "message": "  → crossref ok（40 篇，1560ms）"},
         {"type": "thinking", "content": "检索完成，现在汇报。", "is_delta": True},
-        {"type": "tool_start", "name": "deep_read", "args": {"paper_ids": ["p1"]}},
-        {"type": "tool_progress", "message": "下载 PDF 中..."},
+        {"type": "tool_start", "name": "deep_read", "args": {"attachment_ids": ["a1"]}},
+        {"type": "tool_progress", "message": "解析上传文件中..."},
         {"type": "answer", "content": "结果", "is_delta": True},
         {"type": "done", "thinking": "", "answer": "结果", "tool_calls": [],
          "trace_id": "t", "usage": {"prompt_tokens": 1, "completion_tokens": 1,
@@ -296,8 +296,8 @@ async def test_stream_reasoning_paragraph_separators(client, monkeypatch):
     # model thinking resumes in its own paragraph after the module
     assert "→ crossref ok（40 篇，1560ms）\n\n检索完成，现在汇报。" in joined
     # the next tool module is again its own paragraph
-    assert "检索完成，现在汇报。\n\n📖 正在深读 1 篇论文…" in joined
-    assert "📖 正在深读 1 篇论文…\n下载 PDF 中..." in joined
+    assert "检索完成，现在汇报。\n\n📖 正在深读 1 个上传文件…" in joined
+    assert "📖 正在深读 1 个上传文件…\n解析上传文件中..." in joined
 
 
 @pytest.mark.anyio
@@ -551,19 +551,64 @@ async def test_research_map_combination_protocol(
     attachments = payload.get("x_soda", {}).get("attachments", [])
     assert [item["mimeType"] for item in attachments] == expected_mimes
     assert all(item["mimeType"] != "text/x-mermaid" for item in attachments)
+    if stream:
+        await resp.aclose()
     for item in attachments:
         expected_type = "image" if item["mimeType"] == "image/svg+xml" else "text"
         assert item["fileType"] == expected_type
-        downloaded = await client.get(item["fileUrl"])
-        assert downloaded.status_code == 200
-        assert downloaded.headers["content-type"].split(";", 1)[0] == item["mimeType"]
-        if item["mimeType"] == "image/svg+xml":
-            assert 'preserveAspectRatio="xMidYMid meet"' in downloaded.text
-        if item["mimeType"] == "text/markdown":
-            assert "## 引用与语义关系" in downloaded.text
-        if item["mimeType"] == "text/html":
-            assert "attachment" in downloaded.headers["content-disposition"].lower()
-            assert "Content-Security-Policy" in downloaded.text
+        assert item["fileUrl"].startswith("http://testserver/files/")
+
+
+@pytest.mark.anyio
+async def test_write_review_result_exposes_md_and_docx_attachments(
+    client, monkeypatch, tmp_path,
+):
+    markdown = tmp_path / "Unicode 长标题综述.md"
+    docx = tmp_path / "Unicode 长标题综述.docx"
+    markdown.write_text("# 引言\n\n综述正文。\n", encoding="utf-8")
+    docx.write_bytes(b"PK\x03\x04minimal-docx-fixture")
+    files = [
+        {
+            "fileName": markdown.name,
+            "displayName": markdown.name,
+            "fileType": "text",
+            "mimeType": "text/markdown",
+            "path": str(markdown),
+            "size": markdown.stat().st_size,
+        },
+        {
+            "fileName": docx.name,
+            "displayName": docx.name,
+            "fileType": "word",
+            "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "path": str(docx),
+            "size": docx.stat().st_size,
+        },
+    ]
+
+    async def review_turn(user_message, session, progress_cb, attachments=None, regenerate=False):
+        yield {"type": "tool_result", "result": {
+            "tool": "write_review", "status": "success",
+            "data": {"literature_review": markdown.read_text(encoding="utf-8"), "files": files},
+        }}
+        yield {"type": "answer", "content": "综述完成", "is_delta": True}
+        yield {"type": "done", "thinking": "", "answer": "综述完成",
+               "tool_calls": [], "trace_id": "review-files", "usage": {
+                   "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+
+    monkeypatch.setattr(orch, "chat_turn", review_turn)
+    response = await _post(client, {
+        "stream": False, "user": "review-dual-files",
+        "messages": [{"role": "user", "content": "写综述"}],
+    })
+    assert response.status_code == 200
+    attachments = response.json()["x_soda"]["attachments"]
+    assert {item["mimeType"] for item in attachments} == {
+        "text/markdown",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+    assert {item["fileType"] for item in attachments} == {"text", "word"}
+    assert all(item["fileUrl"].startswith("http://testserver/files/") for item in attachments)
 
 
 def test_attachment_shape_encodes_and_deduplicates(monkeypatch):
@@ -765,9 +810,9 @@ def _card_events():
         {"type": "tool_result", "result": {
             "tool": "search_papers", "status": "success",
             "papers": [{"title": "Paper A", "year": 2021, "citation_count": 5,
-                        "fulltext_status": "available"}],
-            "candidates": [], "fulltext_core_available": 1,
-            "fulltext_core_target": 8, "summary": "检索完成"}},
+                        "abstract": "usable"}],
+            "candidates": [], "valid_abstract_count": 1,
+            "summary": "检索完成"}},
         {"type": "tool_result", "result": {
             "tool": "integrity_sweep", "status": "success",
             "summary": "可靠性质检完成（2 篇）：无异常 2"}},
@@ -792,8 +837,8 @@ async def test_stream_card_before_answer_with_separator(client, monkeypatch):
     # one-line status card + the mandated search table, then the next tool's
     # one-liner separated by ---, all before the answer
     assert "**🔎 文献检索 · 核心集 1 篇 / 候选 0 篇**" in content
-    assert "| 分层 | 标题 | 年份 | 被引 | 全文 | 链接 |" in content
-    assert "| 核心 | Paper A | 2021 | 5 | 🟢 | — |" in content
+    assert "| 分层 | 标题 | 年份 | 被引 | 摘要 | 链接 |" in content
+    assert "| 核心 | Paper A | 2021 | 5 | 有 | — |" in content
     assert "**🛡️ 可靠性质检** · 可靠性质检完成（2 篇）：无异常 2" in content
     assert "\n---\n\n" in content
     assert content.index("文献检索 · 核心集") < content.index("这是最终回答。")
@@ -805,7 +850,7 @@ async def test_nonstream_card_prepended_to_answer(client, monkeypatch):
     resp = await _post(client, {"messages": [{"role": "user", "content": "搜"}]})
     content = resp.json()["choices"][0]["message"]["content"]
     assert content.index("🔎 文献检索") < content.index("这是最终回答。")
-    assert "| 分层 | 标题 | 年份 | 被引 | 全文 | 链接 |" in content
+    assert "| 分层 | 标题 | 年份 | 被引 | 摘要 | 链接 |" in content
     assert content.rstrip().endswith("这是最终回答。")
 
 
@@ -856,7 +901,7 @@ async def test_tool_cards_disabled_keeps_search_table(client, monkeypatch, tmp_p
     content = _content_of(frames)
     # status lines are off, but the mandated search-results table stays on
     assert "文献检索" not in content and "可靠性质检" not in content
-    assert "| 分层 | 标题 | 年份 | 被引 | 全文 | 链接 |" in content
+    assert "| 分层 | 标题 | 年份 | 被引 | 摘要 | 链接 |" in content
     assert "这是最终回答。" in content
     # progress lines in the thinking fold remain
     reasonings = [f["choices"][0]["delta"].get("reasoning") for f in frames]

@@ -23,7 +23,7 @@ def test_defaults_match_code_budgets(isolated):
     assert policy.api_turn_hard_seconds == 105.0
     assert store.get_tool_budget("search_papers") == 45.0
     assert store.get_tool_budget("deep_read") == 75.0
-    assert store.get_tool_budget("write_review") == 60.0
+    assert store.get_tool_budget("write_review") == 75.0
     assert store.get_tool_budget("ask_papers") == 30.0
     assert store.get_tool_budget("brand_new_tool") == 30.0
     assert store.get_turn_reserve() == 8.0

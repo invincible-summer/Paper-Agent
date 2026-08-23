@@ -68,7 +68,6 @@ class DoajBackend(SearchBackend):
                     doi = ident.get("id")
                     break
             abstract = _strip_html(bib.get("abstract") or "")
-            pdf_url = _extract_pdf_url(bib)
             keywords = [kw for kw in bib.get("keywords", []) if isinstance(kw, str)]
             first_author = authors[0] if authors else ""
             doaj_id = item.get("id")
@@ -83,7 +82,6 @@ class DoajBackend(SearchBackend):
                 language="en",
                 citation_count=0,  # DOAJ has no citation counts
                 abstract=abstract,
-                pdf_url=pdf_url,
                 keywords=keywords,
                 urls={"doaj": f"https://doaj.org/article/{doaj_id}"} if doaj_id else {},
             )
@@ -96,13 +94,3 @@ def _strip_html(text: str) -> str:
         return text
     text = re.sub(r"<[^>]+>", " ", text)
     return re.sub(r"\s+", " ", text).strip()
-
-
-def _extract_pdf_url(bib: dict) -> str | None:
-    # A generic fulltext/HTML landing page is not a PDF candidate.  Keep it in
-    # the DOAJ record URL only and let DOI-based Unpaywall resolve OA later.
-    for link in bib.get("link", []) or []:
-        if ((link.get("type") or "").lower() == "fulltext"
-                and "pdf" in (link.get("content_type") or "").lower()):
-            return link.get("url")
-    return None

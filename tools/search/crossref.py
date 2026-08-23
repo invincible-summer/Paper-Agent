@@ -74,7 +74,6 @@ class CrossrefBackend(SearchBackend):
             doi = item.get("DOI")
             citation_count = item.get("is-referenced-by-count", 0) or 0
             abstract = _strip_jats(item.get("abstract", ""))
-            pdf_url = None  # Crossref link metadata does not establish OA status
             keywords = item.get("subject") or []
             first_author = authors[0] if authors else ""
             paper = Paper(
@@ -88,7 +87,6 @@ class CrossrefBackend(SearchBackend):
                 language="en",
                 citation_count=citation_count,
                 abstract=abstract,
-                pdf_url=pdf_url,
                 keywords=keywords,
                 urls={"crossref": item.get("URL") or ""},
             )

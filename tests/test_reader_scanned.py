@@ -61,7 +61,7 @@ def _fake_parser(monkeypatch, doc):
 
 
 def _paper(pid="P1", abstract="Some real abstract text."):
-    p = Paper(id=pid, title=f"Title {pid}", abstract=abstract)
+    p = Paper(id=pid, title=f"Title {pid}", abstract=abstract, source="upload")
     p.pdf_path = "/fake/p1.pdf"
     return p
 
@@ -255,7 +255,7 @@ def test_document_info_marks_digital_pdf_ocr_not_needed():
     )
     info = ra._document_info(paper, doc, read_level="full", text_chars=len(doc.raw_text))
     assert info == {
-        "read_level": "full", "pdf_fetched": True, "parse_status": "parsed_full",
+        "read_level": "full", "document_ready": True, "parse_status": "parsed_full",
         "parser_backend": "docling",
         "page_count": 8, "text_chars": len(doc.raw_text), "section_count": 1,
         "is_scanned": False, "ocr_status": "not_needed", "ocr_chars": 0,

@@ -140,7 +140,6 @@ def test_exact_balanced_default_policy(tmp_path: Path):
         session_ttl_seconds=604800,
         upload_ttl_seconds=604800,
         export_ttl_seconds=86400,
-        public_pdf_ttl_seconds=259200,
         cache_ttl_seconds=7776000,
         trace_ttl_seconds=604800,
         cleanup_interval_minutes=60,

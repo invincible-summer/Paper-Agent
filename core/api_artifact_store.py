@@ -75,6 +75,11 @@ class ApiArtifactStore:
         public_alias: str | None = None,
         unique: bool = False,
     ) -> ApiArtifact:
+        if category == "public_pdf" or (category == "element_asset" and scope == "public"):
+            raise RuntimeError(
+                "network-paper PDF and public element artifacts are retired; "
+                "use a session-private user upload"
+            )
         digest = hashlib.sha256()
         size = 0
         with source.open("rb") as stream:
@@ -141,11 +146,13 @@ class ApiArtifactStore:
         return artifact
 
     def save_public_pdf(self, source: Path, *, logical_name: str) -> ApiArtifact:
-        return self.save_file(
-            source, category="public_pdf", scope="public", logical_name=logical_name,
-            mime_type="application/pdf",
-            ttl_seconds=self.storage.get_policy().public_pdf_ttl_seconds,
-        )
+        """Compatibility boundary for retired network-paper PDFs.
+
+        Public network-paper PDF artifacts are no longer a supported runtime
+        capability; keeping this explicit failure avoids silently reviving old
+        callers while preserving a useful migration error.
+        """
+        raise RuntimeError("network-paper PDF artifacts are retired; use a user-uploaded file")
 
     def save_export(
         self, source: Path, *, session_id: str, display_name: str, mime_type: str,

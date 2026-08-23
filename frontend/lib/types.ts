@@ -10,12 +10,10 @@ export interface Paper {
   source: string;
   citation_count: number;
   abstract: string;
-  pdf_url: string | null;
   keywords: string[];
   urls: Record<string, string>;
   relevance_score: number;
   layer: string;
-  fulltext_status: string;   // available | unavailable | unknown（已验证状态）
 }
 
 export interface SubDirection {
@@ -31,8 +29,6 @@ export interface CandidatePaper {
   citation_count: number;
   source: string;
   urls: Record<string, string>;
-  pdf_url: string | null;
-  fulltext_status: string;   // available | unavailable | unknown
 }
 
 export interface MapCluster {
@@ -60,8 +56,6 @@ export interface GraphNode {
   url: string;
   abstract: string;        // first ~200 chars, for the detail panel
   venue: string;
-  fulltext: boolean;         // 已实际下载并解析验证的全文
-  fulltext_status: string;   // available | unavailable | unknown
 }
 
 export interface GraphEdge {

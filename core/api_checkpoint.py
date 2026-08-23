@@ -169,16 +169,13 @@ def _attachment_ref(attachment: Mapping[str, Any]) -> dict[str, Any]:
 
 def _paper_to_checkpoint(paper: Paper, context: StorageContext) -> dict[str, Any]:
     data = paper.to_dict()
-    # Persist API-local PDF paths only as root-relative references. Web/foreign
-    # absolute paths are never copied into the API Checkpoint.
-    data["pdf_path"] = None
-    if paper.pdf_path:
-        try:
-            relative = Path(paper.pdf_path).resolve().relative_to(context.root_dir.resolve())
-            data["pdf_path"] = f"@api/{relative.as_posix()}"
-        except (OSError, ValueError):
-            pass
     data.pop("llm_reasoning", None)
+    # A network-paper PDF path is never checkpoint evidence. Upload originals
+    # are represented by attachment refs and sidecars, not by Paper paths.
+    data.pop("pdf_path", None)
+    data.pop("pdf_url", None)
+    data.pop("pdf_source", None)
+    data.pop("fulltext_status", None)
     return data
 
 
@@ -213,7 +210,6 @@ def build_checkpoint_state(session: ChatSession) -> dict[str, Any]:
         "search_queries": session.search_queries,
         "attachments": [_attachment_ref(item) for item in session.attachments],
         "loaded_skills": sorted(str(item) for item in session.loaded_skills),
-        "full_read_count": int(session.full_read_count),
         "rag_session_id": session.session_id,
     }
 
@@ -243,11 +239,10 @@ def _restore_state(state: Mapping[str, Any], *, session_id: str, context: Storag
             if not isinstance(item, Mapping):
                 continue
             data = dict(item)
-            stored_path = str(data.get("pdf_path") or "")
-            if stored_path.startswith("@api/"):
-                data["pdf_path"] = str(context.resolve_relative(stored_path[5:]))
-            else:
-                data["pdf_path"] = None
+            data.pop("pdf_path", None)
+            data.pop("pdf_url", None)
+            data.pop("pdf_source", None)
+            data.pop("fulltext_status", None)
             restored.append(Paper.from_dict(data))
         return restored
     session = ChatSession(
@@ -272,7 +267,6 @@ def _restore_state(state: Mapping[str, Any], *, session_id: str, context: Storag
         search_queries=list(state.get("search_queries") or []),
         attachments=[dict(item) for item in (state.get("attachments") or []) if isinstance(item, Mapping)],
         loaded_skills={str(item) for item in (state.get("loaded_skills") or [])},
-        full_read_count=int(state.get("full_read_count") or 0),
     )
     return session
 

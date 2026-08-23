@@ -130,11 +130,6 @@ def _row_to_paper(row, server: str) -> Paper:
         id=generate_paper_id(row["title"], authors[0] if authors else "", year, doi),
         title=row["title"], authors=authors, year=year, venue=server,
         doi=doi, source=server, abstract=row["abstract"],
-        # Rxiv's official metadata API does not expose a PDF URL.  The
-        # provider-hosted versioned ``.full.pdf`` URL is the controlled
-        # fallback used only after the canonical record supplied the DOI and
-        # version; downstream SSRF/PDF validation remains mandatory.
-        pdf_url=(f"{landing}.full.pdf" if landing else None),
         keywords=[row["category"]] if row["category"] else [],
         urls={server: landing} if landing else {},
     )

@@ -1,4 +1,4 @@
-"""Reader Agent: PDF fetch + multimodal understanding + structured extraction.
+"""Reader Agent: uploaded-document multimodal understanding and extraction.
 
 The per-paper pipeline (the chokepoint is _process_single_paper):
   Stage 1   structure parse (Docling layout/OCR/table; PyMuPDF fallback) →
@@ -35,15 +35,8 @@ from core.paper_search_settings_store import paper_abstract_text
 from core.models import FIELD_PROFILES, Paper, PaperSummary, Reference
 from core.multimodal import recover_scanned_pages, understand_elements
 from core.prompts.reader_prompts import build_extraction_prompt
-from core.reading_policy import (
-    FULLTEXT_STATUS_AVAILABLE,
-    FULLTEXT_STATUS_UNAVAILABLE,
-    FULLTEXT_STATUS_UNKNOWN,
-    is_full_text,
-    summary_has_full_text,
-)
+from core.reading_policy import is_full_text
 from core.state import ResearchState
-from tools.pdf.fetcher import PDFFetcher
 from tools.pdf.structure import get_structure_parser
 from tools.pdf.structure.models import PaperElement, ParsedPaperDocument
 from tools.storage.database import Database
@@ -89,12 +82,14 @@ async def reader_agent(
     core_limit: int | None = None,
     read_mode: str = "abstract",
 ) -> ResearchState:
-    """Process papers: download PDFs, parse, extract structured summaries.
+    """Process local uploads or produce abstract-level network summaries.
 
-    Returns state with ``paper_summaries`` (dict paper_id -> PaperSummary) and
-    ``read_failures`` (list[{paper_id, title, reason}]).
+    Network papers deliberately never enter a remote PDF path.  A ``full``
+    request for such a paper is downgraded to an explicit abstract summary and
+    reports that the original must be uploaded for document-level analysis.
+    Local upload documents may still use the structure/VLM/chunk pipeline.
     """
-    papers: list[Paper] = state.get("papers", [])
+    papers: list[Paper] = list(state.get("papers") or [])
     if not papers:
         state["current_phase"] = "read_done"
         state["read_failures"] = []
@@ -106,157 +101,53 @@ async def reader_agent(
 
     profile_key = state.get("field_profile", "general")
     active_fields = FIELD_PROFILES.get(profile_key, FIELD_PROFILES["general"])
-
-    s = get_settings()
     storage_context = state.get("storage_context")
     if core_limit is None:
         core_limit = len(papers)
     papers_to_process = papers[:core_limit]
+    requested_mode = state.get("read_mode", read_mode)
+    report(f"处理 {len(papers_to_process)} 篇材料（网络论文仅摘要；上传文件可全文）")
 
-    report(f"Processing {len(papers_to_process)} papers (mode: {read_mode})")
-
-    # --- Phase 1: Download PDFs (skip if abstract-only mode) ---
-    read_mode = state.get("read_mode", read_mode)
-    fetch_origin = state.get("fetch_origin", "automatic")
-    from core.paper_search_settings_store import (
-        capability_skip_result, disclose_fetch_policy, get_paper_search_policy,
-        paper_capability_source, remote_download_allowed,
-        source_capability_enabled,
-    )
-    fetch_policy = get_paper_search_policy()
-    remote_fetch_blocked = (read_mode == "full" and
-                            not remote_download_allowed(fetch_origin, fetch_policy))
-    state["remote_fetch_blocked"] = remote_fetch_blocked
-    n_with_pdf = 0
-    if read_mode == "full":
-        if remote_fetch_blocked and disclose_fetch_policy(fetch_policy):
-            report("管理员当前限制远程论文全文拉取；将复用本地缓存，其他论文按摘要级处理。")
-        fetcher = PDFFetcher(
-            s.reader.pdf_dir, storage_context=storage_context,
-            fetch_origin=fetch_origin,
-        )
-        pdf_paths = await fetcher.fetch_many(papers_to_process)
-        await fetcher.close()
-
-        for paper in papers_to_process:
-            paper.pdf_path = pdf_paths.get(paper.id)
-
-        n_with_pdf = len(pdf_paths)
-        capability_skips: list[dict] = []
-        for paper in papers_to_process:
-            if getattr(paper, "pdf_path", None):
-                continue
-            allowed, reason = source_capability_enabled(
-                paper_capability_source(paper, "fulltext"),
-                "fulltext", fetch_policy,
-            )
-            if not allowed:
-                skip = capability_skip_result(
-                    paper_capability_source(paper, "fulltext"), "fulltext", reason
-                )
-                skip.update({"paper_id": paper.id, "title": paper.title or paper.id})
-                capability_skips.append(skip)
-        state["capability_skips"] = capability_skips
-        if not remote_fetch_blocked:
-            report(
-                f"Downloaded/reused {n_with_pdf} PDFs; "
-                f"{len(papers_to_process) - n_with_pdf} will stay abstract-level"
-            )
-        elif not disclose_fetch_policy(fetch_policy):
-            report(f"Full-text evidence ready for {n_with_pdf}/{len(papers_to_process)} papers")
-    else:
-        state["capability_skips"] = []
-        report(f"Abstract-only mode: skipping PDF download for {len(papers_to_process)} papers")
-
-    # --- Phase 2+3: Parse + Extract (concurrent with progress) ---
-    db = Database(storage_context=storage_context) if storage_context is not None else Database(s.storage.sqlite_path)
+    db = Database(storage_context=storage_context) if storage_context is not None else Database(get_settings().storage.sqlite_path)
     semaphore = asyncio.Semaphore(_EXTRACT_SEMAPHORE)
     session_id = state.get("session_id", "")
 
-    async def _run(i: int, paper: Paper):
+    async def run_one(index: int, paper: Paper):
         async with semaphore:
-            return i, paper, await _process_single_paper(
-                paper, active_fields, db, profile_key, read_mode, session_id,
+            effective = requested_mode if paper.source == "upload" else "abstract"
+            return index, paper, await _process_single_paper(
+                paper, active_fields, db, profile_key, effective, session_id,
                 storage_context=storage_context,
             )
 
-    raw_results = await asyncio.gather(*[_run(i, p) for i, p in enumerate(papers_to_process)])
-
+    raw = await asyncio.gather(*(run_one(i, p) for i, p in enumerate(papers_to_process)))
     summaries: dict[str, PaperSummary] = {}
     failures: list[dict[str, str]] = []
-    fulltext_fallbacks: list[dict[str, str]] = []
-    capability_skip_ids = {
-        row.get("paper_id") for row in state.get("capability_skips", [])
-    }
-    fulltext_status_rows: list[tuple[str, str, str, str, str]] = []
-    for _i, paper, result in raw_results:
-        summary, reason = result
+    for _index, paper, (summary, reason) in raw:
         if summary is not None:
             summaries[paper.id] = summary
-            if read_mode == "full" and not summary_has_full_text(summary):
-                # Full attempt was requested but this paper ended at abstract
-                # level. Report the real level so callers never label it full.
-                fallback_reason = (
-                    "source_capability_disabled" if paper.id in capability_skip_ids
-                    else "remote_fetch_restricted" if remote_fetch_blocked and not getattr(paper, "pdf_path", None)
-                    else "oa_fulltext_unavailable" if not getattr(paper, "pdf_path", None)
-                    else "fulltext_parse_degraded"
-                )
-                fulltext_fallbacks.append({
-                    "paper_id": paper.id,
-                    "title": paper.title or paper.id,
-                    "reason": fallback_reason,
-                })
-                fallback_status = (FULLTEXT_STATUS_UNKNOWN if fallback_reason == "remote_fetch_restricted"
-                                   else FULLTEXT_STATUS_UNAVAILABLE)
-                paper.fulltext_status = fallback_status
-                fulltext_status_rows.append(
-                    (paper.id, fallback_status, fallback_reason,
-                     paper.pdf_path or "", paper.pdf_url or ""))
-            elif read_mode == "full" and summary_has_full_text(summary):
-                paper.fulltext_status = FULLTEXT_STATUS_AVAILABLE
-                fulltext_status_rows.append(
-                    (paper.id, FULLTEXT_STATUS_AVAILABLE, "deep_read_full_verified",
-                     paper.pdf_path or "", paper.pdf_url or ""))
         else:
             failures.append({"paper_id": paper.id, "title": paper.title, "reason": reason or "unknown"})
-            if read_mode == "full":
-                paper.fulltext_status = FULLTEXT_STATUS_UNAVAILABLE
-                fulltext_status_rows.append(
-                    (paper.id, FULLTEXT_STATUS_UNAVAILABLE, f"read_failed:{reason or 'unknown'}",
-                     paper.pdf_path or "", paper.pdf_url or ""))
-            report(f"Failed: {paper.title[:50]}... ({reason})")
-
-    n_full = sum(1 for s in summaries.values() if summary_has_full_text(s))
-    report(
-        f"Done: {len(summaries)} summaries"
-        + (f" ({n_full} full-text)" if read_mode == "full" and summaries else "")
-        + (f", {len(failures)} failed" if failures else "")
-    )
-
-    # --- Persist metadata into the SQLite cost-cache (NOT a user-facing
-    # library: cross-session memory is intentionally not exposed). ---
+            report(f"处理失败：{paper.title[:50]}…（{reason or 'unknown'}）")
     try:
         db.save_papers(papers_to_process)
-        if fulltext_status_rows:
-            db.set_fulltext_statuses(fulltext_status_rows)
-    except Exception as e:
-        logger.debug("paper metadata persist skipped: %s", e)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("paper metadata persist skipped: %s", exc)
     db.close()
-
     state["paper_summaries"] = summaries
     state["read_failures"] = failures
-    state["fulltext_fallbacks"] = fulltext_fallbacks
+    state["capability_skips"] = []
     state["current_phase"] = "read_done"
+    report(f"处理完成：{len(summaries)} 条摘要/上传全文材料" + (f"，{len(failures)} 条失败" if failures else ""))
     return state
 
 
 def _full_text_is_abstract(full_text: str | None, abstract: str | None) -> bool:
     """Detect old cache rows where an abstract was stored as ``full_text``.
 
-    Older code set ``full_text = source_text`` whenever ``paper.pdf_path`` was
-    truthy, even if PDF parsing failed and ``source_text`` was only the
-    abstract. Those rows otherwise pass the length check and must be healed.
+    Older code set ``full_text = source_text`` whenever a path was truthy, even
+    if parsing failed and ``source_text`` was only the abstract. Those rows
+    otherwise pass the length check and must be healed.
     """
     if not full_text or not abstract:
         return False
@@ -278,16 +169,16 @@ def _document_info(
     text_chars: int = 0, elements: list | None = None,
 ) -> dict:
     els = elements if elements is not None else (doc.elements if doc is not None else [])
-    pdf_fetched = bool(paper.pdf_path)
+    document_ready = bool(paper.pdf_path)
     parse_status = (
-        "no_pdf" if not pdf_fetched else
+        "missing_upload" if not document_ready else
         "parse_failed" if doc is None else
         "parsed_full" if read_level == "full" else
         "parsed_insufficient"
     )
     return {
         "read_level": read_level,
-        "pdf_fetched": pdf_fetched,
+        "document_ready": document_ready,
         "parse_status": parse_status,
         "parser_backend": doc.parser_backend if doc is not None else "",
         "page_count": int(doc.page_count or 0) if doc is not None else 0,
@@ -309,216 +200,88 @@ def _summary_has_document_metadata(summary: PaperSummary) -> bool:
 
 
 async def _process_single_paper(
-    paper: Paper,
-    active_fields: list[str],
-    db: Database,
-    profile_key: str,
-    read_mode: str,
-    session_id: str = "",
-    storage_context=None,
+    paper: Paper, active_fields: list[str], db: Database, profile_key: str,
+    read_mode: str, session_id: str = "", storage_context=None,
 ) -> tuple[PaperSummary | None, str | None]:
-    """Process one paper through the multimodal understanding pipeline.
+    """Extract one abstract or one user-uploaded local document.
 
-    Stages:
-      1.  Structure parse (Docling primary, PyMuPDF fallback) → sections with
-          page numbers + element inventory (figures/tables/formulas) + raw_text.
-      1.5 Scanned-page recovery: if the parse flagged ``is_scanned`` (Docling's
-          OCR underperformed), VLM-OCR the first pages and fold the text in —
-          this replaces the old hard ``no_text`` failure for scanned PDFs.
-      2.  VLM element understanding (budget-capped, partial-failure tolerant),
-          fingerprint-gated so a re-read with an unchanged PDF hydrates the
-          stored understanding for free (zero VLM tokens).
-      3.  Persist elements to the global table + global vector collection +
-          attach light element refs to the summary.
-    Extraction (LLM) runs on the recovered raw_text / sections exactly as
-    before; indexing into the session-scoped RAG store is best-effort.
-
-    Returns (summary, failure_reason). On success failure_reason is None; on
-    failure summary is None and reason is "no_text" / "extraction_failed" /
-    "empty_shell".
+    ``paper.source != 'upload'`` is a hard boundary: no URL, cache status, or
+    historical ``full_text`` row can promote it above abstract evidence.
     """
-    s = get_settings()
-    from core.paper_search_settings_store import (
-        paper_capability_source, source_capability_enabled,
-    )
-    abstract_allowed, _abstract_reason = source_capability_enabled(
-        paper_capability_source(paper, "abstract"), "abstract"
-    )
-
-    # --- Cache lookup (Phase 0) ---
-    # A ``full``-mode cache row is only valid when it contains real full text.
-    # Older builds cached an abstract fallback under the full key, which made
-    # later deep_read calls report "全文级" while only an abstract was stored.
-    # Discard those rows and re-fetch; the same guard heals existing DB rows.
-    cached = db.get_cached_summary(paper.id, profile_key, read_mode)
+    settings = get_settings()
+    is_upload = paper.source == "upload" or str(paper.id).startswith("upload:")
+    effective_mode = "full" if is_upload and read_mode == "full" and paper.pdf_path else "abstract"
+    cached = db.get_cached_summary(paper.id, profile_key, effective_mode)
     if cached:
         try:
-            cached_summary = _summary_from_dict(paper.id, json.loads(cached))
-        except Exception:
-            logger.warning("Corrupt cache for %s, re-extracting", paper.id)
-            cached_summary = None
-        if cached_summary is not None and read_mode == "full" and (
-            not summary_has_full_text(cached_summary)
-            or _full_text_is_abstract(cached_summary.full_text, paper_abstract_text(paper))
-        ):
-            logger.warning(
-                "Discarding invalid full-mode cache for %s (full_text missing or "
-                "just the abstract), refetching",
-                paper.id,
-            )
-            try:
-                db.delete_cached_summary(paper.id, profile_key, read_mode)
-            except Exception as e:  # noqa: BLE001
-                logger.debug("invalid full-mode cache delete skipped: %s", e)
-            cached_summary = None
-        if (cached_summary is not None and read_mode == "full"
-                and paper.pdf_path and not _summary_has_document_metadata(cached_summary)):
-            # Legacy full caches predate section_outline/document_info. Reparse
-            # structure once; fingerprint-gated element hydration guarantees no
-            # repeated VLM spend, then persist the healed lightweight metadata.
-            assets_dir = str(storage_context.blob_dir / "element_assets") \
-                if storage_context is not None and storage_context.channel == "openai_api" \
-                else s.reader.assets_dir
-            healed_doc = await parse_and_understand(
-                paper, db, assets_dir=assets_dir, storage_context=storage_context,
-                session_id=session_id,
-            )
-            if healed_doc is not None and is_full_text(healed_doc.raw_text):
-                cached_summary.section_outline = _section_outline(healed_doc)
-                cached_summary.document_info = _document_info(
-                    paper, healed_doc, read_level="full",
-                    text_chars=len(cached_summary.full_text or healed_doc.raw_text),
-                )
-                cached_summary.elements = [e.short_ref() for e in healed_doc.elements]
-                try:
-                    db.save_cached_summary(
-                        paper.id, profile_key, "full",
-                        json.dumps(cached_summary.to_dict()),
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.debug("legacy full cache metadata heal write skipped: %s", e)
-                await run_cpu_bound(
-                    _index_paper, paper, cached_summary, healed_doc, "full",
-                    session_id, storage_context=storage_context,
-                )
-        if (cached_summary is not None and not abstract_allowed
-                and not summary_has_full_text(cached_summary)):
-            cached_summary = None
-        if cached_summary is not None:
-            # A summary-cache hit must also restore the independently persisted
-            # multimodal inventory.  Older cache rows predate ``summary.elements``
-            # and the global vector collection may have been rebuilt, so hydrate
-            # refs from SQLite and best-effort re-upsert the element index without
-            # making any VLM call.
-            try:
-                stored_elements = db.get_elements(paper.id)
-                if stored_elements:
-                    cached_summary.elements = [_stored_element_ref(r) for r in stored_elements]
-                    _index_elements_for_context(
-                        paper, [_stored_element_model(r) for r in stored_elements], storage_context
-                    )
-            except Exception as e:  # noqa: BLE001
-                logger.debug("cached element restore skipped for %s: %s", paper.id, e)
-            # Indexing is best-effort and must never invalidate a cache hit.
-            await run_cpu_bound(
-                _index_paper, paper, cached_summary, None, read_mode, session_id,
-                storage_context=storage_context,
-            )
-            return cached_summary, None
+            summary = _summary_from_dict(paper.id, json.loads(cached))
+            if effective_mode != "full":
+                summary.full_text = None
+                summary.elements = []
+            else:
+                # Summary rows and element rows are independent caches.  A
+                # private upload summary hit must not reparse or call the VLM,
+                # but it should restore lightweight refs and repair the global
+                # element vector index from the persisted upload-only rows.
+                from tools.pdf.structure.models import PaperElement
 
-    # --- Full attempt without an OA PDF: reuse the abstract cache if present.
-    # This keeps repeated deep_read calls free for paywalled papers while the
-    # full key stays empty, so a later OA copy can still be picked up.
-    if read_mode == "full" and not paper.pdf_path and abstract_allowed:
-        cached_abstract = db.get_cached_summary(paper.id, profile_key, "abstract")
-        if cached_abstract:
-            try:
-                abstract_summary = _summary_from_dict(paper.id, json.loads(cached_abstract))
-            except Exception:
-                abstract_summary = None
-            if abstract_summary is not None:
-                if not abstract_summary.document_info:
-                    abstract_summary.document_info = _document_info(
-                        paper, None, read_level="abstract",
-                        text_chars=len(paper_abstract_text(paper)),
+                restored_elements = [PaperElement(
+                    element_id=str(row.get("element_id") or ""),
+                    kind=str(row.get("kind") or ""),
+                    ordinal=int(row.get("ordinal") or 0),
+                    page=int(row.get("page") or 0),
+                    section=str(row.get("section") or ""),
+                    caption=str(row.get("caption") or ""),
+                    bbox=tuple(row["bbox"]) if row.get("bbox") else None,
+                    asset_path=row.get("asset_path"),
+                    image_hash=row.get("image_hash"),
+                    docling_extract=row.get("docling_extract") or {},
+                    understanding=row.get("understanding"),
+                ) for row in db.get_elements(paper.id)]
+                if restored_elements:
+                    summary.elements = [element.short_ref() for element in restored_elements]
+                    await run_cpu_bound(
+                        _index_elements_for_context, paper, restored_elements,
+                        storage_context,
                     )
-                await run_cpu_bound(
-                    _index_paper, paper, abstract_summary, None, "abstract",
-                    session_id, storage_context=storage_context,
-                )
-                return abstract_summary, None
+            return summary, None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            db.delete_cached_summary(paper.id, profile_key, effective_mode)
 
-    # --- Stage 1 + 1.5 + 2 + 3: parse → recover → understand → persist ---
-    # Shared with on-demand full-text escalation (tools_impl._ensure_fulltext).
-    # Never raises; a None doc degrades to abstract-only below.
     doc = None
-    if paper.pdf_path:
-        assets_dir = str(storage_context.blob_dir / "element_assets") if storage_context is not None and storage_context.channel == "openai_api" else s.reader.assets_dir
+    if effective_mode == "full":
+        assets_dir = (str(storage_context.blob_dir / "element_assets")
+                      if storage_context is not None and storage_context.channel == "openai_api"
+                      else settings.reader.assets_dir)
         doc = await (
-            parse_and_understand(
-                paper, db, assets_dir=assets_dir, storage_context=storage_context,
-                session_id=session_id,
-            )
-            if storage_context is not None
-            else parse_and_understand(paper, db, assets_dir=assets_dir)
+            parse_and_understand(paper, db, assets_dir=assets_dir, storage_context=storage_context, session_id=session_id)
+            if storage_context is not None else parse_and_understand(paper, db, assets_dir=assets_dir)
         )
-
-    # ``doc_text`` is only real full text extracted from a downloaded PDF.
-    # An abstract must never become summary.full_text, even when a PDF download
-    # was attempted (parse failure / scanned with no recovery / no OA PDF).
-    doc_text = ""
-    if doc is not None and is_full_text(doc.raw_text):
-        doc_text = doc.raw_text
-    source_text = doc_text or paper_abstract_text(paper) or ""
-
-    if not source_text:
+    doc_text = doc.raw_text if doc is not None and is_full_text(doc.raw_text) else ""
+    source_text = doc_text if effective_mode == "full" else (paper_abstract_text(paper) or paper.abstract or "")
+    if not source_text.strip():
         return None, "no_text"
-
-    # --- Extraction ---
-    # Full mode chunked extraction now runs whenever a real PDF body exists,
-    # including PDFs without detected sections (raw-text chunk fallback).
-    # A downloaded-but-unparseable PDF therefore never stores its abstract
-    # under the full cache key.
-    if read_mode == "full" and doc_text:
-        data = await _extract_chunked(paper, doc, active_fields)
-        full_text = doc_text  # retained for downstream RAG (Phase 2)
-    else:
-        data = await _extract_single(paper, source_text, active_fields)
-        full_text = None
-
+    data = await (_extract_chunked(paper, doc, active_fields) if effective_mode == "full" and doc_text
+                  else _extract_single(paper, source_text, active_fields))
     if data is None:
         return None, "extraction_failed"
     if _is_empty_shell(data, active_fields):
         return None, "empty_shell"
-
+    full_text = doc_text if effective_mode == "full" else None
     summary = _build_summary(paper, data, active_fields, full_text)
     summary.section_outline = _section_outline(doc) if full_text else []
-    summary.document_info = _document_info(
-        paper, doc, read_level="full" if full_text else "abstract",
-        text_chars=len(full_text or source_text),
-    )
-    # Attach light element refs (element_id/kind/page/caption) so the summary
-    # and frontend can address "Figure 3" without lugging the full VLM payload.
+    summary.document_info = _document_info(paper, doc, read_level="full" if full_text else "abstract",
+                                           text_chars=len(full_text or source_text))
     if doc is not None and doc.elements:
-        summary.elements = [e.short_ref() for e in doc.elements]
-
-    # --- Cache write (Phase 0) ---
-    # Cache under the level that was actually achieved. Full request + no OA
-    # PDF/parse failure stores an abstract row, leaving the full key free for
-    # future retries.
-    effective_read_mode = "full" if full_text else "abstract"
+        summary.elements = [element.short_ref() for element in doc.elements]
     try:
-        db.save_cached_summary(paper.id, profile_key, effective_read_mode,
-                               json.dumps(summary.to_dict()))
-    except Exception as e:
-        logger.warning("Cache write failed for %s: %s", paper.id, e)
-
-    # --- Index into the session-scoped RAG vector store (best-effort) ---
-    await run_cpu_bound(
-        _index_paper, paper, summary, doc if full_text else None,
-        effective_read_mode, session_id, storage_context=storage_context,
-    )
-
+        db.save_cached_summary(paper.id, profile_key, "full" if full_text else "abstract",
+                               json.dumps(summary.to_dict(), ensure_ascii=False))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Cache write failed for %s: %s", paper.id, exc)
+    await run_cpu_bound(_index_paper, paper, summary, doc if full_text else None,
+                        "full" if full_text else "abstract", session_id,
+                        storage_context=storage_context)
     return summary, None
 
 
@@ -535,17 +298,12 @@ def persist_api_element_assets(
         source = Path(element.asset_path) if element.asset_path else None
         if source is None or not source.is_file():
             continue
-        if paper.source == "upload" and session_id:
-            artifact = artifact_store.save_private_upload(
-                source, session_id=session_id, logical_name=source.name,
-                mime_type="image/png", category="element_asset",
-            )
-        else:
-            artifact = artifact_store.save_file(
-                source, category="element_asset", scope="public",
-                logical_name=source.name, mime_type="image/png",
-                ttl_seconds=artifact_store.storage.get_policy().cache_ttl_seconds,
-            )
+        if paper.source != "upload" or not session_id:
+            raise ValueError("element artifacts require a session-private user upload")
+        artifact = artifact_store.save_private_upload(
+            source, session_id=session_id, logical_name=source.name,
+            mime_type="image/png", category="element_asset",
+        )
         if source.resolve() != artifact.path.resolve():
             source.unlink(missing_ok=True)
         element.asset_path = str(artifact.path)
@@ -555,19 +313,20 @@ async def parse_and_understand(
     paper: Paper, db: Database, *, assets_dir: str | None = None,
     storage_context=None, session_id: str = "",
 ) -> ParsedPaperDocument | None:
-    """Stage 1 + 1.5 + 2 + 3 for one paper's PDF (shared entry point).
+    """Parse a *user-uploaded* PDF through structure/OCR/VLM stages.
 
-    Used by the read pipeline (_process_single_paper) and on-demand full-text
-    escalation (tools_impl._ensure_fulltext) so both follow the exact same
-    multimodal path: structure parse → scanned-page recovery → VLM element
-    understanding → global persist + index.
+    Network-paper identifiers are rejected at this chokepoint.  This keeps
+    every caller upload-only even if an old checkpoint or extension passes a
+    legacy network ``Paper`` object.
 
     Returns the parsed document (text recovered, elements understood) or None
     when the PDF can't be parsed at all — callers handle None by degrading.
-    Element understanding/persistence is fingerprint-gated, so re-reading a
-    paper (or escalating it to full-text after a deep_read) costs zero VLM.
+    Element understanding/persistence is fingerprint-gated, so revisiting an
+    unchanged upload costs zero VLM calls.
     Never raises.
     """
+    if paper.source != "upload" and not str(paper.id).startswith("upload:"):
+        return None
     if not paper.pdf_path:
         return None
     assets_dir = assets_dir or get_settings().reader.assets_dir
@@ -725,7 +484,7 @@ def _index_elements_for_context(paper: Paper, elements: list, storage_context=No
 
 def _index_paper(paper: Paper, summary: PaperSummary, parsed: ParsedPaperDocument | None,
                  read_mode: str, session_id: str = "", *, storage_context=None) -> None:
-    """Index a paper's summary + full-text chunks into the session-scoped vector store.
+    """Index a paper's summary + upload full-text chunks into the session-scoped vector store.
 
     Best-effort: any failure (model unavailable, store closed) is logged and
     swallowed so it never blocks the read pipeline. Callers execute this

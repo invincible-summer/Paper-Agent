@@ -14,7 +14,7 @@ output_check: 每条空白都有 [paper_id] 证据并标注证据类型（作者
 ## 执行步骤
 
 1. **素材基础**：需核心集论文；还没有研究地图就先 `research_map()`——主题簇、时间脉络与谱系结构都是空白信号来源。
-2. **分维度收集证据**（每个维度一次 ask_papers，top_k=8；不要只发一个笼统的 "limitations" 查询，措辞不同的局限段落会漏召回）：
+2. **分维度收集证据**（每个维度一次 ask_papers，top_k=8）：网络论文只使用当前有效摘要中明确陈述的局限/未来工作；摘要未报告时写“摘要证据不足”，不得从旧全文缓存、标题或模型知识推断。用户上传论文可使用全文证据。
    - 方法空白：query 示例 "方法缺陷 无法处理 假设过强 method limitations cannot handle"
    - 数据与评测空白：query 示例 "数据集局限 基准缺失 指标失真 benchmark dataset limitation"
    - 场景与应用空白：query 示例 "尚未应用 未覆盖场景 应用局限 not yet applied"

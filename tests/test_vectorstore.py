@@ -84,13 +84,19 @@ def test_build_fulltext_chunks_fallback_to_raw():
     assert all(r["section"] == "full" for r in records)
 
 
-def test_summary_document_combines_fields():
+def test_summary_document_obeys_network_abstract_and_upload_fulltext_boundary():
     p = _paper()
     s = PaperSummary(paper_id="P1", research_problem="the problem", key_findings=["f1", "f2"])
     doc = _summary_document(s, p)
     assert "Graph Neural Networks" in doc
     assert "We study GNNs." in doc
-    assert "the problem" in doc
+    assert "the problem" not in doc
+    assert "f1" not in doc
+
+    p.source = "upload"
+    uploaded_doc = _summary_document(s, p)
+    assert "the problem" in uploaded_doc
+    assert "f1 f2" in uploaded_doc
 
 
 def test_upsert_and_search_summaries(monkeypatch, tmp_path):

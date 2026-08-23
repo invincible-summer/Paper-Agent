@@ -25,18 +25,14 @@ search:
   dedup_similarity_threshold: 0.95
   search_deadline_seconds: 30       # 多源检索总时限；到期返回已完成的部分结果
   per_source_timeout_seconds: 12    # 单条渠道查询时限
-  verify_fulltext: true             # 检索时只探测 OA PDF 文件头（不下载全文）
-  fulltext_verify_timeout_seconds: 30
-  force_fulltext_probe: true        # 时间不足时仍为全文探测预留预算（管理员可在 /admin/paper-search 关闭）
-  fulltext_status_ttl_days: 30
   sources:
     openalex: true
     semantic_scholar: true   # 运行时还要求 S2_API_KEY + S2_LICENSE_CONFIRMED=true
     arxiv: true
     crossref: true           # D-083: all-discipline DOI metadata (humanities/SS/medicine)
-    europepmc: true          # D-083: biomedicine / life sciences + preprints (bioRxiv/medRxiv) + OA PDFs
+    europepmc: true          # D-083: biomedicine / life sciences metadata + abstracts
     doaj: true               # D-083: OA all-discipline journals, humanities-strong
-    hal: true                # 法国国家开放知识库：人文社科/欧洲学位论文，OA 全文
+    hal: true                # 法国国家开放知识库：人文社科/欧洲学位论文元数据与摘要
     openaire: true           # OpenAIRE Graph API V3；无认证只作低频兜底
     core: true               # 运行时还要求 CORE_API_KEY + CORE_LICENSE_CONFIRMED=true
     biorxiv: false           # 官方 metadata API 同步后的本地 FTS 索引

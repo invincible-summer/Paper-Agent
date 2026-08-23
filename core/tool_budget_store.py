@@ -51,7 +51,7 @@ CODE_TOOL_BUDGETS: dict[str, float] = {
     "research_map": 45.0,
     "deep_read": 75.0,
     "reading_path": 20.0,
-    "write_review": 60.0,
+    "write_review": 75.0,
     "field_census": 35.0,
     "integrity_sweep": 35.0,
 }

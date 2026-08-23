@@ -1,6 +1,6 @@
 """HAL search backend - French national open repository (hyper articles en ligne).
 Free API, no key. Strong in humanities / social sciences / European theses.
-All records are author-deposited OA copies; fileMain_s is a direct legal PDF.
+This adapter requests metadata and abstracts only; deposited-file fields are intentionally excluded.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from tools.search.http_client import get_search_http_client
 API_URL = "https://api.archives-ouvertes.fr/search/"
 
 _FIELDS = ("halId_s,title_s,abstract_s,authFullName_s,producedDateY_i,"
-           "doiId_s,journalTitle_s,fileMain_s,keyword_s,docType_s")
+           "doiId_s,journalTitle_s,keyword_s,docType_s")
 
 _limiter = RateLimiter(max_concurrent=3, min_interval=0.5, source_name="hal", fast_fail_429=True)
 
@@ -52,7 +52,6 @@ def parse_docs(data: dict) -> list[Paper]:
             language="en",
             citation_count=0,  # HAL has no citation counts
             abstract=_first(doc.get("abstract_s")),
-            pdf_url=_first(doc.get("fileMain_s")) or None,  # OA repository PDF
             keywords=[k for k in (doc.get("keyword_s") or []) if isinstance(k, str)],
             urls=urls,
         ))

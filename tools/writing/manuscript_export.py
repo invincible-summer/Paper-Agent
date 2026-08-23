@@ -44,27 +44,34 @@ def _tex_escape(s: str) -> str:
 
 def _to_tex(title: str, lines: list[str]) -> str:
     body: list[str] = []
-    in_list = False
+    list_env: str | None = None
+
+    def close_list() -> None:
+        nonlocal list_env
+        if list_env:
+            body.append(f"\\end{{{list_env}}}")
+            list_env = None
+
     for ln in lines:
         m = re.match(r"^(#{1,4})\s+(.*)", ln)
         if m:
-            if in_list:
-                body.append("\\end{itemize}"); in_list = False
+            close_list()
             cmd = {1: "section", 2: "subsection", 3: "subsubsection", 4: "paragraph"}[len(m.group(1))]
             body.append(f"\\{cmd}{{{_tex_escape(m.group(2))}}}")
             continue
-        m = re.match(r"^\s*(?:[-*]|\d+\.)\s+(.*)", ln)
+        m = re.match(r"^\s*([-*]|\d+\.)\s+(.*)", ln)
         if m:
-            if not in_list:
-                body.append("\\begin{itemize}"); in_list = True
-            body.append("\\item " + _tex_inline(m.group(1)))
+            wanted = "enumerate" if m.group(1)[0].isdigit() else "itemize"
+            if list_env != wanted:
+                close_list()
+                body.append(f"\\begin{{{wanted}}}")
+                list_env = wanted
+            body.append("\\item " + _tex_inline(m.group(2)))
             continue
-        if in_list:
-            body.append("\\end{itemize}"); in_list = False
+        close_list()
         if ln.strip() and not ln.strip().startswith("|"):
             body.append(_tex_inline(ln))
-    if in_list:
-        body.append("\\end{itemize}")
+    close_list()
     return ("\\documentclass[12pt]{ctexart}\n\\usepackage[margin=2.5cm]{geometry}\n"
             f"\\title{{{_tex_escape(title)}}}\n\\date{{}}\n\\begin{{document}}\n\\maketitle\n"
             + "\n\n".join(body) + "\n\\end{document}\n")
@@ -75,12 +82,58 @@ def _tex_inline(s: str) -> str:
                    for c, b in _split_inline_bold(s))
 
 
-def _to_docx(title: str, lines: list[str], path: Path) -> None:
+def _add_markdown_runs(paragraph, text: str, doc) -> None:
+    """Render the small Markdown inline subset used by generated reports."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    token = re.compile(r"(\*\*.+?\*\*|\[[^\]]+\]\(https?://[^)]+\))")
+
+    def add_hyperlink(label: str, url: str) -> None:
+        relationship = doc.part.relate_to(url, RT.HYPERLINK, is_external=True)
+        hyperlink = OxmlElement("w:hyperlink")
+        hyperlink.set(qn("r:id"), relationship)
+        run = OxmlElement("w:r")
+        properties = OxmlElement("w:rPr")
+        color = OxmlElement("w:color")
+        color.set(qn("w:val"), "0563C1")
+        properties.append(color)
+        underline = OxmlElement("w:u")
+        underline.set(qn("w:val"), "single")
+        properties.append(underline)
+        run.append(properties)
+        value = OxmlElement("w:t")
+        value.text = label
+        run.append(value)
+        hyperlink.append(run)
+        paragraph._p.append(hyperlink)
+
+    for part in token.split(text or ""):
+        if not part:
+            continue
+        link = re.fullmatch(r"\[([^]]+)\]\((https?://[^)]+)\)", part)
+        if link:
+            add_hyperlink(link.group(1), link.group(2))
+            continue
+        bold = re.fullmatch(r"\*\*(.+?)\*\*", part)
+        run = paragraph.add_run(bold.group(1) if bold else part)
+        run.bold = bool(bold)
+
+
+def _split_table_row(line: str) -> list[str]:
+    r"""Split a GitHub-style table row while preserving escaped ``\|`` text."""
+    body = line.strip().strip("|")
+    return [cell.replace("\\|", "|").strip() for cell in re.split(r"(?<!\\)\|", body)]
+
+
+def _to_docx(title: str, lines: list[str], path: Path, *, include_title: bool = True) -> None:
     import docx
     from docx.shared import Pt
 
     doc = docx.Document()
-    doc.add_heading(title or "manuscript", level=0)
+    if include_title:
+        doc.add_heading(title or "manuscript", level=0)
     i = 0
     while i < len(lines):
         ln = lines[i]
@@ -89,32 +142,31 @@ def _to_docx(title: str, lines: list[str], path: Path) -> None:
             doc.add_heading(m.group(2).strip(), level=min(len(m.group(1)), 4))
             i += 1
             continue
-        m = re.match(r"^\s*(?:[-*]|\d+\.)\s+(.*)", ln)
+        m = re.match(r"^\s*([-*]|\d+\.)\s+(.*)", ln)
         if m:
-            p = doc.add_paragraph(style="List Bullet")
-            for chunk, bold in _split_inline_bold(m.group(1)):
-                run = p.add_run(chunk)
-                run.bold = bold
+            style = "List Number" if m.group(1)[0].isdigit() else "List Bullet"
+            p = doc.add_paragraph(style=style)
+            _add_markdown_runs(p, m.group(2), doc)
             i += 1
             continue
         if ln.strip().startswith("|") and i + 1 < len(lines) and re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[i + 1]):
             rows = []
             while i < len(lines) and lines[i].strip().startswith("|"):
                 if not re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[i]):
-                    rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
+                    rows.append(_split_table_row(lines[i]))
                 i += 1
             if rows:
                 table = doc.add_table(rows=len(rows), cols=max(len(r) for r in rows))
                 table.style = "Table Grid"
                 for r, row in enumerate(rows):
                     for c, cell in enumerate(row):
-                        table.cell(r, c).text = cell
+                        paragraph = table.cell(r, c).paragraphs[0]
+                        _add_markdown_runs(paragraph, cell, doc)
             continue
         if ln.strip():
             p = doc.add_paragraph()
-            for chunk, bold in _split_inline_bold(ln):
-                run = p.add_run(chunk)
-                run.bold = bold
+            _add_markdown_runs(p, ln, doc)
+            for run in p.runs:
                 run.font.size = Pt(11)
         i += 1
     doc.save(str(path))
@@ -122,7 +174,7 @@ def _to_docx(title: str, lines: list[str], path: Path) -> None:
 
 def export_manuscript(
     title: str, content: str, fmt: str = "md", *, storage_context=None,
-    session_id: str = "", owner_id: str = "",
+    session_id: str = "", owner_id: str = "", include_title: bool = True,
 ) -> dict:
     """Persist `content` as a downloadable manuscript file. Returns the
     /files/ record dict (fileName/fileType/mimeType/size + relative url)."""
@@ -139,11 +191,12 @@ def export_manuscript(
     fp = target_dir / name
     lines = (content or "").splitlines()
     if fmt == "md":
-        fp.write_text(f"# {title}\n\n{content}", encoding="utf-8")
+        prefix = f"# {title}\n\n" if include_title else ""
+        fp.write_text(prefix + content, encoding="utf-8")
     elif fmt == "tex":
         fp.write_text(_to_tex(title, lines), encoding="utf-8")
     else:
-        _to_docx(title, lines, fp)
+        _to_docx(title, lines, fp, include_title=include_title)
     if storage_context is not None and storage_context.channel == "openai_api":
         from core.api_artifact_store import ApiArtifactStore
         from core.api_storage_store import ApiStorageStore

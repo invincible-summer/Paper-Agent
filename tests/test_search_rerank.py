@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from agents.search_agent import (
-    adaptive_tier, parse_understanding, rebalance_core_for_fulltext, rerank_papers,
+    adaptive_tier, parse_understanding, rerank_papers,
 )
 from core.models import Paper
 
@@ -109,56 +109,3 @@ def test_tier_min_core_guarantee():
 
 def test_tier_empty():
     assert adaptive_tier([]) == ([], [])
-
-
-# --- verified full-text core rebalance -------------------------------------
-
-def _paper(pid, score, status, layer="search"):
-    return Paper(id=pid, title=pid, relevance_score=score,
-                 fulltext_status=status, layer=layer)
-
-
-def test_rebalance_promotes_highest_available_without_backfill():
-    core = [_paper("C1", .9, "unavailable", "core"),
-            _paper("C2", .8, "available", "core")]
-    candidates = [
-        _paper("A2", .6, "available"), _paper("U", .95, "unknown"),
-        _paper("A1", .7, "available"), _paper("N", .5, "unavailable"),
-        _paper("A3", .4, "available"), _paper("A4", .3, "available"),
-    ]
-    new_core, new_candidates, promoted = rebalance_core_for_fulltext(core, candidates)
-    assert promoted == ["A1", "A2", "A3", "A4"]
-    assert [p.id for p in new_core] == ["C1", "C2", "A1", "A2", "A3", "A4"]
-    assert [p.id for p in new_candidates] == ["U", "N"]
-    assert all(p.layer == "core" for p in new_core)
-    assert all(p.layer == "search" for p in new_candidates)
-
-
-def test_rebalance_target_is_total_available_when_fewer_than_five():
-    core = [_paper("C", .9, "unavailable", "core")]
-    candidates = [_paper("A", .8, "available"), _paper("U", .7, "unknown")]
-    new_core, new_candidates, promoted = rebalance_core_for_fulltext(core, candidates)
-    assert promoted == ["A"]
-    assert [p.id for p in new_core] == ["C", "A"]
-    assert [p.id for p in new_candidates] == ["U"]
-
-
-def test_rebalance_does_nothing_when_core_already_has_target():
-    core = [_paper(f"C{i}", 1 - i / 10, "available", "core") for i in range(5)]
-    candidates = [_paper("A", .4, "available")]
-    new_core, new_candidates, promoted = rebalance_core_for_fulltext(core, candidates)
-    assert promoted == []
-    assert new_core == core
-    assert new_candidates == candidates
-
-
-def test_rebalance_deduplicates_catalogue_with_core_priority():
-    shared_core = _paper("DUP", .9, "unavailable", "core")
-    duplicate_candidate = _paper("DUP", .8, "available")
-    readable = _paper("A", .7, "available")
-    core, candidates, promoted = rebalance_core_for_fulltext(
-        [shared_core, shared_core], [duplicate_candidate, readable, readable]
-    )
-    assert [p.id for p in core] == ["DUP", "A"]
-    assert candidates == []
-    assert promoted == ["A"]

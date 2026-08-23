@@ -29,7 +29,7 @@ def parse_results(data: dict) -> list[Paper]:
         landing_url = attrs.get("url") or (f"https://doi.org/{doi}" if doi else "")
         out.append(Paper(id=generate_paper_id(title,authors[0] if authors else "",year,doi),title=title,
             authors=authors,year=year,venue=attrs.get("publisher") or "",doi=doi,source="datacite",
-            abstract=abstract,pdf_url=None,keywords=subjects,urls={"datacite":landing_url} if landing_url else {}))
+            abstract=abstract,keywords=subjects,urls={"datacite":landing_url} if landing_url else {}))
     return out
 
 class DataCiteBackend(SearchBackend):

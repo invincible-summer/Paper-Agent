@@ -56,10 +56,11 @@ def test_openalex_refs_auth_helper(monkeypatch):
     assert mod._auth_params()=={"api_key":"key"}
 
 
-def test_unpaywall_not_called_without_contact(monkeypatch,tmp_path):
+def test_network_pdf_fetcher_is_inert_without_any_unpaywall_path(monkeypatch,tmp_path):
     from tools.pdf.fetcher import PDFFetcher
     f=PDFFetcher.__new__(PDFFetcher);f.pdf_dir=tmp_path
     class Exploding:
         async def get(self,*a,**k):raise AssertionError("must not call")
     f._client=Exploding();monkeypatch.setattr("core.config.get_settings",lambda:_fake_settings())
-    assert asyncio.run(f._unpaywall_pdf_url("10.1000/x")) is None
+    assert not hasattr(f, "_unpaywall_pdf_url")
+    assert asyncio.run(f.candidate_urls(types.SimpleNamespace(id="p1"))) == []

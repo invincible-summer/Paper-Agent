@@ -15,10 +15,7 @@ class SourceSpec:
     requires_key: str | None = None
     requires_license_confirmation: str | None = None
     supports_remote_search: bool = True
-    supports_pdf_probe: bool = True
-    supports_download_test: bool = True
     supports_abstract: bool = True
-    supports_fulltext: bool = True
     default_enabled: bool = False
     max_queries_per_turn: int = 2
 
@@ -36,17 +33,17 @@ SOURCE_SPECS: dict[str, SourceSpec] = {
     ),
     "arxiv": SourceSpec(
         "arxiv", "arXiv", "计算机、数学、物理等预印本", "Atom API",
-        "开放元数据；全文逐篇许可", ("cs", "physics", "math", "preprint"),
+        "开放元数据与摘要；全文分析需上传原文", ("cs", "physics", "math", "preprint"),
         default_enabled=True, max_queries_per_turn=2,
     ),
     "crossref": SourceSpec(
         "crossref", "Crossref", "跨学科 DOI 元数据", "REST API",
         "开放 API；提交元数据许可不一", ("general", "cs", "medical", "physics", "humanities", "dataset"),
-        default_enabled=True, supports_fulltext=False,
+        default_enabled=True,
     ),
     "europepmc": SourceSpec(
         "europepmc", "Europe PMC", "生命科学、医学和预印本", "REST API",
-        "公开 API；全文逐篇许可", ("medical", "biology", "preprint"), default_enabled=True,
+        "公开 API；摘要逐条获取，全文分析需上传原文", ("medical", "biology", "preprint"), default_enabled=True,
     ),
     "doaj": SourceSpec(
         "doaj", "DOAJ", "开放获取期刊", "REST API v4", "文章元数据 CC0",
@@ -54,7 +51,7 @@ SOURCE_SPECS: dict[str, SourceSpec] = {
     ),
     "hal": SourceSpec(
         "hal", "HAL", "法国国家开放仓储、人文社科和学位论文", "Solr REST API",
-        "法国开放数据许可；全文逐篇许可", ("humanities", "social_science", "repository", "thesis"), default_enabled=True,
+        "法国开放数据许可；摘要按记录获取，全文分析需上传原文", ("humanities", "social_science", "repository", "thesis"), default_enabled=True,
     ),
     "openaire": SourceSpec(
         "openaire", "OpenAIRE", "欧盟开放研究图谱和机构仓储", "Graph API V3",
@@ -67,35 +64,31 @@ SOURCE_SPECS: dict[str, SourceSpec] = {
     ),
     "biorxiv": SourceSpec(
         "biorxiv", "bioRxiv", "生命科学预印本本地元数据索引", "Official metadata API + SQLite FTS5",
-        "公开 API；全文逐篇许可", ("biology", "medical", "preprint"),
-        supports_remote_search=False, supports_pdf_probe=True, supports_download_test=True,
-        supports_fulltext=True,
+        "公开 API；摘要逐条获取，全文分析需上传原文", ("biology", "medical", "preprint"),
+        supports_remote_search=False,
     ),
     "medrxiv": SourceSpec(
         "medrxiv", "medRxiv", "医学预印本本地元数据索引", "Official metadata API + SQLite FTS5",
-        "公开 API；全文逐篇许可", ("medical", "preprint"),
-        supports_remote_search=False, supports_pdf_probe=True, supports_download_test=True,
-        supports_fulltext=True,
+        "公开 API；摘要逐条获取，全文分析需上传原文", ("medical", "preprint"),
+        supports_remote_search=False,
     ),
     "pubmed": SourceSpec(
         "pubmed", "PubMed", "NLM 权威生物医学文献索引", "NCBI E-utilities",
         "公开 API；记录/摘要可能受版权保护", ("medical", "biology"), default_enabled=False,
-        supports_pdf_probe=False, supports_download_test=False, supports_fulltext=False,
     ),
     "datacite": SourceSpec(
         "datacite", "DataCite", "数据集、软件、报告、学位论文和 DOI", "REST API",
         "元数据 CC0", ("dataset", "software", "report", "thesis", "general"),
-        default_enabled=False, supports_pdf_probe=False, supports_download_test=False,
+        default_enabled=False,
         # DataCite's official DOI metadata schema permits Abstract descriptions,
         # even though any given record may omit one.  Diagnose this separately
         # from search rather than presenting the cell as unsupported.
-        supports_abstract=True, supports_fulltext=False,
+        supports_abstract=True,
     ),
     "dblp": SourceSpec(
         "dblp", "DBLP", "计算机科学出版物", "Publication Search API",
         "元数据 CC0", ("cs",), default_enabled=False,
-        supports_pdf_probe=False, supports_download_test=False,
-        supports_abstract=False, supports_fulltext=False,
+        supports_abstract=False,
     ),
 }
 

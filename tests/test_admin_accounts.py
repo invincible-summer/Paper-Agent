@@ -40,15 +40,14 @@ def _users():
     ]
 
 
-def test_census_counts_histories_uploads_traces_and_pdfs(tmp_path, monkeypatch):
+def test_census_counts_histories_uploads_and_traces(tmp_path, monkeypatch):
     root = tmp_path / "project"
     aid = "a" * 32
     upload = _file(root / "data" / "uploads" / f"{aid}.pdf", b"%PDF-1.4 upload")
     sidecar = _file(root / "data" / "uploads" / f"{aid}.txt", b"extracted")
     trace = _file(root / "history_record" / "trace" / "trace_trace0001.jsonl", b'{"trace":1}')
-    pdf = _file(root / "data" / "pdfs" / "doi_1.pdf", b"%PDF-1.4 paper")
     _history(root, "user-a", "a1", attachments=[aid], trace_ids=["trace0001"],
-             papers=[{"id": "doi:1", "title": "T", "pdf_path": "data/pdfs/doi_1.pdf"}])
+             papers=[{"id": "doi:1", "title": "T"}])
 
     monkeypatch.setattr(user_store, "list_users", _users)
     data = aa.list_accounts_data(project_root=root)
@@ -61,8 +60,6 @@ def test_census_counts_histories_uploads_traces_and_pdfs(tmp_path, monkeypatch):
     assert row["upload_bytes"] == upload.stat().st_size + sidecar.stat().st_size
     assert row["trace_count"] == 1
     assert row["trace_bytes"] == trace.stat().st_size
-    assert row["pdf_ref_count"] == 1
-    assert row["pdf_ref_bytes"] == pdf.stat().st_size
     assert items["local"]["account_type"] == "web_user"
 
 
@@ -139,20 +136,6 @@ def test_delete_api_key_revokes_and_removes_private_files(tmp_path, monkeypatch)
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM api_sessions WHERE credential_id='key-1'").fetchone()[0] == 0
         assert conn.execute("SELECT status FROM api_artifacts WHERE id='art-1'").fetchone()[0] == "deleted"
-
-
-def test_cleanup_web_paper_cache_removes_pdfs_and_assets(tmp_path):
-    root = tmp_path / "project"
-    a = _file(root / "data" / "pdfs" / "x.pdf", b"%PDF-1.4 x")
-    b = _file(root / "backend" / "data" / "pdfs" / "y.pdf", b"%PDF-1.4 y")
-    c = _file(root / "data" / "assets" / "doi_x" / "figure_1.png", b"png")
-
-    expected_bytes = a.stat().st_size + b.stat().st_size + c.stat().st_size
-    result = aa.cleanup_web_paper_cache(project_root=root)
-    assert result["deleted"] is True
-    assert result["files"] == 3
-    assert result["bytes"] == expected_bytes
-    assert not a.exists() and not b.exists() and not c.exists()
 
 
 def test_secure_unlink_overwrites_then_removes(tmp_path):

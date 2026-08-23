@@ -45,7 +45,6 @@ _TOOL_META: dict[str, tuple[str, str]] = {
 
 MAX_CARD_CHARS = 1200
 
-_FULLTEXT_EMOJI = {"available": "🟢", "unavailable": "⚪", "unknown": "🟡"}
 
 _KIND_LABEL = {"figure": "图", "table": "表", "formula": "公式"}
 
@@ -119,11 +118,19 @@ def _line_reading_path(result: dict) -> str:
 
 
 def _line_deep_read(result: dict) -> str:
-    full_ids = set(result.get("full_text_paper_ids") or [])
-    fallback = result.get("abstract_fallback_papers") or []
-    if not full_ids and not fallback:
+    attachments = [
+        item for item in (result.get("attachments") or [])
+        if isinstance(item, dict)
+    ]
+    if not attachments:
         return ""
-    return f"**📖 深度阅读 · {len(full_ids)} 篇全文级 / {len(fallback)} 篇摘要级**"
+    ready = sum(
+        item.get("status") in {"ready", "text_only", "legacy_text_only"}
+        for item in attachments
+    )
+    deferred = sum(item.get("status") == "deferred" for item in attachments)
+    suffix = f" / {deferred} 个延期" if deferred else ""
+    return f"**📖 上传文件深读 · {ready}/{len(attachments)} 个已解析{suffix}**"
 
 
 def _line_explain_element(result: dict) -> str:
@@ -224,17 +231,11 @@ def _paper_link(p: dict) -> str:
     return "—"
 
 
-def _fulltext_cell(p: dict) -> str:
-    badge = _FULLTEXT_EMOJI.get(str(p.get("fulltext_status") or ""), "🟡")
-    pdf = str(p.get("pdf_url") or "").strip()
-    return f"[{badge}]({pdf})" if pdf else badge
-
-
 def render_search_table(result: dict) -> str | None:
     """Full paper listing for search_papers as one markdown table.
 
     Covers every core-layer and candidate-layer paper with year, citations,
-    verified full-text availability and source links; None when the result
+    abstract availability and source links; None when the result
     carries no papers at all (the caller degrades to the status line).
     """
     try:
@@ -244,15 +245,16 @@ def render_search_table(result: dict) -> str | None:
         if not rows:
             return None
         lines = [
-            "| 分层 | 标题 | 年份 | 被引 | 全文 | 链接 |",
+            "| 分层 | 标题 | 年份 | 被引 | 摘要 | 链接 |",
             "| --- | --- | --- | --- | --- | --- |",
         ]
         for p, layer in rows:
             year = p.get("year") or "—"
             cites = "—" if p.get("citation_count") is None else p.get("citation_count")
+            abstract = "有" if str(p.get("abstract") or "").strip() else "无"
             lines.append(
                 f"| {layer} | {_table_cell(p.get('title'), 60)} | {year} | {cites} "
-                f"| {_fulltext_cell(p)} | {_paper_link(p)} |")
+                f"| {abstract} | {_paper_link(p)} |")
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 — display only, never fail a turn
         return None

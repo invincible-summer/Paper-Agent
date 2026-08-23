@@ -86,10 +86,6 @@ def _patch(monkeypatch, store, llm_answer="A [P1]."):
     monkeypatch.setattr(vsm, "VectorStore", lambda *a, **k: store)
     monkeypatch.setattr(ti, "get_llm", lambda tier="light": _FakeLLM())
 
-    async def _noop_fulltext(session, paper_id, progress_cb=None):
-        return None
-
-    monkeypatch.setattr(ti, "_ensure_fulltext", _noop_fulltext)
     monkeypatch.setattr(ti, "_rewrite_query", _identity_rewrite)
     import tools.retrieval.rerank as rr
     monkeypatch.setattr(rr, "get_reranker", lambda: None)
@@ -138,33 +134,50 @@ def test_modality_bare_biao_false_positive_guard():
 
 # --- element caption passages in BM25 corpus ----------------------------------
 
-def test_session_corpus_includes_element_captions():
-    summary = PaperSummary(paper_id="P1")
-    summary.elements = [
-        {"element_id": "P1::figure::1", "kind": "figure", "caption": "Model architecture"},
-        {"element_id": "P1::table::1", "kind": "table", "caption": "Ablation results"},
-        {"element_id": "P1::figure::2", "kind": "figure", "caption": ""},  # no caption -> skip
-    ]
-    session = _session(papers=[Paper(id="P1", title="T")], summaries={"P1": summary})
+def test_session_corpus_includes_uploaded_element_captions(monkeypatch):
+    aid = "c" * 32
+    doc_id = f"upload:{aid}"
+    session = _session()
+    session.attachments = [{"id": aid, "filename": "paper.pdf", "ext": "pdf"}]
+
+    class FakeDB:
+        def __init__(self, *args, **kwargs): pass
+        def get_elements(self, paper_id):
+            assert paper_id == doc_id
+            return [
+                {"element_id": f"{doc_id}::figure::1", "kind": "figure",
+                 "caption": "Model architecture", "docling_extract": {}, "understanding": {}},
+                {"element_id": f"{doc_id}::table::1", "kind": "table",
+                 "caption": "Ablation results", "docling_extract": {}, "understanding": {}},
+                {"element_id": f"{doc_id}::figure::2", "kind": "figure",
+                 "caption": "", "docling_extract": {}, "understanding": {}},
+            ]
+        def close(self): pass
+
+    import tools.storage.database as database
+    monkeypatch.setattr(database, "Database", FakeDB)
     corpus = ti._session_corpus(session)
     by_id = {c["id"]: c for c in corpus}
-    fig = by_id.get("P1::figure::1::element")
+    fig = by_id.get(f"{doc_id}::figure::1::element")
     assert fig is not None
     assert fig["section"] == "figure"
     assert "Model architecture" in fig["text"]
-    assert by_id.get("P1::table::1::element") is not None
+    assert by_id.get(f"{doc_id}::table::1::element") is not None
     # Element without a caption carries no lexical signal -> not in BM25 corpus.
-    assert "P1::figure::2::element" not in by_id
+    assert f"{doc_id}::figure::2::element" not in by_id
 
 
 # --- elements vector track + modality filter + RRF fusion ---------------------
 
 def test_element_vector_track_surfaces_element_passage(monkeypatch):
-    elements = [_ehit("P1::figure::1", "P1", "figure",
+    aid = "d" * 32
+    doc_id = f"upload:{aid}"
+    elements = [_ehit(f"{doc_id}::figure::1", doc_id, "figure",
                       "[Caption] Arch\n[description] encoder-decoder diagram")]
     store = _FakeStore(elements=elements)
     _patch(monkeypatch, store, llm_answer="Figure [P1] shows the arch.")
-    session = _session(papers=[Paper(id="P1", title="T")])
+    session = _session()
+    session.attachments = [{"id": aid, "filename": "paper.pdf", "ext": "pdf"}]
     result = asyncio.run(ti._tool_ask_papers({"query": "explain Figure 1"}, session, None))
     assert not result.is_error
     # search_elements was called with the figure kind filter.
@@ -175,12 +188,14 @@ def test_element_vector_track_surfaces_element_passage(monkeypatch):
 
 
 def test_modality_none_searches_all_element_kinds(monkeypatch):
-    elements = [
-        _ehit("P1::formula::1", "P1", "formula", "[Formula] L = -sum(y log p)"),
-    ]
+    aid = "e" * 32
+    doc_id = f"upload:{aid}"
+    elements = [_ehit(f"{doc_id}::formula::1", doc_id, "formula",
+                      "[Formula] L = -sum(y log p)")]
     store = _FakeStore(elements=elements)
     _patch(monkeypatch, store)
-    session = _session(papers=[Paper(id="P1", title="T")])
+    session = _session()
+    session.attachments = [{"id": aid, "filename": "paper.pdf", "ext": "pdf"}]
     asyncio.run(ti._tool_ask_papers({"query": "how is the loss computed"}, session, None))
     assert store.element_queries
     assert store.element_queries[0][2] is None  # no kind filter
@@ -188,34 +203,38 @@ def test_modality_none_searches_all_element_kinds(monkeypatch):
 
 def test_element_track_isolated_to_session_papers(monkeypatch):
     """The elements collection is global; only the session's paper set is queried."""
+    own, foreign = "f" * 32, "0" * 32
     elements = [
-        _ehit("P1::figure::1", "P1", "figure", "P1 figure"),
-        _ehit("P2::figure::1", "P2", "figure", "P2 figure"),  # not in session
+        _ehit(f"upload:{own}::figure::1", f"upload:{own}", "figure", "P1 figure"),
+        _ehit(f"upload:{foreign}::figure::1", f"upload:{foreign}", "figure", "P2 figure"),
     ]
     store = _FakeStore(elements=elements)
     _patch(monkeypatch, store)
-    session = _session(papers=[Paper(id="P1", title="T")])  # only P1
+    session = _session()
+    session.attachments = [{"id": own, "filename": "own.pdf", "ext": "pdf"}]
     asyncio.run(ti._tool_ask_papers({"query": "Figure 1"}, session, None))
     assert store.element_queries
     queried = set(store.element_queries[0][1])
-    assert queried == {"P1"}  # P2 never queried -> session isolation holds
+    assert queried == {f"upload:{own}"}  # foreign upload is never queried
 
 
 def test_element_and_chunk_fuse_in_rrf(monkeypatch):
     """An element hit and a text-chunk hit both surface as distinct passages."""
-    chunks = [
-        SearchHit(id="P1::c0", document="method uses attention",
-                  metadata={"paper_id": "P1", "title": "T", "section": "Method"})]
-    elements = [_ehit("P1::figure::1", "P1", "figure",
+    aid = "1" * 32
+    doc_id = f"upload:{aid}"
+    chunks = [SearchHit(id=f"{aid}::c0", document="method uses attention",
+                        metadata={"paper_id": aid, "title": "T", "section": "Method"})]
+    elements = [_ehit(f"{doc_id}::figure::1", doc_id, "figure",
                       "[Caption] Attention architecture\n[description] encoder")]
     store = _FakeStore(chunks=chunks, elements=elements)
     _patch(monkeypatch, store, llm_answer="A [P1].")
-    session = _session(papers=[Paper(id="P1", title="T")])
+    session = _session()
+    session.attachments = [{"id": aid, "filename": "paper.pdf", "ext": "pdf"}]
     passages = ti._hybrid_retrieve(session, "attention architecture",
                                    paper_id=None, top_k=5)
     # Both a chunk passage and an element passage are present.
     element_passages = [p for p in passages if p.get("element_id")]
-    assert any(p.get("element_id") == "P1::figure::1" for p in element_passages)
+    assert any(p.get("element_id") == f"{doc_id}::figure::1" for p in element_passages)
     assert any(not p.get("element_id") for p in passages)  # the text chunk
 
 

@@ -46,7 +46,6 @@ logger = logging.getLogger(__name__)
 _MIN_CORE = 5
 _MAX_CORE = 12
 _MAX_CANDIDATES = 25
-_MIN_FULLTEXT_CORE = 5
 _ABS_TAU = 0.35        # absolute score floor (embedding path)
 _REL_TAU = 0.45        # relative-to-top1 floor
 _ELBOW_DROP = 0.25     # relative score drop that marks the core/candidate cut
@@ -55,18 +54,8 @@ _ELBOW_DROP = 0.25     # relative score drop that marks the core/candidate cut
 # a stalled provider must not eat the whole tool budget before retrieval
 # even starts. On timeout the raw topic is used directly.
 _UNDERSTAND_TIMEOUT_SECONDS = 10.0
-# Shares of the tool budget reserved for stages after retrieval (rerank is
-# CPU-bound; the probe stage clamps itself to whatever remains).
+# Reserve only a small tail for persistence and a recoverable partial result.
 _SEARCH_TAIL_RESERVE_SECONDS = 8.0
-_PROBE_TAIL_RESERVE_SECONDS = 3.0
-_PROBE_MIN_SECONDS = 2.0
-# With force_fulltext_probe, retrieval/rerank stop at a pre-probe deadline so
-# the probe always gets its slice; this caps how much can be carved out of the
-# retrieval phase on the default 45 s tool budget.
-_FORCE_PROBE_RESERVE_CAP_SECONDS = 12.0
-# Retrieval keeps at least this much on top of the tail reserve even when the
-# forced-probe reservation wants more (tiny tool budgets degrade gracefully).
-_FORCE_PROBE_MIN_RETRIEVAL_SECONDS = 5.0
 
 
 def _lang_instruction(language: str) -> str:
@@ -229,60 +218,6 @@ def rerank_papers(
 # ④ Adaptive tiering (pure)
 # ---------------------------------------------------------------------------
 
-def rebalance_core_for_fulltext(
-    core: list[Paper],
-    candidates: list[Paper],
-    *,
-    minimum_available: int = _MIN_FULLTEXT_CORE,
-) -> tuple[list[Paper], list[Paper], list[str]]:
-    """Best-effort full-text guarantee after verified availability probing.
-
-    Keep every relevance-selected core paper and *promote* the highest-scoring
-    verified-available candidates until the core contains up to
-    ``minimum_available`` readable papers. Promotions are removed from the
-    candidate layer and are never backfilled; unknown/unavailable rows never
-    count. The total paper catalogue therefore stays unchanged.
-    """
-    from core.reading_policy import normalize_fulltext_status
-
-    seen: set[str] = set()
-    core_out: list[Paper] = []
-    for paper in core:
-        if paper.id and paper.id not in seen:
-            core_out.append(paper)
-            seen.add(paper.id)
-    candidate_out: list[Paper] = []
-    for paper in candidates:
-        if paper.id and paper.id not in seen:
-            candidate_out.append(paper)
-            seen.add(paper.id)
-    available_total = sum(
-        normalize_fulltext_status(p.fulltext_status) == "available"
-        for p in core_out + candidate_out
-    )
-    target = min(max(0, minimum_available), available_total)
-    current = sum(
-        normalize_fulltext_status(p.fulltext_status) == "available" for p in core_out
-    )
-    if current < target:
-        eligible = sorted(
-            (p for p in candidate_out
-             if normalize_fulltext_status(p.fulltext_status) == "available"),
-            key=lambda p: -(p.relevance_score or 0),
-        )
-        promoted = eligible[: target - current]
-    else:
-        promoted = []
-
-    promoted_ids = {p.id for p in promoted}
-    core_out.extend(promoted)
-    candidate_out = [p for p in candidate_out if p.id not in promoted_ids]
-    for p in core_out:
-        p.layer = "core"
-    for p in candidate_out:
-        p.layer = "search"
-    return core_out, candidate_out, [p.id for p in promoted]
-
 
 def adaptive_tier(
     scored: list[Paper],
@@ -398,27 +333,9 @@ async def search_agent(state: ResearchState, progress_callback=None, invocation_
     # record every persistent capability/configuration skip. The manager creates
     # tasks only for sources that pass both gates.
     enabled = list(policy.sources)
-    # Optional probe-time reservation: with force_fulltext_probe the probe must
-    # run even when slow sources would otherwise eat the whole tool budget, so
-    # retrieval and rerank stop early at a pre-probe deadline instead.
-    force_probe = (policy.force_fulltext_probe and policy.verify_fulltext
-                   and policy.fulltext_verify_timeout_seconds > 0
-                   and policy.paper_fetch_mode != "disabled")
-    probe_reserve = 0.0
-    pre_probe_deadline = deadline
-    if force_probe:
-        probe_reserve = min(
-            float(policy.fulltext_verify_timeout_seconds),
-            _FORCE_PROBE_RESERVE_CAP_SECONDS,
-            max(0.0, remaining_budget() - _SEARCH_TAIL_RESERVE_SECONDS
-                - _FORCE_PROBE_MIN_RETRIEVAL_SECONDS),
-        )
-        pre_probe_deadline = deadline - probe_reserve - _PROBE_TAIL_RESERVE_SECONDS
-        if probe_reserve > 0.0:
-            report(f"已预留 {probe_reserve:.0f} 秒用于全文可获取性探测")
+    # Search owns only network metadata/abstract retrieval.  There is no
+    # remote-PDF probe or reserved full-text budget in this pipeline.
     retrieval_deadline = deadline - _SEARCH_TAIL_RESERVE_SECONDS
-    if probe_reserve > 0.0:
-        retrieval_deadline = min(retrieval_deadline, pre_probe_deadline)
     try:
         manager = SearchManager(
             enabled_sources=enabled,
@@ -461,14 +378,10 @@ async def search_agent(state: ResearchState, progress_callback=None, invocation_
     # short, use the deterministic no-embedding scorer rather than risking
     # that local model loading consumes the outer timeout.
     query_text = f"{plan['research_goal']}\n{topic}"
-    if (remaining_budget() >= 6.0
-            and (probe_reserve <= 0.0 or time.monotonic() < pre_probe_deadline)):
+    if remaining_budget() >= 6.0:
         report("语义相关性重排（本地嵌入）...")
         try:
             rerank_timeout = max(0.1, remaining_budget() - 2.0)
-            if probe_reserve > 0.0:
-                rerank_timeout = min(
-                    rerank_timeout, max(0.1, pre_probe_deadline - time.monotonic()))
             scored = await asyncio.wait_for(
                 run_cpu_bound(rerank_papers, copy.deepcopy(all_papers), query_text),
                 timeout=rerank_timeout,
@@ -495,92 +408,14 @@ async def search_agent(state: ResearchState, progress_callback=None, invocation_
     completed_stages.append("tiering")
     report(f"分层完成：核心集 {len(core)} 篇，候选 {len(candidates)} 篇")
 
-    # ④.5 Verified full-text availability. Search results and the genealogy
-    # graph may show "全文可获取" only after a lightweight live-PDF probe;
-    # a metadata pdf_url is never enough (it is often a paywalled landing
-    # page). The actual PDF download happens later in deep_read.
+    # ④.5 Network evidence ends at metadata and currently valid abstracts.
     state["papers"] = core
     state["candidates"] = candidates
-    publish_snapshot()
-    fulltext_statuses: dict[str, str] = {}
     state["capability_skips"] = []
-    if (policy.verify_fulltext and policy.fulltext_verify_timeout_seconds > 0
-            and policy.paper_fetch_mode != "disabled" and (core or candidates)):
-        # The probe stage is a second network budget; clamp it to the tool
-        # budget still remaining so it can never push the whole call past the
-        # outer deadline after retrieval has already succeeded.
-        probe_budget = min(float(policy.fulltext_verify_timeout_seconds),
-                           remaining_budget() - _PROBE_TAIL_RESERVE_SECONDS)
-        probe_floor = _PROBE_MIN_SECONDS
-        if force_probe and probe_budget < _PROBE_MIN_SECONDS and remaining_budget() > 2.0:
-            # Forced mode keeps a floor: a sub-minimum probe still resolves
-            # cached statuses instantly, so run instead of skipping while any
-            # usable time remains.
-            probe_budget = max(probe_budget, 1.0)
-            probe_floor = 1.0
-        if probe_budget >= probe_floor:
-            from tools.pdf.availability import verify_papers_fulltext
-
-            report("探测各论文 OA 全文可获取性（只读取 PDF 文件头，不下载全文）...")
-            capability_skips: list[dict] = []
-            try:
-                try:
-                    fulltext_statuses = await verify_papers_fulltext(
-                        core + candidates,
-                        storage_context=storage_context,
-                        progress_callback=report,
-                        timeout_seconds=probe_budget,
-                        capability_skips=capability_skips,
-                    )
-                except TypeError as exc:
-                    # Compatibility for injected extensions/tests that still
-                    # implement the pre-capability-skips optional signature.
-                    if "capability_skips" not in str(exc):
-                        raise
-                    fulltext_statuses = await verify_papers_fulltext(
-                        core + candidates,
-                        storage_context=storage_context,
-                        progress_callback=report,
-                        timeout_seconds=probe_budget,
-                    )
-                state["capability_skips"] = capability_skips
-            except Exception as e:  # noqa: BLE001
-                logger.warning("fulltext verification degraded to unknown: %s", e)
-            completed_stages.append("fulltext_probe")
-            n_avail = sum(v == "available" for v in fulltext_statuses.values())
-            n_unavail = sum(v == "unavailable" for v in fulltext_statuses.values())
-            n_unknown = len(core) + len(candidates) - n_avail - n_unavail
-            report(f"全文探测完成：可获取 {n_avail} · 不可获取 {n_unavail} · 待验证 {n_unknown}")
-        else:
-            skipped_stages.append("fulltext_probe")
-            state["budget_exhausted"] = True
-            report("剩余时间不足，跳过全文探测（全文状态保持待验证）")
-    state["fulltext_statuses"] = fulltext_statuses
-    if not policy.verify_fulltext or policy.paper_fetch_mode == "disabled":
-        skipped_stages.append("fulltext_probe")
-
-    # ④.6 Best-effort readable core guarantee. Availability is authoritative
-    # only after the probe above; doing this before verification would promote
-    # paywalled landing pages merely because they looked like PDF URLs.
-    core, candidates, promoted_ids = rebalance_core_for_fulltext(core, candidates)
-    state["papers"] = core
-    state["candidates"] = candidates
-    core_available = sum(p.fulltext_status == "available" for p in core)
-    total_available = sum(p.fulltext_status == "available" for p in core + candidates)
-    target_available = min(_MIN_FULLTEXT_CORE, total_available)
-    state["promoted_fulltext_core_ids"] = promoted_ids
-    state["fulltext_core_available"] = core_available
-    state["fulltext_core_target"] = target_available
-    if promoted_ids:
-        report(
-            f"核心层全文保障：提升 {len(promoted_ids)} 篇全文可读候选，"
-            f"核心层现有 {core_available} 篇全文可读论文"
-        )
-    elif core or candidates:
-        report(
-            f"核心层全文保障：核心层 {core_available} 篇全文可读论文"
-            f"（本次可达目标 {target_available} 篇）"
-        )
+    state["abstract_evidence"] = {
+        p.id: bool(paper_abstract_text(p).strip()) for p in core + candidates
+    }
+    publish_snapshot()
 
     # ⑤ Persist + index (best-effort). SQLite/Chroma and local embeddings are
     # synchronous, so keep them off the shared FastAPI event loop.

@@ -90,29 +90,28 @@ def test_tool_guard_no_papers():
     assert res.is_error and res.error_code == ErrorCode.NO_PAPERS
 
 
-def test_tool_extracts_from_fulltext_summary():
+def test_tool_does_not_reuse_network_fulltext_summary():
     p = Paper(id="p1", title="Paper One", source="openalex")
     s = _sess([p], {"p1": PaperSummary(paper_id="p1", full_text=TEXT)})
     res = asyncio.run(_tool_exhibit_index({}, s, None))
-    assert not res.is_error
-    groups = res.data["exhibits"]
-    assert len(groups) == 1 and groups[0]["paper_id"] == "p1"
-    assert len(groups[0]["captions"]) == 3
+    assert res.is_error
+    assert "上传附件" in res.text
+    assert "网络论文" in res.text
 
 
-def test_tool_marks_explicit_request_without_fulltext():
+def test_tool_rejects_legacy_network_paper_ids():
     p = Paper(id="p2", title="No Fulltext", source="arxiv")
     s = _sess([p], {})  # no summary / no full text
     res = asyncio.run(_tool_exhibit_index({"paper_ids": ["p2"]}, s, None))
-    assert res.status == "partial"  # nothing extracted
-    assert res.data["exhibits"] == []
-    assert res.data["missing_fulltext"][0]["id"] == "p2"
+    assert res.is_error
+    assert "上传附件" in res.text
 
 
 def test_schema_validation():
-    args, err_res = validate_args("exhibit_index", {"paper_ids": ["p1"]})
-    assert err_res is None and args["paper_ids"] == ["p1"]
-    _, err_res = validate_args("exhibit_index", {"paper_ids": 5})
+    args, err_res = validate_args("exhibit_index", {"attachment_ids": ["a" * 32]})
+    assert err_res is None and args["attachment_ids"] == ["a" * 32]
+    assert "paper_ids" not in args
+    _, err_res = validate_args("exhibit_index", {"attachment_ids": 5})
     assert err_res is not None and err_res.error_code == ErrorCode.VALIDATION_ERROR
 
 

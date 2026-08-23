@@ -33,6 +33,7 @@ def test_lifespan_blocking_finishes_before_yield(monkeypatch):
 
     calls = []
     monkeypatch.setattr("core.runtime_performance_policy.get_performance_policy", lambda: RuntimePerformancePolicy(startup_prewarm_mode="blocking"))
+    monkeypatch.setattr(app_main, "_retire_remote_fulltext_cache", lambda: {})
     monkeypatch.setattr(app_main, "_prewarm_agent_stack", lambda mode: calls.append(mode) or {})
 
     async def run():
@@ -60,6 +61,7 @@ def test_lifespan_background_yields_before_warmup_finishes(monkeypatch):
         return {}
 
     monkeypatch.setattr("core.runtime_performance_policy.get_performance_policy", lambda: RuntimePerformancePolicy(startup_prewarm_mode="background"))
+    monkeypatch.setattr(app_main, "_retire_remote_fulltext_cache", lambda: {})
     monkeypatch.setattr(app_main, "_prewarm_agent_stack", warm)
 
     async def run():
