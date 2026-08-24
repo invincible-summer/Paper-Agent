@@ -14,6 +14,7 @@ from app.schemas.chat import (ChatRequest, ChatHistoryListResponse, ChatHistoryI
                               ChatRenameRequest)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(_PROJECT_ROOT) not in sys.path:

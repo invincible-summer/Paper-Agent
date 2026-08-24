@@ -57,3 +57,46 @@ def test_event_stream_cancels_producer_on_consumer_drop():
 if __name__ == "__main__":
     test_event_stream_cancels_producer_on_consumer_drop()
     print("ok")
+
+
+def test_event_stream_normal_completion_logs_and_saves(monkeypatch, caplog):
+    """Consume the real Web response iterator through its completion path."""
+    from app.api.v1 import chat as chat_api
+    from app.schemas.chat import ChatRequest
+    from agents import chat_agent
+
+    saved = {}
+
+    async def fake_chat_turn(message, session, progress_cb, **kwargs):
+        assert message == "hello"
+        assert kwargs["attachments"] == []
+        assert kwargs["execution_context"].channel == "web"
+        yield {"type": "done", "trace_id": "trace-web", "content": "ok"}
+
+    def fake_save_chat_history(session, *, user_id):
+        saved["session"] = session
+        saved["user_id"] = user_id
+        return "/tmp/web-chat-history.json"
+
+    monkeypatch.setattr(chat_api, "current_user", lambda *_args: {"id": "web-user"})
+    monkeypatch.setattr(chat_api, "_owned_web_attachments", lambda _items, _uid: [])
+    monkeypatch.setattr(chat_agent, "chat_turn", fake_chat_turn)
+    monkeypatch.setattr(chat_agent, "save_chat_history", fake_save_chat_history)
+
+    async def scenario():
+        response = await chat_api.chat_stream(ChatRequest(message="hello"))
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+        return "".join(chunks)
+
+    with caplog.at_level("INFO", logger=chat_api.__name__):
+        body = asyncio.run(scenario())
+
+    assert "event: done\n" in body
+    assert '"trace_id": "trace-web"' in body
+    assert "event: history_saved\n" in body
+    assert '"filename": "web-chat-history.json"' in body
+    assert saved["user_id"] == "web-user"
+    assert saved["session"].trace_ids == ["trace-web"]
+    assert "web_stream_complete" in caplog.text
