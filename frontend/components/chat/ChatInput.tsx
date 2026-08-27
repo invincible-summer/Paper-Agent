@@ -151,7 +151,7 @@ export function ChatInput({
           onDragOver={(e) => { e.preventDefault(); if (!disabled && !uploading) setDragOver(true); }}
           onDragLeave={(e) => { if (e.currentTarget === e.target) setDragOver(false); }}
           onDrop={handleDrop}
-          className={`flex items-end gap-2 rounded-[22px] border bg-surface px-4 py-2.5 shadow-md transition-colors focus-within:border-accent/30 ${dragOver ? "border-accent/60 bg-accent-soft/20" : "border-border-light"}`}
+          className={`flex items-end gap-2 rounded-2xl border bg-surface px-4 py-2.5 transition-all ${dragOver ? "border-accent/60 bg-accent-soft/20 shadow-md" : "border-border-light shadow-sm"} focus-within:border-accent/40 focus-within:shadow-md`}
         >
           {/* D-087: paperclip attach button */}
           <button
@@ -186,7 +186,7 @@ export function ChatInput({
           {disabled && onStop ? (
             <button
               onClick={onStop}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white transition-all hover:bg-red-500 shadow-sm"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white transition-all hover:bg-error"
               title="停止生成"
             >
               <Square className="h-3.5 w-3.5 fill-current" />
@@ -218,7 +218,7 @@ export function ChatInput({
                 {c.image ? <ImageIcon className="h-3 w-3 text-accent" /> : <FileText className="h-3 w-3 text-accent" />}
                 <span className="max-w-[180px] truncate">{c.name}</span>
                 <span className="text-muted/60">{c.meta}</span>
-                <button onClick={(e) => { e.stopPropagation(); c.kind === "done" ? removeUploaded(c.idx) : removePending(c.idx); }} className="text-muted/50 hover:text-red-500" title="移除">
+                <button onClick={(e) => { e.stopPropagation(); c.kind === "done" ? removeUploaded(c.idx) : removePending(c.idx); }} className="text-muted/50 hover:text-error" title="移除">
                   <X className="h-3 w-3" />
                 </button>
               </span>
@@ -226,7 +226,7 @@ export function ChatInput({
             })}
           </div>
         )}
-        {uploadError && <p className="mt-1 text-[11px] text-red-500/70">{uploadError}</p>}
+        {uploadError && <p className="mt-1 text-[11px] text-error/80">{uploadError}</p>}
         <p className="mt-2 text-center text-[11px] text-muted/40">
           AI 生成内容仅供参考，请核实引用的原始文献
         </p>

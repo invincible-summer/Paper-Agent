@@ -1,13 +1,11 @@
 "use client";
 
-/** Shared admin-page UI primitives: one header/nav, one info-circle button,
- *  one help modal, one toggle, one confirm modal and one section card so all
- *  /admin pages stay aligned. */
+/** Shared admin-page UI primitives: one page header, one info-circle button,
+ *  one help modal, one toggle and one confirm modal so all /admin pages stay
+ *  aligned. Cross-page navigation lives in app/admin/layout.tsx (sidebar). */
 import { useState, type ReactNode } from "react";
-import { useRouter } from "next/navigation";
 import {
-  AlertTriangle, ArrowLeft, Database, HelpCircle, KeyRound, LayoutGrid,
-  RefreshCw, Search, ShieldCheck, Trash2,
+  AlertTriangle, HelpCircle, RefreshCw,
 } from "lucide-react";
 
 /** InfoButton — the question-mark circle that opens contextual help. */
@@ -141,67 +139,34 @@ export function ConfirmModal({ title, body, confirmText, confirmLabel = "确认�
   );
 }
 
-const NAV_ITEMS = [
-  { href: "/admin/auth-settings", label: "访问控制", icon: ShieldCheck },
-  { href: "/admin/agent-keys", label: "Agent Keys", icon: KeyRound },
-  { href: "/admin/display-policy", label: "卡片策略", icon: LayoutGrid },
-  { href: "/admin/paper-search", label: "论文检索", icon: Search },
-  { href: "/admin/performance", label: "性能策略", icon: RefreshCw },
-  { href: "/admin/api-storage", label: "API 存储", icon: Database },
-  { href: "/admin/accounts-data", label: "账号数据", icon: Trash2 },
-];
-
-/** AdminHeader — back-to-chat + title on the left, cross-page nav pills + an
- *  optional refresh action on the right. Every admin page renders this so
- *  buttons share one height and one order. */
-export function AdminHeader({ title, subtitle, icon, current, onRefresh, refreshing }: {
+/** AdminPageHeader — icon + title + optional refresh action on the right.
+ *  Cross-page navigation is provided by the admin layout sidebar. */
+export function AdminHeader({ title, subtitle, icon, onRefresh, refreshing }: {
   title: string;
   subtitle?: string;
   icon?: ReactNode;
-  current: string;
   onRefresh?: () => void;
   refreshing?: boolean;
 }) {
-  const router = useRouter();
   return (
     <header className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex min-w-0 items-center gap-3">
-        <button onClick={() => router.push("/chat")} aria-label="返回对话" title="返回对话"
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border-light text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg">
-          <ArrowLeft className="h-4 w-4" />
-        </button>
         {icon && (
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft/50 text-accent">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent-soft/60 text-accent">
             {icon}
           </div>
         )}
         <div className="min-w-0">
-          <h1 className="truncate text-xl font-bold">{title}</h1>
+          <h1 className="truncate text-xl font-bold tracking-tight">{title}</h1>
           {subtitle && <p className="truncate text-xs text-muted">{subtitle}</p>}
         </div>
       </div>
-      <nav className="flex flex-wrap items-center gap-2" aria-label="管理页导航">
-        {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
-          const active = href === current;
-          return (
-            <button key={href} onClick={() => router.push(href)} disabled={active}
-              aria-current={active ? "page" : undefined} title={active ? "当前页面" : label}
-              className={`flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm transition-colors ${
-                active
-                  ? "cursor-default border-accent/40 bg-accent/10 font-medium text-accent"
-                  : "border-border-light text-fg-secondary hover:bg-surface-hover hover:text-fg"
-              }`}>
-              <Icon className="h-4 w-4" />{label}
-            </button>
-          );
-        })}
-        {onRefresh && (
-          <button onClick={onRefresh} disabled={refreshing} aria-label="刷新" title="刷新"
-            className="flex h-9 w-9 items-center justify-center rounded-lg border border-border-light text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-60">
-            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-          </button>
-        )}
-      </nav>
+      {onRefresh && (
+        <button onClick={onRefresh} disabled={refreshing} aria-label="刷新" title="刷新"
+          className="flex h-9 w-9 items-center justify-center rounded-lg text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-60">
+          <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+        </button>
+      )}
     </header>
   );
 }

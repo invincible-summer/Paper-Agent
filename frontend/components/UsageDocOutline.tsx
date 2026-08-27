@@ -156,13 +156,13 @@ export function UsageDocOutline({ items }: { items: UsageDocOutlineItem[] }) {
   const minLevel = Math.min(...entries.map((item) => item.level));
 
   return (
-    <nav aria-label="本页目录" className="hidden w-56 shrink-0 lg:block">
-      <div className="sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto py-1 pr-2">
-        <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold tracking-wide text-muted">
+    <nav aria-label="本页目录" className="hidden w-60 shrink-0 lg:block">
+      <div className="sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto py-1 pr-2 [scrollbar-width:thin]">
+        <p className="mb-3 flex items-center gap-1.5 px-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
           <ListTree className="h-3.5 w-3.5" />
           本页目录
         </p>
-        <ul className="border-l border-border-light">
+        <ul className="space-y-0.5 border-l border-border-light">
           {entries.map((item) => {
             const depth = Math.min(Math.max(item.level - minLevel, 0), MAX_INDENT_DEPTH);
             const active = item.id === activeId;
@@ -173,11 +173,13 @@ export function UsageDocOutline({ items }: { items: UsageDocOutlineItem[] }) {
                   onClick={(event) => handleOutlineClick(event, item.id, scrollTo)}
                   title={item.text}
                   className={[
-                    "-ml-px block truncate border-l py-1 pr-2 text-sm leading-5 transition-colors",
+                    "-ml-px block truncate rounded-r-md border-l-2 py-[5px] pr-2 text-[13px] leading-5 transition-colors",
                     INDENT_CLASSES[depth],
                     active
-                      ? "border-accent font-medium text-accent"
-                      : "border-transparent text-fg-secondary hover:text-fg",
+                      ? "border-accent bg-accent-soft/40 font-medium text-accent"
+                      : depth === 0
+                        ? "border-transparent font-medium text-fg-secondary hover:border-border hover:text-fg"
+                        : "border-transparent text-muted hover:border-border hover:text-fg",
                   ].join(" ")}
                 >
                   {item.text}
@@ -198,10 +200,11 @@ export function UsageDocMobileOutline({ items }: { items: UsageDocOutlineItem[] 
   const minLevel = Math.min(...entries.map((item) => item.level));
 
   return (
-    <details className="mb-4 rounded-xl border border-border-light bg-surface lg:hidden">
-      <summary className="flex cursor-pointer select-none items-center gap-1.5 px-4 py-3 text-sm font-medium text-fg-secondary">
+    <details className="mb-4 rounded-xl border border-border-light bg-surface shadow-sm lg:hidden">
+      <summary className="flex cursor-pointer select-none items-center gap-1.5 px-4 py-3 text-sm font-medium text-fg-secondary [&::-webkit-details-marker]:hidden">
         <ListTree className="h-4 w-4" />
         本页目录
+        <span aria-hidden className="ml-auto text-xs text-muted">展开 / 收起</span>
       </summary>
       <ul className="border-t border-border-light px-4 py-2">
         {entries.map((item) => {
@@ -213,9 +216,9 @@ export function UsageDocMobileOutline({ items }: { items: UsageDocOutlineItem[] 
                 href={`#${item.id}`}
                 onClick={(event) => handleOutlineClick(event, item.id, scrollTo)}
                 className={[
-                  "block truncate py-1.5 text-sm leading-5 transition-colors",
+                  "block truncate rounded-md py-1.5 text-sm leading-5 transition-colors",
                   INDENT_CLASSES[depth],
-                  active ? "font-medium text-accent" : "text-fg-secondary hover:text-fg",
+                  active ? "bg-accent-soft/40 font-medium text-accent" : "text-fg-secondary hover:text-fg",
                 ].join(" ")}
               >
                 {item.text}

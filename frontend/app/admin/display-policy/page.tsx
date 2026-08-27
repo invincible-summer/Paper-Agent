@@ -134,15 +134,15 @@ export default function DisplayPolicyAdminPage() {
     } catch (err) { handleError(err); } finally { setWorking(false); }
   };
 
-  if (!checked || loading) return <div className="flex min-h-screen items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>;
-  if (!user || user.role !== "administrator") return <div className="p-8 text-center text-muted">仅管理员可访问。</div>;
-  if (!draft || !policy) return <div className="p-8 text-center text-error">{error || "策略加载失败"}</div>;
+  if (!checked || loading) return <div className="flex min-h-[60vh] items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>;
+  if (!user || user.role !== "administrator") return <div className="py-16 text-center text-muted">仅管理员可访问。</div>;
+  if (!draft || !policy) return <div className="py-16 text-center text-error">{error || "策略加载失败"}</div>;
 
-  return <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-8">
-    <div className="mx-auto max-w-4xl space-y-6 pb-24">
+  return <>
+    <div className="space-y-6 pb-24">
       <AdminHeader title="清小搭展示策略" icon={<LayoutGrid className="h-5 w-5" />}
         subtitle="控制 /v1 通道的状态行、技能提示与引用关系图谱附件；不影响自有前端。"
-        current="/admin/display-policy" onRefresh={() => void refresh()} refreshing={loading} />
+        onRefresh={() => void refresh()} refreshing={loading} />
 
       {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
       {saved && !dirty && <div className="rounded-lg border border-success/40 bg-success/10 p-3 text-sm text-success">策略已保存，下一条 /v1 消息立即生效。</div>}
@@ -197,8 +197,8 @@ export default function DisplayPolicyAdminPage() {
       </AdminSection>
     </div>
 
-    <div className="sticky bottom-0 border-t border-border-light bg-bg/90 backdrop-blur">
-      <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-8">
+    <div className="sticky bottom-0 -mx-4 border-t border-border-light bg-bg/90 px-4 backdrop-blur sm:-mx-8 sm:px-8">
+      <div className="flex flex-wrap items-center justify-between gap-3 py-3">
         <div className="flex items-center gap-2 text-xs text-muted">
           <InfoButton onClick={() => setHelpItem(HELP.save)} label="保存与版本说明" />
           <span>版本 v{policy.version} · 上次由 {policy.updated_by} 更新 · 保存后立即生效</span>
@@ -220,5 +220,5 @@ export default function DisplayPolicyAdminPage() {
     </div>
 
     <HelpModal item={helpItem} onClose={() => setHelpItem(null)} />
-  </main>;
+  </>;
 }

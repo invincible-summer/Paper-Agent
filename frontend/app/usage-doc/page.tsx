@@ -214,15 +214,15 @@ export default function UsageDocumentPage() {
             onClick={() => router.push("/chat")}
             aria-label="返回对话"
             title="返回对话"
-            className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border-light text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg"
+            className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg"
           >
             <ArrowLeft className="h-4 w-4" />
           </button>
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft/50 text-accent">
-            <BookOpenText className="h-5 w-5" />
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-accent-hover shadow-sm">
+            <BookOpenText className="h-5 w-5 text-white" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-2xl font-bold">使用文档</h1>
+            <h1 className="text-2xl font-bold tracking-tight">使用文档</h1>
             <p className="mt-1 text-sm text-muted">
               智能体功能介绍、使用方法与注意事项
               {document ? ` · 最后更新：${formatUpdatedAt(document.updated_at)}` : ""}
@@ -293,9 +293,12 @@ export default function UsageDocumentPage() {
               <UsageDocOutline items={outline} />
               <div className="min-w-0 flex-1">
                 <UsageDocMobileOutline items={outline} />
-                <article className="rounded-2xl border border-border-light bg-surface p-5 shadow-sm sm:p-8">
-                  <MarkdownContent content={document.content} outline={outline} />
-                </article>
+              <article className="rounded-2xl border border-border-light bg-surface p-5 shadow-sm sm:p-8">
+                <MarkdownContent content={document.content} outline={outline} />
+              </article>
+              <p className="mt-4 text-center text-xs text-muted/60">
+                本文档由管理员维护 · 内容如有出入请以实际产品为准
+              </p>
               </div>
             </div>
           </>

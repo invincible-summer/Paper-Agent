@@ -156,20 +156,20 @@ export default function ApiStorageAdminPage() {
     } catch (err) { handleError(err); } finally { setWorking(false); }
   };
 
-  if (!checked || loading) return <div className="flex min-h-screen items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>;
-  if (!user || user.role !== "administrator") return <div className="p-8 text-center text-muted">仅管理员可访问。</div>;
-  if (!draft || !policy) return <div className="p-8 text-center text-error">{error || "策略加载失败"}</div>;
+  if (!checked || loading) return <div className="flex min-h-[60vh] items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>;
+  if (!user || user.role !== "administrator") return <div className="py-16 text-center text-muted">仅管理员可访问。</div>;
+  if (!draft || !policy) return <div className="py-16 text-center text-error">{error || "策略加载失败"}</div>;
 
   const show = (key: string) => {
     const item = help[key];
     if (item) setHelpItem(storageHelpEntry(item));
   };
 
-  return <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-8">
-    <div className="mx-auto max-w-6xl space-y-6 pb-24">
+  return <>
+    <div className="space-y-6 pb-24">
       <AdminHeader title="OpenAI API 存储管理" icon={<Database className="h-5 w-5" />}
         subtitle="仅管理清小搭 /v1 数据，不影响自制前端持久化。"
-        current="/admin/api-storage" onRefresh={() => void refresh()} refreshing={loading} />
+        onRefresh={() => void refresh()} refreshing={loading} />
 
       {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
 
@@ -323,8 +323,8 @@ export default function ApiStorageAdminPage() {
       </AdminSection>
     </div>
 
-    <div className="sticky bottom-0 border-t border-border-light bg-bg/90 backdrop-blur">
-      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-8">
+    <div className="sticky bottom-0 -mx-4 border-t border-border-light bg-bg/90 px-4 backdrop-blur sm:-mx-8 sm:px-8">
+      <div className="flex flex-wrap items-center justify-between gap-3 py-3">
         <span className="text-xs text-muted">版本 v{policy.version} · 上次由 {policy.updated_by} 更新</span>
         <div className="flex gap-2">
           {dirty && (
@@ -354,5 +354,5 @@ export default function ApiStorageAdminPage() {
         onClose={() => setConfirm(null)} />
     )}
     <HelpModal item={helpItem} onClose={() => setHelpItem(null)} />
-  </main>;
+  </>;
 }

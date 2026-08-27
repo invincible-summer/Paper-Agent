@@ -40,13 +40,13 @@ export function Sidebar({
   };
 
   return (
-    <aside className="flex h-full w-[264px] shrink-0 flex-col border-r border-border-light bg-surface/50">
+    <aside className="flex h-full w-[264px] shrink-0 flex-col border-r border-border-light bg-surface">
       {/* Brand */}
       <div className="flex items-center gap-2 px-4 py-3.5">
-        <div className="flex h-6 w-6 items-center justify-center rounded-lg bg-accent-soft/50">
-          <Sparkles className="h-3.5 w-3.5 text-accent" />
+        <div className="flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-accent to-accent-hover shadow-sm">
+          <Sparkles className="h-3 w-3 text-white" />
         </div>
-        <span className="font-serif-display text-[13px] font-bold text-fg">Paper Agent</span>
+        <span className="text-[13px] font-bold tracking-tight text-fg">Paper Agent</span>
         {onCollapse && (
           <button
             onClick={onCollapse}
@@ -62,7 +62,7 @@ export function Sidebar({
       <div className="px-3 pb-2">
         <button
           onClick={onNewSession}
-          className="flex w-full items-center gap-2 rounded-xl border border-border-light px-3.5 py-2.5 text-[13px] font-medium text-fg-secondary transition-all hover:border-border hover:bg-surface-hover/60 hover:text-fg"
+          className="flex w-full items-center gap-2 rounded-lg bg-accent px-3.5 py-2.5 text-[13px] font-medium text-white shadow-sm transition-all hover:bg-accent-hover"
         >
           <Plus className="h-4 w-4" />
           {lang === "zh" ? "新对话" : "New Chat"}
@@ -71,7 +71,7 @@ export function Sidebar({
 
       {/* History */}
       <div className="flex-1 overflow-y-auto px-2 pb-4">
-        <div className="mb-2 flex items-center gap-1.5 px-2 pt-2">
+        <div className="mb-2 flex items-center gap-1.5 px-2 pt-3">
           <Clock className="h-3 w-3 text-muted" />
           <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted">
             {t("sidebar_history", lang)}
@@ -88,10 +88,10 @@ export function Sidebar({
               return (
                 <div
                   key={h.filename}
-                  className={`group flex cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 transition-colors hover:bg-surface-hover/50 ${active ? "bg-surface-hover/50" : ""}`}
+                  className={`group flex cursor-pointer items-center gap-2.5 rounded-lg border border-transparent px-3 py-2 transition-colors hover:bg-surface-hover ${active ? "border-accent/20 bg-accent-soft/70" : ""}`}
                   onClick={() => onSelectHistory(h.filename)}
                 >
-                  <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted/40" />
+                  <MessageSquare className={`h-3.5 w-3.5 shrink-0 ${active ? "text-accent" : "text-muted/40"}`} />
                   <div className="min-w-0 flex-1">
                     {editing === h.filename ? (
                       <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
@@ -114,7 +114,7 @@ export function Sidebar({
                       </div>
                     ) : (
                       <>
-                        <span className="block truncate text-[13px] text-fg-secondary group-hover:text-fg">
+                        <span className={`block truncate text-[13px] group-hover:text-fg ${active ? "font-medium text-accent" : "text-fg-secondary"}`}>
                           {h.title || h.topic?.slice(0, 24) || "新对话"}
                         </span>
                         <div className="flex items-center gap-1.5">

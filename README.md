@@ -48,7 +48,7 @@
 - **用户数据隔离**：登录账号/游客身份隔离对话历史、上传原件/sidecar、上传文档元素资产和 Web 导出文件；附件 id、历史文件名即使被猜到也不会跨账号读取。会话 RAG 仍按 `session_id` 与当前论文/附件集合过滤；OpenAI-compatible API 使用独立 `data/openai_api/` 私有存储，公共下载别名仅用于清小搭短期拉取。
 - **Git 与部署数据边界**：`data/`、`backend/data/`、`history_record/`、前端构建产物和本地数据库/PDF/上传/缓存均被 `.gitignore` 排除；云部署只同步源码，不上传开发机旧对话、旧论文、旧上传或旧数据库，服务器首次启动创建全新的运行数据。
 - Prompt 注册表（`core/prompts/registry.py`）：全部 prompt 带版本号，trace 可溯源
-- 中英双语 UI；「纸墨书院」设计风格（宣纸底 + 黛青主色 + 朱砂点缀）
+- 中英双语 UI；现代简洁风设计（冷灰白底 + 白卡片 + 靛蓝主色，亮/暗双主题）
 - Eval 质量护栏：`tests/eval/` 黄金集，改 prompt / 换模型后对比检索召回率
 - 数据合规：论文渠道按官方 API/OAI/元数据许可分为开放、条件启用和暂不接入；网络论文只获取元数据与当前有效摘要，不探测或下载全文；CORE/Semantic Scholar 需要额外许可门禁；bioRxiv/medRxiv 只通过官方 metadata API 建立本地索引；ChinaXiv 暂不接入。详见 [Official_Paper_Platform_License_Description.md](docs/Official_Paper_Platform_License_Description.md)
 

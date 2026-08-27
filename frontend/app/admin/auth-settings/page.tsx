@@ -183,23 +183,23 @@ export default function AuthSettingsAdminPage() {
   };
 
   if (!checked || loading) {
-    return <div className="flex min-h-screen items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>;
+    return <div className="flex min-h-[60vh] items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>;
   }
   if (!user || user.role !== "administrator") {
-    return <div className="p-8 text-center text-muted">仅管理员可访问。</div>;
+    return <div className="py-16 text-center text-muted">仅管理员可访问。</div>;
   }
   if (!draft || !settings) {
-    return <div className="p-8 text-center text-error">{error || "设置加载失败"}</div>;
+    return <div className="py-16 text-center text-error">{error || "设置加载失败"}</div>;
   }
 
   const loginControlsDisabled = !draft.auth_required;
   const verifyUnavailable = !smtp.configured;
 
-  return <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-8">
-    <div className="mx-auto max-w-4xl space-y-6 pb-24">
+  return <>
+    <div className="space-y-6 pb-24">
       <AdminHeader title="访问控制" icon={<ShieldCheck className="h-5 w-5" />}
         subtitle="运行时控制账号登录、游客访问、开放注册与邮箱要求；保存后立即生效。"
-        current="/admin/auth-settings" onRefresh={() => void refresh()} refreshing={loading} />
+        onRefresh={() => void refresh()} refreshing={loading} />
 
       {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
       {saved && !dirty && !authDisabled && (
@@ -291,8 +291,8 @@ export default function AuthSettingsAdminPage() {
       </AdminSection>
     </div>
 
-    <div className="sticky bottom-0 border-t border-border-light bg-bg/90 backdrop-blur">
-      <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-8">
+    <div className="sticky bottom-0 -mx-4 border-t border-border-light bg-bg/90 px-4 backdrop-blur sm:-mx-8 sm:px-8">
+      <div className="flex flex-wrap items-center justify-between gap-3 py-3">
         <div className="flex items-center gap-2 text-xs text-muted">
           <InfoButton onClick={() => setHelpItem(HELP.save)} label="保存与版本说明" />
           <span>版本 v{settings.version} · 上次由 {settings.updated_by} 更新 · 保存后立即生效</span>
@@ -332,5 +332,5 @@ export default function AuthSettingsAdminPage() {
     )}
 
     <HelpModal item={helpItem} onClose={() => setHelpItem(null)} />
-  </main>;
+  </>;
 }

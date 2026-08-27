@@ -25,9 +25,11 @@ import { useUIStore } from "@/stores/ui";
  * - 顶部簇筛选 chips / 候选集开关 / 语义边开关；底部谱系摘要统计行。
  */
 
+// 簇色与语义连线的固定色板：跨明暗主题均可读，与全局靛蓝主色协调。
+const SEMANTIC_EDGE_COLOR = "#94a3b8";
 const CLUSTER_COLORS = [
-  "#256d66", "#c2402a", "#4a628a", "#8a6d3b", "#6b4a8a", "#3b7a4a",
-  "#a05a2c", "#4a8a82",
+  "#4f46e5", "#0891b2", "#059669", "#d97706", "#dc2626", "#7c3aed",
+  "#db2777", "#64748b",
 ];
 const VIEW_W = 920;
 const VIEW_H = 560;
@@ -347,7 +349,7 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
               if (e.type === "semantic" && !showSemantic) return null;
               const isCite = e.type === "cites";
               const srcCluster = fullById.get(e.source)?.cluster ?? 0;
-              const color = isCite ? CLUSTER_COLORS[srcCluster % CLUSTER_COLORS.length] : "#b5b0a2";
+              const color = isCite ? CLUSTER_COLORS[srcCluster % CLUSTER_COLORS.length] : SEMANTIC_EDGE_COLOR;
               const key = `${e.source}->${e.target}`;
               const inFlow = focus != null && ancestorEdges.has(key);
               const faded = subtree != null && !inFlow &&
@@ -429,23 +431,23 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
       {/* Legend row */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border-light px-3 py-1.5 text-[10px] text-muted">
         <span className="flex items-center gap-1">
-          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="none" stroke="#256d66" strokeWidth="1.4" /><circle cx="7" cy="7" r="6.2" fill="#256d66" opacity="0.18" /></svg>
+          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="none" stroke={CLUSTER_COLORS[0]} strokeWidth="1.4" /><circle cx="7" cy="7" r="6.2" fill={CLUSTER_COLORS[0]} opacity="0.18" /></svg>
           奠基
         </span>
         <span className="flex items-center gap-1">
-          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="#4a628a" /></svg>
+          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill={CLUSTER_COLORS[1]} /></svg>
           核心集（桥梁为其中枢纽）
         </span>
         <span className="flex items-center gap-1">
-          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="none" stroke="#8a6d3b" strokeWidth="1.6" /></svg>
+          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="none" stroke={CLUSTER_COLORS[5]} strokeWidth="1.6" /></svg>
           候选集
         </span>
         <span className="flex items-center gap-1">
-          <svg width="22" height="8"><line x1="0" y1="4" x2="18" y2="4" stroke="#8a8577" strokeWidth="2.6" markerEnd="url(#arrow)" /></svg>
+          <svg width="22" height="8"><line x1="0" y1="4" x2="18" y2="4" stroke="#64748b" strokeWidth="2.6" markerEnd="url(#arrow)" /></svg>
           思想源流（越老越粗）
         </span>
         <span className="flex items-center gap-1">
-          <svg width="18" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="#b5b0a2" strokeWidth="1.2" strokeDasharray="3 2" /></svg>
+          <svg width="18" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke={SEMANTIC_EDGE_COLOR} strokeWidth="1.2" strokeDasharray="3 2" /></svg>
           语义相似
         </span>
         <span className="ml-auto text-muted/60">

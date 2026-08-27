@@ -118,7 +118,7 @@ Paper_Agent/
 │   ├── storage/                # database | vectorstore | genealogy
 │   └── export/                 # bibtex | report
 │
-├── frontend/                   # Next.js 14 chat 单页（纸墨书院设计令牌）
+├── frontend/                   # Next.js 14 chat 单页（现代简洁设计令牌）
 │   ├── app/                    # page.tsx(重定向) chat/page.tsx layout globals.css
 │   ├── components/             # AppShell/Nav/Sidebar/RightSidebar/SettingsPopover
 │   │                           # GenealogyGraph(SVG 谱系图) chat/(ChatInput/ChatMessage)
@@ -532,7 +532,7 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 - **附件 UI**：选择器与拖拽支持 PDF/DOCX/TEX/TXT/MD/BIB/PNG/JPG/JPEG/WebP。统一 `ChatAttachment` 保存扩展名、MIME、`multimodal_status`、元素数与预览 URL；图片通过带 `authHeaders()` 的 fetch 取 Blob URL 预览并在卸载时 revoke，不把受保护资源裸塞进 `<img src>`。右侧栏和消息 chip 显示“待按需理解 / 已理解 · N 个元素 / 视觉不可用 · 已降级 / 旧附件 · 仅文本”等状态，图片不显示误导性的“0 字”。deep_read/ask_papers 返回后会原位更新附件状态。
 - **流式渲染性能**：历史消息 `ChatMessage` 全部 `React.memo`（流式期间 msg 身份不变 → 旧消息零重渲染，markdown 不重解析）；thinking/answer delta 先入缓冲，**60ms 合帧**（~16 次/秒）再写 store（per-token setState 是卡顿与"成段吐出"的根因）；终态事件立即冲刷保证时序；`handleSend`/`handleRegenerate` 经 `useChatStore.getState()` 取 action 保持引用稳定（memo 不被回调身份击穿）；自动滚动仅在用户已贴近底部（240px）时触发。
 - **谱系图 v2**（`components/GenealogyGraph.tsx` + `lib/genealogy-layout.ts`，纯 SVG 零依赖）：**确定性布局纯函数**（输入确定→输出确定，Node 单测覆盖）：920px 固定内容宽、年份等距刻度（按年份序号而非真实间隔）、泳道按簇大小降序且行预算固定（同 (簇,年) 桶按被引取 top3，超编折叠为 "+N" 聚合节点，点击展开桶列表）、节点半径 3 档；920×560 固定视口 + fit-to-view + 滚轮缩放/拖拽平移/复位。**详情面板**（点节点展开）：元信息+角色徽章+摘要片段、引用关系双列（它引用的/被引用的，仅库内，点击跳转聚焦）、原文链接、**「深问这篇」**（经 `stores/ui.ts` 的 composerDraft 预填聊天输入框，打通图谱→RAG 问答）。**思想源流高亮**：聚焦节点时祖先引用链按年份渐变粗细（越老越粗）。顶部簇筛选 chips/候选集/语义边开关，底部谱系摘要统计行（核心/候选/引用边/语义边/奠基/桥梁）。
-- **设计**：「纸墨书院」令牌（`app/globals.css`）：宣纸底 + 墨色 + 黛青主色 + 朱砂点缀，serif 展示标题，tabular-nums 数字，亮/暗双主题（localStorage 持久化）。
+- **设计**：现代简洁令牌（`app/globals.css`）：冷灰白底 + 白卡片 + Indigo 主色 + Violet 点缀，全站语义 token（bg-surface / text-accent 等）统一取色，tabular-nums 数字，亮/暗双主题（localStorage 持久化）；`/admin/*` 共享左侧分组侧栏布局（`app/admin/layout.tsx`，窄屏转为顶部横向导航）。
 - **状态**：`stores/chat.ts`（会话+流式暂存+主题/语言偏好）、`stores/ui.ts`（边栏开合 + composerDraft 一次性聊天草稿）、`stores/auth.ts`（鉴权态：`/auth/config` + localStorage 令牌，mount 后 hydrate，SSR/水合安全）。
 - **多用户**：`/login` 根据 `REGISTRATION_OPEN/GUEST_ACCESS` 决定注册和游客入口；生产禁游客时 AppShell 强制未登录浏览器跳转。Nav 仅对 administrator 显示管理入口；`/admin/agent-keys` 提供创建（明文一次）、复制、列出、撤销长期 Agent Key及密码修改。所有 API 经 `authHeaders()` 自动带 Bearer 或（允许时）游客标识；预水合渲染确定性加载屏。
 - **SSE**：直连后端（`NEXT_PUBLIC_BACKEND_URL`，构建时注入）绕过代理缓冲；REST 走 Next 代理。

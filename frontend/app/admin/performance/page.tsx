@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { RotateCcw, Save, Timer, Zap } from "lucide-react";
+import { Gauge, RotateCcw, Save, Timer, Zap } from "lucide-react";
 import { AdminHeader, AdminSection, ConfirmModal, InfoButton, HelpModal, type HelpEntry } from "@/components/admin/AdminUI";
 import {
   getPerformancePolicy, updatePerformancePolicy, getToolBudgets, updateToolBudgets, recoverToolBreaker,
@@ -129,18 +129,22 @@ export default function PerformancePage() {
     finally { setRecovering(""); setRecoverTool(null); }
   };
 
-  return <main className="mx-auto max-w-6xl space-y-6 p-6"><AdminHeader title="性能策略" subtitle="首帧、研究地图与工具预算" current="/admin/performance" /><HelpModal item={helpItem} onClose={() => setHelpItem(null)} />
-    <div className="space-y-6 max-w-4xl">
+  return <>
+    <div className="space-y-6">
+      <AdminHeader title="性能策略" icon={<Gauge className="h-5 w-5" />}
+        subtitle="首帧、研究地图与工具预算" />
+      <HelpModal item={helpItem} onClose={() => setHelpItem(null)} />
+      <div className="space-y-6">
       <AdminSection title="启动预热" info={<InfoButton onClick={() => setHelpItem({title: "启动预热说明", entries: warmupOptions.map(([v,l,h]) => [l,h])})} />}><p className="text-sm opacity-75 mt-1">只执行本地 Python 导入和 LLM 客户端构造，不调用 LLM/VLM、不下载模型、不增加外网带宽；blocking/background 会提前产生约 9–12 秒 CPU 峰值和约 290 MB 常驻内存。</p>
         <div className="mt-4 space-y-3">{warmupOptions.map(([value, label, help]) => <label key={value} className="flex items-start gap-3"><input type="radio" checked={warmup === value} onChange={() => setWarmup(value)} /><span><b>{label}</b><span className="block text-sm opacity-70">{help}</span></span></label>)}</div>
       </AdminSection>
       <AdminSection title="地图引文增强" info={<InfoButton onClick={() => setHelpItem({title: "地图引文说明", entries: citationOptions.map(([v,l,h]) => [l,h])})} />}><p className="text-sm opacity-75 mt-1">OpenAlex 请求由后端批量发起，只取元数据，不下载 PDF，不增加浏览器请求。模式立即生效。</p>
         <div className="mt-4 space-y-3">{citationOptions.map(([value, label, help]) => <label key={value} className="flex items-start gap-3"><input type="radio" checked={citation === value} onChange={() => setCitation(value)} disabled={!data?.openalex_enabled} /><span><b>{label}</b><span className="block text-sm opacity-70">{help}</span></span></label>)}</div>
-        {data && !data.openalex_enabled && <p className="mt-3 text-amber-600">已禁用：{data.map_citation_disabled_reason}。有效模式为 off，保证零 OpenAlex 请求。</p>}
+        {data && !data.openalex_enabled && <p className="mt-3 text-warning">已禁用：{data.map_citation_disabled_reason}。有效模式为 off，保证零 OpenAlex 请求。</p>}
       </AdminSection>
-      {data && <div className="rounded-xl bg-slate-50 dark:bg-slate-800 p-4 text-sm">当前进程：{data.prewarm.prewarm_state} · 模式 {data.prewarm.active_mode} · {Math.round(data.prewarm.duration_ms)} ms{data.prewarm.last_error && <span className="text-red-600"> · {data.prewarm.last_error}</span>}</div>}
+      {data && <div className="rounded-xl border border-border-light bg-surface-hover/60 p-4 text-sm">当前进程：{data.prewarm.prewarm_state} · 模式 {data.prewarm.active_mode} · {Math.round(data.prewarm.duration_ms)} ms{data.prewarm.last_error && <span className="text-error"> · {data.prewarm.last_error}</span>}</div>}
       {message && <p className="text-sm">{message}</p>}
-      <button disabled={busy || !data} onClick={save} className="rounded-lg bg-blue-600 px-5 py-2 text-white disabled:opacity-50">{busy ? "保存中…" : "保存性能策略"}</button>
+      <button disabled={busy || !data} onClick={save} className="flex h-10 items-center rounded-lg bg-accent px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">{busy ? "保存中…" : "保存性能策略"}</button>
 
       {budgets && <AdminSection title="工具时限预算" icon={<Timer className="h-5 w-5 text-accent" />}
         info={<InfoButton onClick={() => setHelpItem(BUDGET_HELP)} label="工具时限预算说明" />}>
@@ -162,7 +166,7 @@ export default function PerformancePage() {
               onChange={(e) => setDraftApiTurnSoft(Number(e.target.value))}
               className={`mt-2 w-32 rounded-lg border px-3 py-2 ${draftApiTurnSoft !== budgets.policy.api_turn_soft_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
             <span className="ml-2 text-xs text-muted">默认 95s · 当前硬时限 {draftApiTurnHard}s</span>
-            {draftApiTurnSoft > Math.max(30, draftApiTurnHard - 5) && <span className="mt-1 block text-xs text-amber-600">软时限最多 {(draftApiTurnHard - 5)}s：请先调大硬时限，或降低软时限。</span>}
+            {draftApiTurnSoft > Math.max(30, draftApiTurnHard - 5) && <span className="mt-1 block text-xs text-warning">软时限最多 {(draftApiTurnHard - 5)}s：请先调大硬时限，或降低软时限。</span>}
           </label>
           <label className="rounded-xl border border-border-light p-4 text-sm" title="清小搭 /v1 整轮硬时限；超过后强制终止请求（非流式返回 504，流式直接断开）。软时限至多比它小 5 秒；逐工具预算上限跟随该值。">
             <span className="font-medium">清小搭整轮硬时限（秒）</span>
@@ -171,7 +175,7 @@ export default function PerformancePage() {
               onChange={(e) => setDraftApiTurnHard(Number(e.target.value))}
               className={`mt-2 w-32 rounded-lg border px-3 py-2 ${draftApiTurnHard !== budgets.policy.api_turn_hard_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
             <span className="ml-2 text-xs text-muted">默认 105s</span>
-            {draftApiTurnHard > 120 && <span className="mt-1 block text-xs text-amber-600">超过清小搭网关 120 秒的部分仅直连 /v1 的调用能真正用满；经网关转发的请求仍会在 120 秒被网关掐断。</span>}
+            {draftApiTurnHard > 120 && <span className="mt-1 block text-xs text-warning">超过清小搭网关 120 秒的部分仅直连 /v1 的调用能真正用满；经网关转发的请求仍会在 120 秒被网关掐断。</span>}
           </label>
           <label className="rounded-xl border border-border-light p-4 text-sm" title="未在下方列出的工具（以及未来新增工具）使用的默认预算。">
             <span className="font-medium">默认预算（秒）</span>
@@ -210,6 +214,7 @@ export default function PerformancePage() {
           <span className="text-xs text-muted">版本 v{budgets.policy.version} · 保存后下一次工具调用立即生效</span>
         </div>
       </AdminSection>}
+      </div>
     </div>
 
     {recoverTool && budgets && (
@@ -218,7 +223,7 @@ export default function PerformancePage() {
         confirmLabel="立即恢复" busy={recovering === recoverTool}
         onConfirm={() => void doRecover(recoverTool)} onClose={() => setRecoverTool(null)} />
     )}
-  </main>;
+  </>;
 }
 
 function ToolBudgetRow({ item, value, reserve, limits, breaker, onChange, onRecover }: {
@@ -255,8 +260,8 @@ function ToolBudgetRow({ item, value, reserve, limits, breaker, onChange, onReco
         建议 ≤{item.recommended_max}s · 代码默认 {item.default_seconds}s
         {value !== item.default_seconds && ` · 当前 ${value}s`}
       </p>
-      {overRecommended && <p className="mt-1 text-xs text-amber-600">已超过建议上限 {item.recommended_max}s：请先确认网络与渠道状况，超时前无法完成的调用仍会作废。</p>}
-      {exceedsApiTurn && <p className="mt-1 text-xs text-amber-600">预算 + 预留 &gt; /v1 整轮 {limits.api_turn_soft_seconds}s：超出部分仅 Web 通道（{limits.web_turn_soft_seconds}s）生效。</p>}
+      {overRecommended && <p className="mt-1 text-xs text-warning">已超过建议上限 {item.recommended_max}s：请先确认网络与渠道状况，超时前无法完成的调用仍会作废。</p>}
+      {exceedsApiTurn && <p className="mt-1 text-xs text-warning">预算 + 预留 &gt; /v1 整轮 {limits.api_turn_soft_seconds}s：超出部分仅 Web 通道（{limits.web_turn_soft_seconds}s）生效。</p>}
     </div>
     <label className="flex shrink-0 items-center gap-2 text-sm">
       <input type="number" min={limits.min_seconds} max={limits.max_seconds} value={Number.isFinite(value) ? value : ""}

@@ -177,7 +177,7 @@ export default function AgentKeysAdminPage() {
 
   if (!checked || (user?.role === "administrator" && loading)) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-bg">
+      <div className="flex min-h-[60vh] items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-accent" />
       </div>
     );
@@ -185,8 +185,8 @@ export default function AgentKeysAdminPage() {
 
   if (!user || user.role !== "administrator") {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-bg px-4">
-        <div className="max-w-md rounded-2xl border border-border-light bg-surface p-8 text-center">
+      <div className="flex min-h-[60vh] items-center justify-center px-4">
+        <div className="max-w-md rounded-2xl border border-border-light bg-surface p-8 text-center shadow-sm">
           <ShieldCheck className="mx-auto mb-3 h-10 w-10 text-muted" />
           <h1 className="text-lg font-semibold text-fg">无权访问管理页面</h1>
           <p className="mt-2 text-sm text-muted">只有 administrator 角色可以管理 Agent API Key。</p>
@@ -199,11 +199,11 @@ export default function AgentKeysAdminPage() {
   }
 
   return (
-    <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-6">
-      <div className="mx-auto max-w-5xl space-y-6">
+    <>
+      <div className="space-y-6 pb-8">
         <AdminHeader title="Agent 接入管理" icon={<ShieldCheck className="h-5 w-5" />}
           subtitle={`管理员：${user.display_name || user.username}`}
-          current="/admin/agent-keys" onRefresh={() => void refresh()} refreshing={loading} />
+          onRefresh={() => void refresh()} refreshing={loading} />
 
         {error && <p className="rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-fg-secondary">{error}</p>}
 
@@ -281,6 +281,6 @@ export default function AgentKeysAdminPage() {
           onClose={() => setConfirmRevoke(null)} />
       )}
       <HelpModal item={helpItem} onClose={() => setHelpItem(null)} />
-    </main>
+    </>
   );
 }

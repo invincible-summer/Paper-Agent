@@ -3,66 +3,67 @@
 @tailwind utilities;
 
 /* ==========================================================================
-   Paper Agent · 「纸墨书院」设计令牌（仿 Edu_Agent 风格）
-   浅色 = 宣纸底 + 墨色 + 黛青主色 + 朱砂点缀
-   深色 = 墨夜底 + 同系高明度色
+   Paper Agent · 现代简洁设计令牌（清新中性底 + 靛蓝主色）
+   浅色 = 冷灰白底 + 白卡片 + Indigo 主色 + Violet 点缀
+   深色 = 蓝黑底 + 深灰卡片 + 同系高亮色
+   变量名与旧版保持一致：所有组件的语义类（bg-surface / text-accent 等）无需改动。
    ========================================================================== */
 
 :root {
   /* 基底 */
-  --bg: 246 245 241;            /* 宣纸 */
-  --surface: 255 254 250;       /* 纸面 */
-  --surface-hover: 240 238 231; /* 纸面悬浮 */
-  --surface-sunken: 238 236 229;/* 凹陷区（代码块/表格头） */
-  --border: 224 221 212;
-  --border-light: 233 230 223;
-  /* 墨色 */
-  --fg: 30 30 36;
-  --fg-secondary: 82 80 74;
-  --muted: 140 137 128;
-  /* 黛青（主色） */
-  --accent: 37 109 102;
-  --accent-hover: 29 86 80;
-  --accent-soft: 221 234 230;
-  /* 朱砂（点缀：标记/角色徽章） */
-  --accent2: 194 64 42;
-  --accent2-hover: 160 50 32;
-  --accent2-soft: 245 227 221;
+  --bg: 248 249 251;             /* 冷灰白画布 */
+  --surface: 255 255 255;        /* 卡片白 */
+  --surface-hover: 243 245 248;  /* 悬浮底 */
+  --surface-sunken: 244 246 249; /* 凹陷区（代码块/表头） */
+  --border: 226 229 235;
+  --border-light: 237 239 243;
+  /* 文字 */
+  --fg: 24 27 34;
+  --fg-secondary: 82 89 102;
+  --muted: 145 152 163;
+  /* 靛蓝（主色） */
+  --accent: 79 70 229;
+  --accent-hover: 67 56 202;
+  --accent-soft: 228 232 254;
+  /* 紫罗兰（点缀：标记/图表簇） */
+  --accent2: 124 58 237;
+  --accent2-hover: 109 40 217;
+  --accent2-soft: 240 232 255;
   /* 语义 */
-  --success: 46 125 82;
-  --error: 180 56 46;
-  --warning: 176 126 12;
-  /* 阴影：低存在感 */
-  --shadow-sm: 0 1px 2px 0 rgb(30 26 18 / 0.05);
-  --shadow-md: 0 4px 14px -4px rgb(30 26 18 / 0.08), 0 2px 4px -1px rgb(30 26 18 / 0.03);
-  --shadow-lg: 0 10px 30px -8px rgb(30 26 18 / 0.12), 0 4px 8px -2px rgb(30 26 18 / 0.05);
+  --success: 5 150 105;
+  --error: 220 38 38;
+  --warning: 202 138 4;
+  /* 阴影：轻悬浮感 */
+  --shadow-sm: 0 1px 2px 0 rgb(15 20 30 / 0.05);
+  --shadow-md: 0 4px 16px -4px rgb(15 20 30 / 0.1), 0 2px 6px -2px rgb(15 20 30 / 0.05);
+  --shadow-lg: 0 12px 32px -8px rgb(15 20 30 / 0.14), 0 4px 10px -4px rgb(15 20 30 / 0.06);
   --font-sans: "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-serif: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", Georgia, ui-serif, serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
 
 .dark {
-  --bg: 16 18 22;
-  --surface: 24 27 33;
-  --surface-hover: 33 36 44;
-  --surface-sunken: 20 22 28;
-  --border: 45 48 58;
-  --border-light: 36 39 48;
-  --fg: 232 230 225;
-  --fg-secondary: 192 190 182;
-  --muted: 138 141 150;
-  --accent: 86 173 161;
-  --accent-hover: 122 199 187;
-  --accent-soft: 25 51 49;
-  --accent2: 226 108 82;
-  --accent2-hover: 238 138 114;
-  --accent2-soft: 60 32 27;
-  --success: 84 176 120;
-  --error: 224 106 94;
-  --warning: 212 164 42;
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.25);
-  --shadow-md: 0 4px 14px -4px rgb(0 0 0 / 0.3), 0 2px 4px -1px rgb(0 0 0 / 0.18);
-  --shadow-lg: 0 10px 30px -8px rgb(0 0 0 / 0.35), 0 4px 8px -2px rgb(0 0 0 / 0.22);
+  --bg: 11 13 17;
+  --surface: 20 23 29;
+  --surface-hover: 31 35 43;
+  --surface-sunken: 15 18 23;
+  --border: 45 50 61;
+  --border-light: 36 40 49;
+  --fg: 233 236 242;
+  --fg-secondary: 176 183 194;
+  --muted: 130 138 150;
+  --accent: 99 102 241;
+  --accent-hover: 114 117 248;
+  --accent-soft: 45 48 106;
+  --accent2: 139 92 246;
+  --accent2-hover: 156 116 250;
+  --accent2-soft: 52 38 96;
+  --success: 16 185 129;
+  --error: 248 113 113;
+  --warning: 251 191 36;
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 16px -4px rgb(0 0 0 / 0.35), 0 2px 6px -2px rgb(0 0 0 / 0.2);
+  --shadow-lg: 0 12px 32px -8px rgb(0 0 0 / 0.45), 0 4px 10px -4px rgb(0 0 0 / 0.28);
 }
 
 html, body {
@@ -80,10 +81,8 @@ html, body, * {
   transition: background-color 0.2s ease, border-color 0.2s ease, color 0.15s ease;
 }
 
-/* Serif display headings（书院感） */
-.font-serif-display {
-  font-family: var(--font-serif);
-  letter-spacing: 0.01em;
+::selection {
+  background-color: rgb(var(--accent) / 0.18);
 }
 
 /* Tabular numbers（统计数字等宽） */
@@ -96,7 +95,6 @@ html, body, * {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgb(var(--border)); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgb(var(--muted)); }
-.sidebar-scroll::-webkit-scrollbar { width: 4px; }
 
 /* Inputs */
 input, textarea, select {
@@ -107,54 +105,20 @@ input, textarea, select {
 input:focus, textarea:focus, select:focus {
   outline: none;
   border-color: rgb(var(--accent));
-  box-shadow: 0 0 0 3px rgb(var(--accent) / 0.12);
+  box-shadow: 0 0 0 3px rgb(var(--accent) / 0.14);
 }
 input[type="radio"], input[type="checkbox"], input[type="number"] {
   accent-color: rgb(var(--accent));
 }
 
-/* Utility classes */
-.card {
-  background: rgb(var(--surface));
-  border: 1px solid rgb(var(--border-light));
-  border-radius: 14px;
-  box-shadow: var(--shadow-sm);
-}
-.card-hover {
-  transition: box-shadow 0.2s, border-color 0.2s;
-}
-.card-hover:hover {
-  box-shadow: var(--shadow-md);
-  border-color: rgb(var(--border));
-}
-.btn-primary {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  border-radius: 10px;
-  background: rgb(var(--accent));
-  color: white;
-  font-weight: 600;
-  font-size: 0.875rem;
-  padding: 0.625rem 1.5rem;
-  box-shadow: 0 1px 3px rgb(37 109 102 / 0.3);
-  transition: all 0.15s;
-}
-.btn-primary:hover:not(:disabled) {
-  background: rgb(var(--accent-hover));
-  box-shadow: 0 2px 8px rgb(37 109 102 / 0.35);
-}
-.btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+/* 徽章（研究地图角色 / 数据集标签） */
 .badge {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
   padding: 0.125rem 0.5rem;
-  border-radius: 6px;
-  font-size: 0.7rem;
+  border-radius: 9999px;
+  font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: 0.02em;
 }
@@ -173,25 +137,6 @@ input[type="radio"], input[type="checkbox"], input[type="number"] {
 .badge-muted {
   background: rgb(var(--surface-hover));
   color: rgb(var(--muted));
-}
-.input-base {
-  width: 100%;
-  border-radius: 10px;
-  border: 1px solid rgb(var(--border));
-  background: rgb(var(--bg));
-  padding: 0.5rem 0.875rem;
-  font-size: 0.875rem;
-  color: rgb(var(--fg));
-}
-.label-text {
-  font-size: 0.8125rem;
-  font-weight: 600;
-  color: rgb(var(--fg-secondary));
-}
-.hint-text {
-  font-size: 0.75rem;
-  color: rgb(var(--muted));
-  line-height: 1.4;
 }
 
 /* Markdown prose styles for chat messages */
@@ -220,12 +165,12 @@ input[type="radio"], input[type="checkbox"], input[type="number"] {
   font-size: 0.875em;
   background: rgb(var(--surface-hover));
   padding: 0.125em 0.25em;
-  border-radius: 3px;
+  border-radius: 4px;
 }
 .chat-prose pre {
   background: rgb(var(--surface-sunken));
   padding: 0.75em;
-  border-radius: 8px;
+  border-radius: 10px;
   overflow-x: auto;
   margin: 0.5em 0;
 }
@@ -272,21 +217,25 @@ input[type="radio"], input[type="checkbox"], input[type="number"] {
 .usage-document-prose h4 {
   color: rgb(var(--fg));
   font-weight: 700;
+  letter-spacing: -0.01em;
   line-height: 1.35;
   margin: 1.4em 0 0.55em;
 }
-.usage-document-prose h1 { font-size: 1.8em; margin-top: 0; }
-.usage-document-prose h2 { font-size: 1.45em; border-bottom: 1px solid rgb(var(--border-light)); padding-bottom: 0.3em; }
-.usage-document-prose h3 { font-size: 1.2em; }
+.usage-document-prose h1 { font-size: 1.75em; margin-top: 0; }
+.usage-document-prose h2 { font-size: 1.4em; border-bottom: 1px solid rgb(var(--border-light)); padding-bottom: 0.3em; }
+.usage-document-prose h3 { font-size: 1.17em; }
 .usage-document-prose p { margin: 0.75em 0; }
 .usage-document-prose ul,
 .usage-document-prose ol { margin: 0.75em 0; padding-left: 1.6em; }
 .usage-document-prose li { margin: 0.3em 0; }
+.usage-document-prose li::marker { color: rgb(var(--muted)); }
 .usage-document-prose blockquote {
   border-left: 3px solid rgb(var(--accent));
-  color: rgb(var(--muted));
+  background: rgb(var(--accent) / 0.04);
+  color: rgb(var(--fg-secondary));
   margin: 1em 0;
-  padding: 0.2em 1em;
+  padding: 0.35em 1em;
+  border-radius: 0 8px 8px 0;
 }
 .usage-document-prose code {
   background: rgb(var(--surface-hover));
@@ -297,7 +246,7 @@ input[type="radio"], input[type="checkbox"], input[type="number"] {
 }
 .usage-document-prose pre {
   background: rgb(var(--surface-sunken));
-  border-radius: 8px;
+  border-radius: 10px;
   margin: 1em 0;
   overflow-x: auto;
   padding: 1em;

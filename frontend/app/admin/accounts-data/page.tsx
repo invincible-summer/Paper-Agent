@@ -118,7 +118,7 @@ export default function AccountsDataAdminPage() {
 
   if (!checked || (user?.role === "administrator" && loading)) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-bg">
+      <div className="flex min-h-[60vh] items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-accent" />
       </div>
     );
@@ -126,8 +126,8 @@ export default function AccountsDataAdminPage() {
 
   if (!user || user.role !== "administrator") {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-bg px-4">
-        <div className="max-w-md rounded-2xl border border-border-light bg-surface p-8 text-center">
+      <div className="flex min-h-[60vh] items-center justify-center px-4">
+        <div className="max-w-md rounded-2xl border border-border-light bg-surface p-8 text-center shadow-sm">
           <ShieldCheck className="mx-auto mb-3 h-10 w-10 text-muted" />
           <h1 className="text-lg font-semibold text-fg">无权访问管理页面</h1>
           <p className="mt-2 text-sm text-muted">仅管理员账号可以清理各账号数据。</p>
@@ -142,11 +142,11 @@ export default function AccountsDataAdminPage() {
     + (totals.trace_bytes || 0) + (totals.api_private_bytes || 0);
 
   return (
-    <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-8">
-      <div className="mx-auto max-w-6xl space-y-6">
+    <>
+      <div className="space-y-6">
         <AdminHeader title="账号数据清理" icon={<Trash2 className="h-5 w-5" />}
           subtitle="统一查看并不可恢复地清除各账号的历史、上传文件、Trace 与 API 私有数据。"
-          current="/admin/accounts-data" onRefresh={() => void refresh()} refreshing={loading} />
+          onRefresh={() => void refresh()} refreshing={loading} />
 
         {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
         {notice && <div className="rounded-lg border border-success/40 bg-success/10 p-3 text-sm text-success">{notice}</div>}
@@ -249,6 +249,6 @@ export default function AccountsDataAdminPage() {
           onClose={() => setConfirmDelete(null)} />
       )}
       <HelpModal item={helpItem} onClose={() => setHelpItem(null)} />
-    </main>
+    </>
   );
 }
