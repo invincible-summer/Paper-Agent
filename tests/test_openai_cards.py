@@ -281,9 +281,13 @@ def test_research_map_svg_structure_and_legend():
     assert 'preserveAspectRatio="xMidYMid meet"' in svg
 
 
-def test_research_map_svg_aggregates_dense_buckets():
+def test_research_map_svg_shows_all_dense_bucket_papers():
     svg = render_pretty_research_map_svg(_FakeSession(_map_with_counts(5)))
-    assert ">+5</text>" in svg          # 5 papers in one (cluster, year) bucket
+    # 5 papers in one (cluster, year) bucket — every one stays an individual
+    # card, never folded into an aggregate "+N" node.
+    for index in range(5):
+        assert f"Hot Topic {index}" in svg
+    assert ">+5</text>" not in svg and "聚合" not in svg
 
 
 def test_research_map_svg_escapes_titles():

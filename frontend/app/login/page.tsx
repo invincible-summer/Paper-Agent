@@ -91,15 +91,13 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-bg px-4">
-      {/* 顶部主色光晕，给纯功能页一点品牌氛围 */}
-      <div aria-hidden className="pointer-events-none absolute -top-40 left-1/2 h-96 w-[42rem] max-w-[100vw] -translate-x-1/2 rounded-full bg-accent/10 blur-[120px]" />
-      <div className="relative w-full max-w-sm rounded-2xl border border-border-light bg-surface p-8 shadow-lg">
+    <div className="flex min-h-screen items-center justify-center bg-bg px-4">
+      <div className="w-full max-w-sm rounded-2xl border border-border-light bg-surface p-8" style={{ boxShadow: "var(--shadow-md)" }}>
         <div className="mb-6 flex flex-col items-center">
-          <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-accent-hover shadow-md shadow-accent/25">
-            <BookOpen className="h-6 w-6 text-white" />
+          <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-accent-soft/50">
+            <BookOpen className="h-6 w-6 text-accent" />
           </div>
-          <h1 className="text-xl font-bold tracking-tight text-fg">Paper Agent</h1>
+          <h1 className="font-serif-display text-xl font-bold tracking-tight text-fg">Paper Agent</h1>
           <p className="mt-1 text-xs text-muted">{mode === "login" ? "登录以继续使用" : "注册新账号"}</p>
         </div>
 

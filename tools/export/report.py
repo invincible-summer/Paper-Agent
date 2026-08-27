@@ -72,8 +72,6 @@ def render_research_report(session: ChatSession) -> str:
 _CLUSTER_COLORS = ["#256d66", "#c2402a", "#4a628a", "#8a6d3b", "#6b4a8a",
                    "#3b7a4a", "#a05a2c", "#4a8a82"]
 
-_AGGREGATE_THRESHOLD = 3  # >2 papers in one (cluster, year) bucket collapse to "+N"
-
 
 def _safe_int(value, default: int = 0) -> int:
     try:
@@ -148,55 +146,24 @@ def build_research_map_view(session: ChatSession) -> dict:
             "id": cluster_id, "label": f"主题簇 {cluster_id}", "overview": "",
         })
     clusters_list = [clusters[key] for key in sorted(clusters)]
-    buckets: dict[tuple[int, int], list[dict]] = {}
-    for node in nodes:
-        buckets.setdefault((_safe_int(node.get("cluster")), _safe_int(node.get("year"))), []).append(node)
-    aggregates = []
-    aliases = {str(n["id"]): str(n["id"]) for n in nodes}
-    for (cluster, year), members in sorted(buckets.items()):
-        if len(members) > _AGGREGATE_THRESHOLD - 1:
-            aggregate_id = f"aggregate:{cluster}:{year}"
-            aggregates.append({
-                "id": aggregate_id, "cluster": cluster, "year": year,
-                "member_ids": [str(n["id"]) for n in members],
-                "members": members,
-            })
-            for member in members:
-                aliases[str(member["id"])] = aggregate_id
     return {
         "topic": str(session.topic or "未命名主题"),
         "landscape": str(md.get("landscape") or ""),
         "clusters": clusters_list,
         "nodes": nodes,
         "edges": edges,
-        "aggregates": aggregates,
-        "aliases": aliases,
     }
-
-
-def _view_edge_aliases(view: dict) -> list[dict]:
-    """Map edges through aggregate nodes and deduplicate them."""
-    aliases = view["aliases"]
-    seen: set[tuple[str, str, str]] = set()
-    out: list[dict] = []
-    for edge in view["edges"]:
-        source, target = aliases.get(edge["source"], edge["source"]), aliases.get(edge["target"], edge["target"])
-        kind = edge["type"]
-        key = (source, target, kind)
-        if source == target or key in seen:
-            continue
-        seen.add(key)
-        out.append({"source": source, "target": target, "type": kind})
-    return sorted(out, key=lambda e: (e["type"], e["source"], e["target"]))
 
 
 def render_pretty_research_map_svg(session: ChatSession) -> str:
     """Render a deterministic, self-contained SVG optimized for file cards.
 
     The document uses only SVG primitives and an internal stylesheet: no
-    JavaScript, external fonts, external CSS, remote images, or filters. Dense
-    (theme, year) buckets collapse deterministically and excess theme clusters
-    share a final fallback lane, keeping a stable viewBox on narrow hosts.
+    JavaScript, external fonts, external CSS, remote images, or filters. Every
+    paper is drawn as its own card — (theme, year) buckets stack vertically
+    and each lane sizes to its tallest bucket, so no paper is ever collapsed
+    into an aggregate — while excess theme clusters share a final fallback
+    lane, keeping a stable viewBox on narrow hosts.
     """
     import html
     import time as _time
@@ -241,15 +208,15 @@ def render_pretty_research_map_svg(session: ChatSession) -> str:
     width = 1240
     left, right, top = 194, 44, 122
     bottom = 92
-    lane_height = 136
     card_width, card_height = 152, 42
+    card_gap = 12           # vertical gap between stacked same-bucket cards
+    min_lane_height = 136   # label chip + breathing room around a single card
+    lane_padding = 24
     plot_width = width - left - right
     timeline_left = left + card_width / 2
     timeline_width = width - right - card_width / 2 - timeline_left
-    plot_height = max(1, len(visible_clusters)) * lane_height
-    height = top + plot_height + bottom
-    x_step = timeline_width / max(1, len(year_labels) - 1)
 
+    # Bucket by (lane, year slot); every member stays an individual card.
     buckets: dict[tuple[int, int], list[dict]] = {}
     for node in nodes:
         key = (
@@ -258,40 +225,47 @@ def render_pretty_research_map_svg(session: ChatSession) -> str:
         )
         buckets.setdefault(key, []).append(node)
 
+    lane_stack = {index: 1 for index in range(len(visible_clusters))}
+    for (cluster, _slot), members in buckets.items():
+        index = lane_index[cluster]
+        lane_stack[index] = max(lane_stack[index], len(members))
+    lane_heights = [
+        max(min_lane_height,
+            lane_padding * 2 + lane_stack[index] * card_height
+            + (lane_stack[index] - 1) * card_gap)
+        for index in range(len(visible_clusters))
+    ]
+    lane_top: dict[int, float] = {}
+    offset = top
+    for cluster, index in lane_index.items():
+        lane_top[cluster] = offset
+        offset += lane_heights[index]
+    plot_height = sum(lane_heights)
+    height = top + plot_height + bottom
+    x_step = timeline_width / max(1, len(year_labels) - 1)
+
     positions: dict[str, tuple[float, float]] = {}
-    aliases: dict[str, str] = {}
-    aggregates: list[dict] = []
     shown_nodes: list[dict] = []
     for (cluster, slot), members in sorted(buckets.items()):
         x = timeline_left + slot * x_step
-        lane_y = top + lane_index[cluster] * lane_height + lane_height / 2
-        if len(members) > 2:
-            aggregate_id = f"aggregate:{cluster}:{slot}"
-            aggregate = {
-                "id": aggregate_id, "cluster": cluster, "year_label": year_labels[slot],
-                "members": members, "x": x, "y": lane_y,
-            }
-            aggregates.append(aggregate)
-            positions[aggregate_id] = (x, lane_y)
-            for member in members:
-                aliases[str(member["id"])] = aggregate_id
-            continue
-        offset = 30 if len(members) == 2 else 0
-        for index, node in enumerate(members):
-            y = lane_y + (index * 2 - 1) * offset if len(members) == 2 else lane_y
+        lane_height = lane_heights[lane_index[cluster]]
+        stack_height = len(members) * card_height + (len(members) - 1) * card_gap
+        top_y = lane_top[cluster] + (lane_height - stack_height) / 2
+        ranked = sorted(members, key=lambda n: (
+            -_safe_int(n.get("citation_count")),
+            str(n.get("title") or n.get("id") or "").casefold(), str(n.get("id")),
+        ))
+        for index, node in enumerate(ranked):
+            y = top_y + index * (card_height + card_gap) + card_height / 2
             node_id = str(node["id"])
             positions[node_id] = (x, y)
-            aliases[node_id] = node_id
             shown_nodes.append(node)
-
-    def endpoint(node_id: str) -> str:
-        return aliases.get(node_id, node_id)
 
     drawn_edges: list[tuple[str, str, str]] = []
     seen_edges: set[tuple[str, str, str]] = set()
     for edge in edges:
-        source = endpoint(str(edge.get("source") or ""))
-        target = endpoint(str(edge.get("target") or ""))
+        source = str(edge.get("source") or "")
+        target = str(edge.get("target") or "")
         edge_type = "semantic" if str(edge.get("type") or "") == "semantic" else "cites"
         key = (source, target, edge_type)
         if source == target or source not in positions or target not in positions or key in seen_edges:
@@ -322,7 +296,6 @@ def render_pretty_research_map_svg(session: ChatSession) -> str:
         '.heading{font-size:24px;font-weight:700;fill:#18302f}.meta{font-size:12px;fill:#65736f}'
         '.year{font-size:11px;fill:#75827e}.lane-label{font-size:12px;font-weight:650;fill:#334945}'
         '.node-title{font-size:10.5px;font-weight:650;fill:#203733}.node-meta{font-size:9.5px;fill:#6a7874}'
-        '.agg-title{font-size:13px;font-weight:750;fill:#fff}.agg-meta{font-size:9.5px;fill:#e7f3f0}'
         '.legend{font-size:10.5px;fill:#60706b}.cite-edge{fill:none;stroke:#52677d;stroke-width:1.45;opacity:.66}'
         '.semantic-edge{fill:none;stroke:#9a6e52;stroke-width:1.25;stroke-dasharray:6 5;opacity:.58}</style>',
         '<rect width="100%" height="100%" rx="18" fill="#fbfcfa"/>',
@@ -330,7 +303,7 @@ def render_pretty_research_map_svg(session: ChatSession) -> str:
         f'<text x="{left}" y="62" class="meta">引用关系图谱 · {len(nodes)} 篇论文 · '
         f'{len(original_clusters)} 个主题簇 · {citation_count} 条引用边 · {semantic_count} 条语义边 · '
         f'{generated} 生成</text>',
-        '<text x="194" y="88" class="meta">箭头表示关系方向；虚线表示语义关联；同年同主题的密集论文会折叠为聚合节点。</text>',
+        '<text x="194" y="88" class="meta">箭头表示关系方向；虚线表示语义关联；同年同主题的论文纵向堆叠为独立卡片。</text>',
     ]
 
     for index, year_label in enumerate(year_labels):
@@ -345,26 +318,27 @@ def render_pretty_research_map_svg(session: ChatSession) -> str:
         )
 
     for cluster, index in lane_index.items():
-        lane_top = top + index * lane_height
+        lane_top_y = lane_top[cluster]
+        lane_height = lane_heights[index]
         color = "#64748b" if cluster == -1 else _CLUSTER_COLORS[cluster % len(_CLUSTER_COLORS)]
         label = "其他主题" if cluster == -1 else (cluster_labels.get(cluster) or f"主题簇 {cluster}")
         parts.append(
-            f'<rect x="{left - 10}" y="{lane_top}" width="{plot_width + 20:.1f}" '
+            f'<rect x="{left - 10}" y="{lane_top_y:.1f}" width="{plot_width + 20:.1f}" '
             f'height="{lane_height}" rx="12" fill="{color}" opacity="{0.035 if index % 2 else 0.065}"/>'
         )
         parts.append(
-            f'<rect x="28" y="{lane_top + 43:.1f}" width="140" height="38" rx="12" '
+            f'<rect x="28" y="{lane_top_y + 43:.1f}" width="140" height="38" rx="12" '
             f'fill="{color}" opacity=".12"/>'
-            f'<rect x="28" y="{lane_top + 43:.1f}" width="5" height="38" rx="2.5" fill="{color}"/>'
-            f'<text x="43" y="{lane_top + 67:.1f}" class="lane-label">{esc(_short_text(label, 17))}</text>'
+            f'<rect x="28" y="{lane_top_y + 43:.1f}" width="5" height="38" rx="2.5" fill="{color}"/>'
+            f'<text x="43" y="{lane_top_y + 67:.1f}" class="lane-label">{esc(_short_text(label, 17))}</text>'
         )
 
     for source, target, edge_type in drawn_edges:
         sx, sy = positions[source]
         tx, ty = positions[target]
         direction = 1 if tx >= sx else -1
-        start_x = sx + direction * (card_width / 2 if not source.startswith("aggregate:") else 31)
-        end_x = tx - direction * (card_width / 2 if not target.startswith("aggregate:") else 31)
+        start_x = sx + direction * card_width / 2
+        end_x = tx - direction * card_width / 2
         bend = max(24, abs(end_x - start_x) * .38)
         c1 = start_x + direction * bend
         c2 = end_x - direction * bend
@@ -408,25 +382,12 @@ def render_pretty_research_map_svg(session: ChatSession) -> str:
             f'{" · 奠基" if foundational else ""}</text>'
         )
 
-    for aggregate in aggregates:
-        x, y = aggregate["x"], aggregate["y"]
-        cluster = aggregate["cluster"]
-        color = "#64748b" if cluster == -1 else _CLUSTER_COLORS[cluster % len(_CLUSTER_COLORS)]
-        count = len(aggregate["members"])
-        parts.append(
-            f'<rect x="{x - 31:.1f}" y="{y - 24:.1f}" width="62" height="48" rx="15" '
-            f'fill="{color}" stroke="#fff" stroke-width="3"/>'
-            f'<text x="{x:.1f}" y="{y - 1:.1f}" text-anchor="middle" class="agg-title">+{count}</text>'
-            f'<text x="{x:.1f}" y="{y + 14:.1f}" text-anchor="middle" class="agg-meta">聚合论文</text>'
-        )
-
     legend_y = top + plot_height + 46
     legend = [
         ('<line x1="0" y1="0" x2="30" y2="0" class="cite-edge" marker-end="url(#arrow-cite)"/>', "直接引用"),
         ('<line x1="0" y1="0" x2="30" y2="0" class="semantic-edge" marker-end="url(#arrow-semantic)"/>', "语义关联"),
         ('<rect x="0" y="-11" width="22" height="18" rx="5" fill="#fff" stroke="#256d66"/>', "主题簇论文"),
         ('<rect x="0" y="-13" width="26" height="22" rx="7" fill="none" stroke="#256d66" stroke-dasharray="3 2"/>', "奠基性论文"),
-        ('<rect x="0" y="-13" width="30" height="24" rx="8" fill="#64748b"/>', "聚合节点"),
     ]
     x = 194.0
     for glyph, label in legend:
@@ -458,25 +419,19 @@ def render_research_map_mermaid(session: ChatSession) -> str:
     if not view["nodes"]:
         return ""
     clusters = {c["id"]: c for c in view["clusters"]}
-    aggregated_members = {member for a in view["aggregates"] for member in a["member_ids"]}
     lines = ["```mermaid", "flowchart LR"]
     for cluster_id in sorted(clusters):
         cluster = clusters[cluster_id]
         lines.append(f'  subgraph cluster_{cluster_id}["{_mermaid_label(cluster["label"], 50)}"]')
         for node in view["nodes"]:
-            if _safe_int(node.get("cluster")) != cluster_id or str(node["id"]) in aggregated_members:
+            if _safe_int(node.get("cluster")) != cluster_id:
                 continue
             nid = _mermaid_id(str(node["id"]))
             title = _mermaid_label(node.get("title") or node["id"], 58)
             meta = _mermaid_label(f'{node.get("year") or "n.d."} · 被引 {_safe_int(node.get("citation_count"))}', 30)
             lines.append(f'    {nid}["{title}<br/>{meta}"]')
-        for aggregate in view["aggregates"]:
-            if aggregate["cluster"] == cluster_id:
-                aid = _mermaid_id(aggregate["id"])
-                year = aggregate["year"] or "n.d."
-                lines.append(f'    {aid}(["+{len(aggregate["members"])} 篇<br/>{year} 聚合节点"])')
         lines.append("  end")
-    for edge in _view_edge_aliases(view):
+    for edge in view["edges"]:
         source, target = _mermaid_id(edge["source"]), _mermaid_id(edge["target"])
         lines.append(
             f"  {source} -. 语义 .-> {target}" if edge["type"] == "semantic"
@@ -487,11 +442,9 @@ def render_research_map_mermaid(session: ChatSession) -> str:
         "  classDef candidate stroke-dasharray:3 2;",
     ])
     foundational = [_mermaid_id(str(n["id"])) for n in view["nodes"]
-                    if str(n["id"]) not in aggregated_members
-                    and str(n.get("role") or "") == "foundational"]
+                    if str(n.get("role") or "") == "foundational"]
     candidate = [_mermaid_id(str(n["id"])) for n in view["nodes"]
-                 if str(n["id"]) not in aggregated_members
-                 and str(n.get("layer") or "core") == "candidate"]
+                 if str(n.get("layer") or "core") == "candidate"]
     if foundational:
         lines.append(f"  class {','.join(foundational)} foundational;")
     if candidate:
@@ -528,7 +481,6 @@ def render_research_map_html(session: ChatSession) -> str:
         parsed = urlsplit(url)
         return url if parsed.scheme in {"http", "https"} and parsed.netloc else ""
 
-    aggregated_members = {m for a in view["aggregates"] for m in a["member_ids"]}
     data_nodes = [{
         "id": str(n["id"]), "title": str(n.get("title") or n["id"]),
         "year": n.get("year") or None, "cluster": _safe_int(n.get("cluster")),
@@ -536,23 +488,10 @@ def render_research_map_html(session: ChatSession) -> str:
         "citations": _safe_int(n.get("citation_count")), "role": str(n.get("role") or ""),
         "layer": str(n.get("layer") or "core"),
         "doi": str(n.get("doi") or getattr(paper_by_id.get(str(n["id"])), "doi", "") or ""),
-        "url": source_url(n), "members": [],
-    } for n in view["nodes"] if str(n["id"]) not in aggregated_members]
-    for aggregate in view["aggregates"]:
-        data_nodes.append({
-            "id": aggregate["id"], "title": f'+{len(aggregate["members"])} 篇聚合论文',
-            "year": aggregate["year"] or None, "cluster": aggregate["cluster"],
-            "clusterLabel": cluster_labels.get(aggregate["cluster"], ""),
-            "citations": sum(_safe_int(n.get("citation_count")) for n in aggregate["members"]),
-            "role": "aggregate", "layer": "aggregate", "doi": "", "url": "",
-            "members": [{"id": str(n["id"]), "title": str(n.get("title") or n["id"]),
-                         "year": n.get("year") or None,
-                         "citations": _safe_int(n.get("citation_count")),
-                         "doi": str(n.get("doi") or getattr(paper_by_id.get(str(n["id"])), "doi", "") or ""),
-                         "url": source_url(n)} for n in aggregate["members"]],
-        })
+        "url": source_url(n),
+    } for n in view["nodes"]]
     payload = {"topic": view["topic"], "clusters": view["clusters"],
-               "nodes": data_nodes, "edges": _view_edge_aliases(view)}
+               "nodes": data_nodes, "edges": view["edges"]}
     controls = "".join(
         f'<label><input class="cluster-filter" type="checkbox" value="{c["id"]}" checked> '
         f'{html.escape(c["label"])}</label>' for c in view["clusters"]
@@ -562,15 +501,15 @@ def render_research_map_html(session: ChatSession) -> str:
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; connect-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
 <title>{title} · 研究图谱</title><style>
-:root{{--bg:#f7f5ef;--panel:#fff;--ink:#17212b;--muted:#667085;--accent:#256d66}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px system-ui,sans-serif}}header{{padding:16px 20px;background:var(--panel);border-bottom:1px solid #ddd}}h1{{font-size:18px;margin:0 0 6px}}main{{display:grid;grid-template-columns:230px 1fr 280px;height:calc(100vh - 72px)}}aside{{padding:16px;background:var(--panel);overflow:auto}}#controls{{border-right:1px solid #ddd}}#details{{border-left:1px solid #ddd}}label{{display:block;margin:8px 0}}#stage{{overflow:hidden;touch-action:none;cursor:grab}}#stage.dragging{{cursor:grabbing}}svg{{width:100%;height:100%;background:#fbfaf7}}.edge{{fill:none;stroke:#94a3b8;stroke-width:1.4}}.semantic{{stroke-dasharray:6 5}}.node rect{{fill:#fff;stroke:var(--accent);stroke-width:1.5}}.node.aggregate rect{{fill:#256d66}}.node.aggregate text{{fill:#fff}}.node text{{pointer-events:none;font-size:12px}}button{{padding:6px 10px;border:1px solid #bbb;border-radius:7px;background:#fff}}ul{{padding-left:18px}}@media(max-width:850px){{main{{grid-template-columns:1fr}}aside{{display:none}}}}
+:root{{--bg:#f7f5ef;--panel:#fff;--ink:#17212b;--muted:#667085;--accent:#256d66}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px system-ui,sans-serif}}header{{padding:16px 20px;background:var(--panel);border-bottom:1px solid #ddd}}h1{{font-size:18px;margin:0 0 6px}}main{{display:grid;grid-template-columns:230px 1fr 280px;height:calc(100vh - 72px)}}aside{{padding:16px;background:var(--panel);overflow:auto}}#controls{{border-right:1px solid #ddd}}#details{{border-left:1px solid #ddd}}label{{display:block;margin:8px 0}}#stage{{overflow:hidden;touch-action:none;cursor:grab}}#stage.dragging{{cursor:grabbing}}svg{{width:100%;height:100%;background:#fbfaf7}}.edge{{fill:none;stroke:#94a3b8;stroke-width:1.4}}.semantic{{stroke-dasharray:6 5}}.node rect{{fill:#fff;stroke:var(--accent);stroke-width:1.5}}.node text{{pointer-events:none;font-size:12px}}button{{padding:6px 10px;border:1px solid #bbb;border-radius:7px;background:#fff}}ul{{padding-left:18px}}@media(max-width:850px){{main{{grid-template-columns:1fr}}aside{{display:none}}}}
 </style></head><body><header><h1>{title}</h1><div>下载后的自包含交互图谱 · 不访问网络或浏览器存储</div></header><main>
 <aside id="controls"><strong>主题簇筛选</strong>{controls}<hr><label><input id="show-cites" type="checkbox" checked> 引用边</label><label><input id="show-semantic" type="checkbox" checked> 语义边</label><button id="reset" type="button">重置视图</button></aside>
-<section id="stage" aria-label="研究图谱画布"><svg viewBox="0 0 1200 760"><g id="viewport"></g></svg></section><aside id="details"><strong>节点详情</strong><p>点击论文或聚合节点查看详情。</p></aside></main>
+<section id="stage" aria-label="研究图谱画布"><svg viewBox="0 0 1200 760"><g id="viewport"></g></svg></section><aside id="details"><strong>节点详情</strong><p>点击论文节点查看详情。</p></aside></main>
 <script id="map-data" type="application/json">{data}</script><script>
 'use strict';const D=JSON.parse(document.getElementById('map-data').textContent);const V=document.getElementById('viewport'),S=document.querySelector('#stage svg'),P=document.getElementById('stage'),Q=document.getElementById('details');let z=1,tx=0,ty=0,drag=null;
 const active=()=>new Set([...document.querySelectorAll('.cluster-filter:checked')].map(x=>Number(x.value)));function transform(){{V.setAttribute('transform',`translate(${{tx}} ${{ty}}) scale(${{z}})`);}}function el(n,a={{}},t=''){{const x=document.createElementNS('http://www.w3.org/2000/svg',n);for(const[k,v]of Object.entries(a))x.setAttribute(k,v);x.textContent=t;return x;}}
-function link(url,label){{if(!url)return;const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.textContent=label;Q.append(a);}}function show(n){{Q.replaceChildren();const h=document.createElement('h2');h.textContent=n.title;Q.append(h);for(const [k,v] of [['主题簇',n.clusterLabel],['年份',n.year||'n.d.'],['被引',n.citations],['角色',n.role||'—'],['DOI',n.doi||'—']]){{const p=document.createElement('p');p.textContent=`${{k}}：${{v}}`;Q.append(p);}}link(n.url,'打开 DOI / 来源');if(n.members.length){{const h3=document.createElement('h3');h3.textContent='聚合成员';Q.append(h3);const ul=document.createElement('ul');n.members.forEach(m=>{{const li=document.createElement('li');li.textContent=`${{m.title}} (${{m.year||'n.d.'}}, 被引 ${{m.citations}}${{m.doi?' · DOI '+m.doi:''}})`;ul.append(li);}});Q.append(ul);}}}}
-function render(){{V.replaceChildren();const A=active(),nodes=D.nodes.filter(n=>A.has(n.cluster)),ids=new Set(nodes.map(n=>n.id)),pos=new Map();const lanes=[...A].sort((a,b)=>a-b);nodes.sort((a,b)=>(a.year||0)-(b.year||0)||a.title.localeCompare(b.title));nodes.forEach((n,i)=>{{const x=130+(i%6)*175,y=90+lanes.indexOf(n.cluster)*125+(Math.floor(i/6)%2)*45;pos.set(n.id,[x,y]);}});for(const e of D.edges){{if(!ids.has(e.source)||!ids.has(e.target)||(!document.getElementById('show-cites').checked&&e.type==='cites')||(!document.getElementById('show-semantic').checked&&e.type==='semantic'))continue;const a=pos.get(e.source),b=pos.get(e.target),l=el('line',{{x1:a[0],y1:a[1],x2:b[0],y2:b[1],class:`edge ${{e.type==='semantic'?'semantic':''}}`}});V.append(l);}}for(const n of nodes){{const [x,y]=pos.get(n.id),g=el('g',{{class:`node ${{n.layer==='aggregate'?'aggregate':''}}`,tabindex:'0',role:'button'}});g.append(el('rect',{{x:x-70,y:y-24,width:140,height:48,rx:10}}));g.append(el('text',{{x,y:y-3,'text-anchor':'middle'}},n.title.slice(0,20)));g.append(el('text',{{x,y:y+14,'text-anchor':'middle'}},`${{n.year||'n.d.'}} · 被引 ${{n.citations}}`));g.addEventListener('click',()=>show(n));g.addEventListener('keydown',e=>{{if(e.key==='Enter'||e.key===' ')show(n);}});V.append(g);}}transform();}}
+function link(url,label){{if(!url)return;const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.textContent=label;Q.append(a);}}function show(n){{Q.replaceChildren();const h=document.createElement('h2');h.textContent=n.title;Q.append(h);for(const [k,v] of [['主题簇',n.clusterLabel],['年份',n.year||'n.d.'],['被引',n.citations],['角色',n.role||'—'],['DOI',n.doi||'—']]){{const p=document.createElement('p');p.textContent=`${{k}}：${{v}}`;Q.append(p);}}link(n.url,'打开 DOI / 来源');}}
+function render(){{V.replaceChildren();const A=active(),nodes=D.nodes.filter(n=>A.has(n.cluster)),ids=new Set(nodes.map(n=>n.id)),pos=new Map();const lanes=[...A].sort((a,b)=>a-b);nodes.sort((a,b)=>(a.year||0)-(b.year||0)||a.title.localeCompare(b.title));nodes.forEach((n,i)=>{{const x=130+(i%6)*175,y=90+lanes.indexOf(n.cluster)*125+(Math.floor(i/6)%2)*45;pos.set(n.id,[x,y]);}});for(const e of D.edges){{if(!ids.has(e.source)||!ids.has(e.target)||(!document.getElementById('show-cites').checked&&e.type==='cites')||(!document.getElementById('show-semantic').checked&&e.type==='semantic'))continue;const a=pos.get(e.source),b=pos.get(e.target),l=el('line',{{x1:a[0],y1:a[1],x2:b[0],y2:b[1],class:`edge ${{e.type==='semantic'?'semantic':''}}`}});V.append(l);}}for(const n of nodes){{const [x,y]=pos.get(n.id),g=el('g',{{class:'node',tabindex:'0',role:'button'}});g.append(el('rect',{{x:x-70,y:y-24,width:140,height:48,rx:10}}));g.append(el('text',{{x,y:y-3,'text-anchor':'middle'}},n.title.slice(0,20)));g.append(el('text',{{x,y:y+14,'text-anchor':'middle'}},`${{n.year||'n.d.'}} · 被引 ${{n.citations}}`));g.addEventListener('click',()=>show(n));g.addEventListener('keydown',e=>{{if(e.key==='Enter'||e.key===' ')show(n);}});V.append(g);}}transform();}}
 document.querySelectorAll('input').forEach(x=>x.addEventListener('change',render));document.getElementById('reset').addEventListener('click',()=>{{z=1;tx=0;ty=0;transform();}});S.addEventListener('wheel',e=>{{e.preventDefault();z=Math.max(.35,Math.min(3,z*(e.deltaY<0?1.12:.89)));transform();}},{{passive:false}});P.addEventListener('pointerdown',e=>{{drag=[e.clientX-tx,e.clientY-ty];P.classList.add('dragging');P.setPointerCapture(e.pointerId);}});P.addEventListener('pointermove',e=>{{if(drag){{tx=e.clientX-drag[0];ty=e.clientY-drag[1];transform();}}}});P.addEventListener('pointerup',()=>{{drag=null;P.classList.remove('dragging');}});render();
 </script></body></html>'''
 
@@ -605,8 +544,7 @@ def render_pretty_research_map_markdown(session: ChatSession) -> str:
     if view["landscape"]:
         parts.extend(["## 领域脉络", "", _markdown_cell(view["landscape"]), ""])
     parts.extend(["## 图例", "", "- **直接引用**：实线关系。", "- **语义关联**：虚线关系。",
-             "- **奠基性论文**：角色为 foundational。", "- **候选层**：节点 layer 为 candidate。",
-             "- **聚合节点**：同一主题簇、同一年超过 2 篇时折叠；下方列出全部成员。", "",
+             "- **奠基性论文**：角色为 foundational。", "- **候选层**：节点 layer 为 candidate。", "",
              "## 主题簇摘要", ""])
     for cluster in view["clusters"]:
         parts.append(f"- **{_markdown_cell(cluster['label'])}**：{_markdown_cell(cluster['overview'] or '暂无摘要')}")
@@ -623,13 +561,6 @@ def render_pretty_research_map_markdown(session: ChatSession) -> str:
         for edge in edges:
             relation = "语义关联" if edge["type"] == "semantic" else "直接引用"
             parts.append(f"| {relation} | {_markdown_cell(node_by_id[edge['source']].get('title') or edge['source'])} | {_markdown_cell(node_by_id[edge['target']].get('title') or edge['target'])} |")
-    if view["aggregates"]:
-        parts.extend(["", "## 聚合节点展开", ""])
-        for aggregate in view["aggregates"]:
-            label = cluster_labels.get(aggregate["cluster"], f"主题簇 {aggregate['cluster']}")
-            parts.append(f"### {_markdown_cell(label)} · {aggregate['year'] or 'n.d.'}（{len(aggregate['members'])} 篇）")
-            parts.extend(f"- {_markdown_cell(member.get('title') or member['id'])}" for member in aggregate["members"])
-            parts.append("")
     return "\n".join(parts).rstrip() + "\n"
 
 

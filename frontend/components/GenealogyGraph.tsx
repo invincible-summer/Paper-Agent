@@ -1,21 +1,19 @@
 "use client";
 import { useMemo, useRef, useState } from "react";
 import type { GenealogyGraph as GraphData, GraphNode } from "@/lib/types";
-import {
-  layoutGenealogy, resolveEdges,
-  type PositionedNode, type AggregateNode,
-} from "@/lib/genealogy-layout";
+import { layoutGenealogy, resolveEdges, type PositionedNode } from "@/lib/genealogy-layout";
 import { useUIStore } from "@/stores/ui";
 
 /* 论文谱系图 v2 — 固定画布 + 确定性布局（纯 SVG，零依赖）
  *
  * - 布局全部在 lib/genealogy-layout.ts 纯函数中完成：920px 固定内容宽、
- *   年份等距刻度、泳道固定行预算、同 (簇, 年) 桶超编折叠为 "+N" 聚合节点。
+ *   年份等距刻度、泳道按簇大小降序且高度随最大 (簇, 年) 桶自适应——
+ *   每篇论文都是独立节点，不再折叠为 "+N" 聚合点。
  * - 视口 920×560（svg 按同比例自适应容器宽，无留白边带）：内容自动
  *   双轴适配缩放（放大 ≤2×）并居中占满画幅；内容偏矮时先以更窄画布
  *   重排再放大，避免横向裁切。拖拽平移（拖过阈值不触发点击），
  *   右下角 ＋/− 按钮绕视口中心缩放；滚轮不干预，滚动照常翻页。
- * - 悬停节点 → 气泡卡片显示论文标题/年份/被引/主题簇；悬停 "+N" 同理。
+ * - 悬停节点 → 气泡卡片显示论文标题/年份/被引/主题簇。
  * - 点击节点 → 下方详情面板：元信息、摘要片段、引用关系双列（可跳转）、
  *   打开原文、「深问这篇」（预填聊天输入框，打通图谱 → RAG 问答）。
  * - 点击边 → 下方关系面板：引用方向（谁引用了谁）或语义相似度，
@@ -25,11 +23,9 @@ import { useUIStore } from "@/stores/ui";
  * - 顶部簇筛选 chips / 候选集开关 / 语义边开关；底部谱系摘要统计行。
  */
 
-// 簇色与语义连线的固定色板：跨明暗主题均可读，与全局靛蓝主色协调。
-const SEMANTIC_EDGE_COLOR = "#94a3b8";
 const CLUSTER_COLORS = [
-  "#4f46e5", "#0891b2", "#059669", "#d97706", "#dc2626", "#7c3aed",
-  "#db2777", "#64748b",
+  "#256d66", "#c2402a", "#4a628a", "#8a6d3b", "#6b4a8a", "#3b7a4a",
+  "#a05a2c", "#4a8a82",
 ];
 const VIEW_W = 920;
 const VIEW_H = 560;
@@ -37,7 +33,6 @@ const MAX_UPSCALE = 2.0; // fill the frame for short graphs without going comica
 
 type Selection =
   | { kind: "paper"; id: string }
-  | { kind: "bucket"; aggId: string }
   | { kind: "edge"; source: string; target: string; etype: string }
   | null;
 
@@ -79,7 +74,7 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
   const suppressClick = useRef(false);
   const setComposerDraft = useUIStore((st) => st.setComposerDraft);
 
-  // Full node info by id (unpositioned — includes aggregated members).
+  // Full node info by id.
   const fullById = useMemo(
     () => new Map((data.nodes || []).map((n) => [n.id, n])), [data.nodes]);
 
@@ -109,12 +104,11 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
     return first;
   }, [filtered]);
   const drawnEdges = useMemo(
-    () => resolveEdges(filtered.edges || [], layout.aliasOf), [filtered.edges, layout.aliasOf]);
+    () => resolveEdges(filtered.edges || []), [filtered.edges]);
 
   const pointById = useMemo(() => {
     const m = new Map<string, { x: number; y: number }>();
     for (const n of layout.nodes) m.set(n.id, n);
-    for (const a of layout.aggregates) m.set(a.id, a);
     return m;
   }, [layout]);
 
@@ -147,7 +141,7 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
     return { subtree: new Set([...up, ...down]), ancestorEdges: ancEdges };
   }, [focus, data.edges]);
 
-  if (!layout.nodes.length && !layout.aggregates.length) {
+  if (!layout.nodes.length) {
     return <div className="p-4 text-center text-xs text-muted">暂无谱系图数据</div>;
   }
 
@@ -212,7 +206,7 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
 
   const dim = (id: string) => {
     if (!subtree) return false;
-    return !subtree.has(id) && !subtree.has(layout.aliasOf[id] || id);
+    return !subtree.has(id);
   };
   const yearOf = (id: string) => fullById.get(id)?.year ?? 0;
   const years = layout.yearTicks.map((t) => t.year);
@@ -230,8 +224,6 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
     });
 
   const selPaper = selection?.kind === "paper" ? fullById.get(selection.id) : null;
-  const selAgg = selection?.kind === "bucket"
-    ? layout.aggregates.find((a) => a.id === selection.aggId) ?? null : null;
   const selEdge = selection?.kind === "edge" ? selection : null;
   const selEdgeData = selEdge
     ? drawnEdges.find(
@@ -253,18 +245,6 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
         lines: [
           truncateToWidth(pn.title || "（无标题）", 262, 10),
           `${pn.year > 0 ? pn.year : "年份未知"} · 被引 ${pn.citation_count} · ${labelOf(pn.cluster)}${role}`,
-        ],
-      };
-    }
-    const ag = layout.aggregates.find((a) => a.id === hover);
-    if (ag) {
-      return {
-        x: ag.x * scale + tx,
-        y: ag.y * scale + ty,
-        accent: CLUSTER_COLORS[ag.cluster % CLUSTER_COLORS.length],
-        lines: [
-          `其余 ${ag.count} 篇（点击展开列表）`,
-          `${labelOf(ag.cluster)} · ${ag.year > 0 ? ag.year : "年份未知"}`,
         ],
       };
     }
@@ -349,7 +329,7 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
               if (e.type === "semantic" && !showSemantic) return null;
               const isCite = e.type === "cites";
               const srcCluster = fullById.get(e.source)?.cluster ?? 0;
-              const color = isCite ? CLUSTER_COLORS[srcCluster % CLUSTER_COLORS.length] : SEMANTIC_EDGE_COLOR;
+              const color = isCite ? CLUSTER_COLORS[srcCluster % CLUSTER_COLORS.length] : "#b5b0a2";
               const key = `${e.source}->${e.target}`;
               const inFlow = focus != null && ancestorEdges.has(key);
               const faded = subtree != null && !inFlow &&
@@ -378,25 +358,6 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
                       <title>{isCite ? "引用关系 · 点击查看详情" : "语义相似 · 点击查看详情"}</title>
                     </path>
                   )}
-                </g>
-              );
-            })}
-            {/* Aggregate "+N" nodes */}
-            {layout.aggregates.map((a) => {
-              const color = CLUSTER_COLORS[a.cluster % CLUSTER_COLORS.length];
-              const selected = selection?.kind === "bucket" && selection.aggId === a.id;
-              return (
-                <g key={a.id} transform={`translate(${a.x},${a.y})`} style={{ cursor: "pointer" }}
-                  onMouseEnter={() => setHover(a.id)} onMouseLeave={() => setHover((h) => (h === a.id ? null : h))}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (clickGuard()) return;
-                    setSelection(selected ? null : { kind: "bucket", aggId: a.id });
-                  }}>
-                  <rect x={-16} y={-10} width={32} height={20} rx={10}
-                    fill="rgb(var(--surface))" stroke={color} strokeWidth={selected ? 2 : 1.2}
-                    strokeDasharray="3 2" />
-                  <text y={3.5} textAnchor="middle" fontSize="9" fontWeight={600} fill={color}>+{a.count}</text>
                 </g>
               );
             })}
@@ -431,23 +392,23 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
       {/* Legend row */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border-light px-3 py-1.5 text-[10px] text-muted">
         <span className="flex items-center gap-1">
-          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="none" stroke={CLUSTER_COLORS[0]} strokeWidth="1.4" /><circle cx="7" cy="7" r="6.2" fill={CLUSTER_COLORS[0]} opacity="0.18" /></svg>
+          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="none" stroke="#256d66" strokeWidth="1.4" /><circle cx="7" cy="7" r="6.2" fill="#256d66" opacity="0.18" /></svg>
           奠基
         </span>
         <span className="flex items-center gap-1">
-          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill={CLUSTER_COLORS[1]} /></svg>
+          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="#4a628a" /></svg>
           核心集（桥梁为其中枢纽）
         </span>
         <span className="flex items-center gap-1">
-          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="none" stroke={CLUSTER_COLORS[5]} strokeWidth="1.6" /></svg>
+          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="none" stroke="#8a6d3b" strokeWidth="1.6" /></svg>
           候选集
         </span>
         <span className="flex items-center gap-1">
-          <svg width="22" height="8"><line x1="0" y1="4" x2="18" y2="4" stroke="#64748b" strokeWidth="2.6" markerEnd="url(#arrow)" /></svg>
+          <svg width="22" height="8"><line x1="0" y1="4" x2="18" y2="4" stroke="#8a8577" strokeWidth="2.6" markerEnd="url(#arrow)" /></svg>
           思想源流（越老越粗）
         </span>
         <span className="flex items-center gap-1">
-          <svg width="18" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke={SEMANTIC_EDGE_COLOR} strokeWidth="1.2" strokeDasharray="3 2" /></svg>
+          <svg width="18" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="#b5b0a2" strokeWidth="1.2" strokeDasharray="3 2" /></svg>
           语义相似
         </span>
         <span className="ml-auto text-muted/60">
@@ -469,19 +430,13 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
           onDeepAsk={(p) => setComposerDraft(`深问这篇论文 [${p.id}]《${p.title}》：`)}
         />
       )}
-      {selAgg && (
-        <BucketDetail agg={selAgg} clusterLabel={labelOf(selAgg.cluster)}
-          onJump={selectPaper} onClose={() => setSelection(null)} />
-      )}
       {selEdge && selEdgeData && (
         <EdgeDetail
           edge={selEdge}
           weight={selEdgeData.weight}
           fullById={fullById}
-          aggregates={layout.aggregates}
           labelOf={labelOf}
           onJumpPaper={selectPaper}
-          onJumpBucket={(aggId) => setSelection({ kind: "bucket", aggId })}
           onClose={() => setSelection(null)}
         />
       )}
@@ -531,54 +486,32 @@ function PaperNode({ n, focused, faded, selected, onClick, onHover }: {
   );
 }
 
-function EdgeDetail({ edge, weight, fullById, aggregates, labelOf, onJumpPaper, onJumpBucket, onClose }: {
+function EdgeDetail({ edge, weight, fullById, labelOf, onJumpPaper, onClose }: {
   edge: { source: string; target: string; etype: string };
   weight: number;
   fullById: Map<string, GraphNode>;
-  aggregates: AggregateNode[];
   labelOf: (cid: number) => string;
   onJumpPaper: (id: string) => void;
-  onJumpBucket: (aggId: string) => void;
   onClose: () => void;
 }) {
   const isCite = edge.etype === "cites";
-  const resolve = (id: string): { paper: GraphNode | null; agg: AggregateNode | null } => {
-    const p = fullById.get(id);
-    if (p) return { paper: p, agg: null };
-    return { paper: null, agg: aggregates.find((a) => a.id === id) ?? null };
-  };
-  const a = resolve(edge.source);
-  const b = resolve(edge.target);
+  const a = fullById.get(edge.source);
+  const b = fullById.get(edge.target);
 
-  const card = (end: { paper: GraphNode | null; agg: AggregateNode | null }) => {
-    if (end.paper) {
-      const p = end.paper;
-      return (
-        <button onClick={() => onJumpPaper(p.id)} title={p.title}
-          className="w-full rounded-lg border border-border-light px-2.5 py-1.5 text-left transition-colors hover:border-accent/40">
-          <p className="truncate text-[11px] font-medium text-fg">{p.title}</p>
-          <p className="mt-0.5 text-[10px] text-muted">
-            <span className="tnum">{p.year > 0 ? p.year : "????"}</span>
-            {` · 被引 `}<span className="tnum">{p.citation_count}</span>
-            {` · `}{labelOf(p.cluster)}
-            {p.role ? ` · ${ROLE_LABEL[p.role] || ""}` : ""}
-          </p>
-        </button>
-      );
-    }
-    if (end.agg) {
-      const g = end.agg;
-      return (
-        <button onClick={() => onJumpBucket(g.id)}
-          className="w-full rounded-lg border border-dashed border-border-light px-2.5 py-1.5 text-left transition-colors hover:border-accent/40">
-          <p className="text-[11px] font-medium text-fg">聚合节点：其余 {g.count} 篇</p>
-          <p className="mt-0.5 text-[10px] text-muted">
-            {labelOf(g.cluster)} · {g.year > 0 ? g.year : "年份未知"}（点击展开列表）
-          </p>
-        </button>
-      );
-    }
-    return <p className="text-[11px] text-muted/50">端点不在当前视图</p>;
+  const card = (p: GraphNode | undefined) => {
+    if (!p) return <p className="text-[11px] text-muted/50">端点不在当前视图</p>;
+    return (
+      <button onClick={() => onJumpPaper(p.id)} title={p.title}
+        className="w-full rounded-lg border border-border-light px-2.5 py-1.5 text-left transition-colors hover:border-accent/40">
+        <p className="truncate text-[11px] font-medium text-fg">{p.title}</p>
+        <p className="mt-0.5 text-[10px] text-muted">
+          <span className="tnum">{p.year > 0 ? p.year : "????"}</span>
+          {` · 被引 `}<span className="tnum">{p.citation_count}</span>
+          {` · `}{labelOf(p.cluster)}
+          {p.role ? ` · ${ROLE_LABEL[p.role] || ""}` : ""}
+        </p>
+      </button>
+    );
   };
 
   return (
@@ -698,30 +631,3 @@ function PaperDetail({ paper, edges, fullById, clusterLabel, onJump, onClose, on
   );
 }
 
-function BucketDetail({ agg, clusterLabel, onJump, onClose }: {
-  agg: AggregateNode; clusterLabel: string;
-  onJump: (id: string) => void; onClose: () => void;
-}) {
-  return (
-    <div className="h-[190px] overflow-y-auto border-t border-border-light px-4 py-3">
-      <div className="flex items-start justify-between">
-        <p className="text-[12px] font-semibold text-fg">
-          {clusterLabel} · {agg.year > 0 ? agg.year : "年份未知"} · 其余 {agg.count} 篇（按被引排序）
-        </p>
-        <button onClick={onClose} className="px-1.5 text-[13px] text-muted/60 hover:text-fg" title="关闭">×</button>
-      </div>
-      <ul className="mt-1.5 space-y-0.5">
-        {agg.members.map((m) => (
-          <li key={m.id}>
-            <button onClick={() => onJump(m.id)}
-              className="w-full truncate text-left text-[11px] text-fg-secondary transition-colors hover:text-accent"
-              title={m.title}>
-              <span className="tnum text-muted/60">{m.year > 0 ? m.year : "????"}</span> · {m.title}
-              <span className="text-muted/50">（被引 {m.citation_count}）</span>
-            </button>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}

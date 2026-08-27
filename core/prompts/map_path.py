@@ -46,8 +46,8 @@ def get_landscape_prompt() -> str:
 def get_reading_path_prompt() -> str:
     return get("path.reading_reasons").text
 
-_MAP_SUMMARY = """以下是同一研究领域按语义或词项重叠形成的论文簇。\n\n{clusters_text}\n\n请一次完成：\n1. 为每个簇生成简短 label（中文不超过12字 / English no more than 6 words）与 1-2 句 overview；\n2. 用 3-5 句话生成 landscape，说明奠基方向、当前前沿以及方向间的演进、分化或交叉。\n{language_instruction}\n\n只输出 JSON 对象，不要 markdown：\n{{\"clusters\":[{{\"id\":\"0\",\"label\":\"...\",\"overview\":\"...\"}}],\"landscape\":\"...\"}}"""
-register("map.summary", 2, _MAP_SUMMARY)
+_MAP_SUMMARY = """以下是同一研究领域按语义或词法重叠形成的论文簇，每篇论文标注了年份与被引数。\n\n{clusters_text}\n\n请一次完成：\n1. 为每个簇生成简短 label（中文不超过12字 / English no more than 6 words）与 1-2 句 overview（说明该簇在研究什么、方法或视角有何共性）；\n2. 生成 landscape：按固定格式逐簇规范化描述领域脉络——第一句概括该领域整体定位与年份跨度；随后每个簇单独一行，格式为「【簇label】（N 篇，起始年–结束年）：overview 要点；代表论文：《标题》（年份）。」代表论文从该簇被引数最高的 1-3 篇中选取；最后 1-2 句说明簇之间的演进、分化或交叉关系。\nlandscape 中只能使用上方输入里真实出现的论文标题、年份与数字，禁止编造或改写标题。\n{language_instruction}\n\n只输出 JSON 对象，不要 markdown：\n{{\"clusters\":[{{\"id\":\"0\",\"label\":\"...\",\"overview\":\"...\"}}],\"landscape\":\"...\"}}"""
+register("map.summary", 3, _MAP_SUMMARY)
 
 
 def get_map_summary_prompt() -> str:

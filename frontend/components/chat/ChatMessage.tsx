@@ -264,7 +264,7 @@ function ResearchMapCard({ result }: { result: Record<string, unknown> }) {
           {landscape && (
             <div className="rounded-xl border border-border-light bg-surface p-3.5">
               <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-accent">领域脉络</div>
-              <p className="text-[13px] leading-relaxed text-fg-secondary">{landscape}</p>
+              <p className="whitespace-pre-line text-[13px] leading-relaxed text-fg-secondary">{landscape}</p>
             </div>
           )}
           {graph.nodes.length > 0 && (
@@ -338,7 +338,7 @@ function ReadingPathCard({ result }: { result: Record<string, unknown> }) {
         <ol className="mt-1.5 space-y-2 pl-1">
           {path.map((p, i) => (
             <li key={p.paper_id || i} className="flex items-start gap-2.5 rounded-xl border border-border-light bg-surface px-3 py-2.5">
-              <span className="tnum mt-0.5 text-[15px] font-bold text-accent/70">{i + 1}</span>
+              <span className="font-serif-display tnum mt-0.5 text-[15px] font-bold text-accent/70">{i + 1}</span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
                   <span className={`badge ${ROLE_BADGE[p.role] || "badge-muted"}`}>{p.role}</span>
@@ -478,7 +478,7 @@ function DeepReadCard({ result }: { result: Record<string, unknown> }) {
                       : (a.status || (lang === "zh" ? "已处理" : "Processed"));
                   return (
                     <div key={a.id} className="flex items-start gap-2 text-xs text-fg-secondary">
-                      <FileCheck className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${ready ? "text-success" : degraded ? "text-warning" : "text-accent"}`} />
+                      <FileCheck className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${ready ? "text-emerald-500" : degraded ? "text-amber-500" : "text-accent"}`} />
                       <div className="min-w-0 flex-1">
                         {a.filename && <div className="truncate font-medium text-fg" title={a.filename}>{a.filename}</div>}
                         <span>{statusText}</span>
@@ -1258,7 +1258,7 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming: boole
 function Avatar({ role }: { role: "user" | "assistant" }) {
   if (role === "user") {
     return (
-      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-fg-secondary to-fg text-[11px] font-medium text-white">
+      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-slate-500 to-slate-700 text-[11px] font-medium text-white">
         我
       </div>
     );

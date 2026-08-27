@@ -166,7 +166,7 @@ function FileViewer({ fileMeta }: { fileMeta: ChatAttachment | null }) {
   if (error) {
     return (
       <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-        <FileWarning className="mb-3 h-8 w-8 text-error/50" />
+        <FileWarning className="mb-3 h-8 w-8 text-red-400/60" />
         <p className="text-[13px] text-muted">无法加载文件</p>
         <p className="mt-1 text-[11px] text-muted/60">{error}</p>
       </div>
@@ -182,7 +182,7 @@ function FileViewer({ fileMeta }: { fileMeta: ChatAttachment | null }) {
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted">
           <span>{attachmentMetaLabel(fileMeta)}</span>
-          {!image && data?.truncated && <span className="text-warning">（已截断）</span>}
+          {!image && data?.truncated && <span className="text-amber-500/80">（已截断）</span>}
         </div>
       </div>
       {image ? (

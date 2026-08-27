@@ -227,10 +227,10 @@ export default function ChatPage() {
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
           {isEmpty ? (
             <div className="flex min-h-full flex-col items-center justify-center px-6">
-              <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-[18px] bg-gradient-to-br from-accent to-accent-hover shadow-lg shadow-accent/25">
+              <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-accent-hover shadow-lg shadow-accent/20">
                 <Sparkles className="h-7 w-7 text-white" />
               </div>
-              <h1 className="mb-2 text-2xl font-bold tracking-tight text-fg">
+              <h1 className="font-serif-display mb-2 text-[22px] font-bold tracking-tight text-fg">
                 你好，我是 Paper Agent
               </h1>
               <p className="mb-8 max-w-md text-center text-[14px] leading-relaxed text-muted">
@@ -242,9 +242,9 @@ export default function ChatPage() {
                   <button
                     key={s.text}
                     onClick={() => handleSend(s.text)}
-                    className="group flex items-start gap-3 rounded-xl border border-border-light bg-surface px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-px hover:border-accent/30 hover:shadow-md"
+                    className="group flex items-start gap-3 rounded-xl border border-border-light bg-surface px-4 py-3 text-left transition-all hover:border-accent/25 hover:bg-surface-hover/40 hover:shadow-sm"
                   >
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft/60 transition-colors group-hover:bg-accent-soft">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft/40 transition-colors group-hover:bg-accent-soft/60">
                       <s.icon className="h-4 w-4 text-accent" />
                     </div>
                     <div className="min-w-0">

@@ -89,7 +89,7 @@ function CollapsedRail({
 }) {
   if (side === "left") {
     return (
-      <aside className="flex h-full w-12 shrink-0 flex-col items-center gap-2 border-r border-border-light bg-surface py-3">
+      <aside className="flex h-full w-12 shrink-0 flex-col items-center gap-2 border-r border-border-light bg-surface/50 py-3">
         <div className="flex h-6 w-6 items-center justify-center rounded-lg bg-accent-soft/50">
           <BookOpen className="h-3.5 w-3.5 text-accent" />
         </div>
@@ -113,7 +113,7 @@ function CollapsedRail({
     );
   }
   return (
-    <aside className="flex h-full w-12 shrink-0 flex-col items-center gap-2 border-l border-border-light bg-surface py-3">
+    <aside className="flex h-full w-12 shrink-0 flex-col items-center gap-2 border-l border-border-light bg-surface/50 py-3">
       <button
         onClick={onExpand}
         className="flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-fg"

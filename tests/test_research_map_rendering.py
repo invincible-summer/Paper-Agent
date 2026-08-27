@@ -53,12 +53,18 @@ def _session(*, dense: int = 4, hostile: bool = False) -> ChatSession:
     return session
 
 
-def test_shared_view_is_sorted_deduped_and_aggregated():
+def test_shared_view_is_sorted_and_deduped():
     view = build_research_map_view(_session())
     assert view["nodes"][0]["id"] == "p1"
-    assert len(view["aggregates"]) == 1
-    assert view["aggregates"][0]["member_ids"] == ["d0", "d1", "d2", "d3"]
+    assert "aggregates" not in view  # papers never collapse into aggregate nodes
     assert len(view["edges"]) == 3
+
+
+def _viewbox_height(svg: str) -> int:
+    import re
+    match = re.search(r'viewBox="0 0 1240 (\d+)"', svg)
+    assert match, "viewBox missing"
+    return int(match.group(1))
 
 
 def test_pretty_svg_is_safe_scalable_and_complete():
@@ -71,7 +77,19 @@ def test_pretty_svg_is_safe_scalable_and_complete():
     assert "&lt;script&gt;" in svg and "javascript:" not in svg.lower()
     assert "<script>" not in svg and "href=" not in svg and "<image" not in svg
     assert "直接引用" in svg and "语义关联" in svg
-    assert "奠基性论文" in svg and "聚合节点" in svg and "+4" in svg
+    assert "奠基性论文" in svg and "聚合节点" not in svg
+    # Every dense-bucket paper is its own card — nothing is folded into "+N".
+    for index in range(4):
+        assert f"Dense {index}" in svg
+    assert "+4" not in svg
+
+
+def test_pretty_svg_lane_height_grows_with_dense_buckets():
+    shorter = render_pretty_research_map_svg(_session(dense=4))
+    taller = render_pretty_research_map_svg(_session(dense=8))
+    assert _viewbox_height(taller) > _viewbox_height(shorter)
+    for index in range(8):
+        assert f"Dense {index}" in taller
 
 
 def test_mermaid_is_deterministic_safe_and_has_distinct_edges():
@@ -80,7 +98,9 @@ def test_mermaid_is_deterministic_safe_and_has_distinct_edges():
     assert mermaid.startswith("```mermaid\nflowchart LR") and mermaid.endswith("```")
     assert "-->" in mermaid and "-. 语义 .->" in mermaid
     assert "click" not in mermaid.lower() and "<script>" not in mermaid.lower()
-    assert "+4 篇" in mermaid
+    assert "聚合节点" not in mermaid and "+4" not in mermaid
+    for index in range(4):
+        assert f"Dense {index}" in mermaid
     assert "<script>alert" not in mermaid
 
 
@@ -89,7 +109,8 @@ def test_html_is_self_contained_and_interactive_without_external_resources():
     assert doc.startswith("<!doctype html>")
     assert "Content-Security-Policy" in doc and "connect-src 'none'" in doc
     assert "cluster-filter" in doc and "show-cites" in doc and "show-semantic" in doc
-    assert "pointerdown" in doc and "wheel" in doc and "聚合成员" in doc
+    assert "pointerdown" in doc and "wheel" in doc
+    assert "聚合成员" not in doc and "Dense 0" in doc
     assert "fetch(" not in doc and "localStorage" not in doc and "<script>alert" not in doc
     assert "noopener noreferrer" in doc and "target='_blank'" in doc
     assert "<script src=" not in doc and "<link rel=" not in doc and "<img" not in doc
@@ -99,7 +120,9 @@ def test_markdown_is_plain_relation_listing_without_mermaid():
     markdown = render_pretty_research_map_markdown(_session())
     assert "```mermaid" not in markdown.lower()
     assert "## 论文清单" in markdown and "## 引用与语义关系" in markdown
-    assert "## 聚合节点展开" in markdown and "直接引用" in markdown and "语义关联" in markdown
+    assert "聚合节点" not in markdown and "直接引用" in markdown and "语义关联" in markdown
+    for index in range(4):
+        assert f"Dense {index}" in markdown
     assert "DOI: 10.1000/a&b" in markdown
 
 

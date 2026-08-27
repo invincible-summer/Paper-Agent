@@ -141,26 +141,49 @@ def build_timeline(papers: list[Paper]) -> list[dict]:
 
 
 def _fallback_landscape(clusters: list[dict], papers_by_id: dict[str, Paper], language: str) -> str:
+    """Deterministic landscape fallback in the same normalized per-cluster format."""
     if not clusters:
         return ""
-    parts = []
+    zh = language != "en"
+    lines = []
     for cluster in clusters:
-        titles = [papers_by_id[pid].title for pid in cluster.get("paper_ids", [])[:2]
-                  if pid in papers_by_id]
-        parts.append(f"{cluster['label']}（{'；'.join(titles)}）" if titles else cluster["label"])
+        papers = [papers_by_id[pid] for pid in cluster.get("paper_ids", []) if pid in papers_by_id]
+        years = sorted(p.year for p in papers if p.year)
+        if not years:
+            span = "年份未知" if zh else "n.d."
+        elif len(years) == 1:
+            span = str(years[0])
+        else:
+            span = f"{years[0]}–{years[-1]}"
+        reps = sorted(papers, key=lambda p: p.citation_count or 0, reverse=True)[:2]
+        rep_text = "、".join(
+            f"《{p.title}》（{p.year or 'n.d.'}）" if zh else f"\"{p.title}\" ({p.year or 'n.d.'})"
+            for p in reps)
+        if zh:
+            head = f"【{cluster['label']}】（{len(papers)} 篇，{span}）"
+            lines.append(f"{head}：{rep_text}" if rep_text else head)
+        else:
+            head = f"[{cluster['label']}] ({len(papers)} papers, {span})"
+            lines.append(f"{head}: {rep_text}" if rep_text else head)
     years = sorted(p.year for p in papers_by_id.values() if p.year)
-    period = f"{years[0]}–{years[-1]}" if years else "当前"
-    if language == "en":
-        return f"Across {period}, the collection develops through " + "; ".join(parts) + "."
-    return f"该论文集覆盖 {period} 年，主要形成" + "、".join(parts) + "等方向；建议从高被引代表作进入，再沿时间线观察方向分化与交叉。"
+    period = f"{years[0]}–{years[-1]}" if years else ("当前" if zh else "present")
+    if not zh:
+        return (f"Across {period}, the collection develops through:\n" + "\n".join(lines)
+                + "\nStart from the highly cited representatives, then follow the timeline.")
+    return (f"该论文集覆盖 {period} 年，按主题规范化归纳如下：\n" + "\n".join(lines)
+            + "\n建议从高被引代表作进入，再沿时间线观察方向分化与交叉。")
 
 
 async def _summarize_map(clusters: list[dict], papers_by_id: dict[str, Paper],
                          language: str) -> tuple[str, str]:
     """One bounded utility call produces cluster labels and the landscape."""
+    def _paper_line(pid: str) -> str:
+        p = papers_by_id[pid]
+        return f"  - {p.title}（{p.year or 'n.d.'}，被引 {p.citation_count or 0}）"
+
     clusters_text = "\n".join(
         f"簇 {c['id']}:\n" + "\n".join(
-            f"  - {papers_by_id[pid].title}" for pid in c["paper_ids"] if pid in papers_by_id)
+            _paper_line(pid) for pid in c["paper_ids"] if pid in papers_by_id)
         for c in clusters
     )
     prompt = get_map_summary_prompt().format(
@@ -183,7 +206,7 @@ async def _summarize_map(clusters: list[dict], papers_by_id: dict[str, Paper],
             if item:
                 cluster["label"] = str(item.get("label") or cluster["label"])[:60]
                 cluster["overview"] = str(item.get("overview") or "")[:500]
-        landscape = str(data.get("landscape") or "").strip()
+        landscape = str(data.get("landscape") or "").strip()[:2000]
         if not landscape:
             landscape = _fallback_landscape(clusters, papers_by_id, language)
         return landscape, "available"

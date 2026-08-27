@@ -2,16 +2,15 @@
 //
 // Pure function: same input -> same output, no randomness, no DOM. This makes
 // the layout unit-testable in plain Node and keeps the rendered graph stable
-// in size — lanes have a fixed row budget, oversized (cluster, year) buckets
-// collapse into "+N" aggregate nodes, and years are spaced by ordinal (equal
-// gaps) instead of real calendar distance so sparse decades never stretch the
-// canvas.
+// in size — every paper is an individual node (never collapsed into an
+// aggregate): lanes size dynamically to their tallest (cluster, year) bucket,
+// and years are spaced by ordinal (equal gaps) instead of real calendar
+// distance so sparse decades never stretch the canvas.
 
 import type { GenealogyGraph, GraphNode, GraphEdge } from "./types";
 
 export interface LayoutOptions {
   width?: number;      // content width of the canvas (px)
-  bucketTopN?: number; // members shown per (cluster, year) bucket before "+N"
 }
 
 export interface PositionedNode extends GraphNode {
@@ -20,23 +19,11 @@ export interface PositionedNode extends GraphNode {
   r: number;
 }
 
-export interface AggregateNode {
-  id: string;          // "agg::{cluster}::{year}"
-  kind: "aggregate";
-  cluster: number;
-  year: number;
-  count: number;
-  members: { id: string; title: string; year: number; citation_count: number }[];
-  x: number;
-  y: number;
-}
-
 export interface Lane {
   cluster: number;
   y: number;
   height: number;
   memberCount: number;
-  shownCount: number;  // excludes aggregated members
 }
 
 export interface GraphStats {
@@ -50,12 +37,8 @@ export interface GraphStats {
 
 export interface LayoutResult {
   nodes: PositionedNode[];
-  aggregates: AggregateNode[];
   lanes: Lane[];
   yearTicks: { year: number; x: number }[];
-  // hidden (aggregated) node id -> its aggregate node id, so edges can be
-  // re-attached instead of dropped.
-  aliasOf: Record<string, string>;
   width: number;
   height: number;
   stats: GraphStats;
@@ -93,12 +76,11 @@ export function layoutGenealogy(
   opts: LayoutOptions = {},
 ): LayoutResult {
   const width = opts.width ?? 920;
-  const bucketTopN = opts.bucketTopN ?? 3;
   const nodes = data.nodes || [];
   const stats = graphStats(data);
   const empty: LayoutResult = {
-    nodes: [], aggregates: [], lanes: [], yearTicks: [],
-    aliasOf: {}, width, height: 0, stats,
+    nodes: [], lanes: [], yearTicks: [],
+    width, height: 0, stats,
   };
   if (!nodes.length) return empty;
 
@@ -130,18 +112,11 @@ export function layoutGenealogy(
   );
 
   const positioned: PositionedNode[] = [];
-  const aggregates: AggregateNode[] = [];
   const lanes: Lane[] = [];
-  const aliasOf: Record<string, string> = {};
   let cursor = PAD_T;
 
   for (const cid of clusterIds) {
     const members = byCluster.get(cid)!;
-    const laneHeight = LANE_LABEL + (bucketTopN + 1) * ROW_GAP;
-    lanes.push({
-      cluster: cid, y: cursor, height: laneHeight,
-      memberCount: members.length, shownCount: 0,
-    });
 
     // Bucket by year; inside a bucket rank by citations (id tie-break).
     const buckets = new Map<number, GraphNode[]>();
@@ -151,66 +126,45 @@ export function layoutGenealogy(
       arr.push(m);
       buckets.set(y, arr);
     }
-    let shown = 0;
+    const maxRows = Math.max(...Array.from(buckets.values(), (b) => b.length));
+    const laneHeight = LANE_LABEL + maxRows * ROW_GAP;
+    lanes.push({
+      cluster: cid, y: cursor, height: laneHeight,
+      memberCount: members.length,
+    });
+
     for (const [year, bucket] of Array.from(buckets.entries()).sort((a, b) => a[0] - b[0])) {
       const ranked = [...bucket].sort(
         (a, b) => (b.citation_count || 0) - (a.citation_count || 0) || a.id.localeCompare(b.id),
       );
       const x = xOfYear(year);
-      ranked.slice(0, bucketTopN).forEach((n, row) => {
+      ranked.forEach((n, row) => {
         positioned.push({
           ...n, x,
           y: cursor + LANE_LABEL + ROW_GAP / 2 + row * ROW_GAP,
           r: nodeRadius(n.citation_count || 0),
         });
-        shown += 1;
       });
-      const rest = ranked.slice(bucketTopN);
-      if (rest.length) {
-        const aggId = `agg::${cid}::${year}`;
-        aggregates.push({
-          id: aggId, kind: "aggregate", cluster: cid, year,
-          count: rest.length,
-          members: rest.map((m) => ({
-            id: m.id, title: m.title, year: m.year, citation_count: m.citation_count,
-          })),
-          x,
-          y: cursor + LANE_LABEL + ROW_GAP / 2 + bucketTopN * ROW_GAP,
-        });
-        for (const m of rest) aliasOf[m.id] = aggId;
-      }
     }
-    lanes[lanes.length - 1].shownCount = shown;
     cursor += laneHeight;
   }
 
   return {
-    nodes: positioned, aggregates, lanes, yearTicks, aliasOf,
+    nodes: positioned, lanes, yearTicks,
     width, height: cursor + PAD_B, stats,
   };
 }
 
-/** Resolve an edge endpoint through the aggregate alias map. */
-export function resolveEndpoint(id: string, aliasOf: Record<string, string>): string {
-  return aliasOf[id] || id;
-}
-
-/** Dedupe edges after aggregate aliasing (several hidden members may map to
- * the same aggregate, producing identical drawn edges). */
-export function resolveEdges(
-  edges: GraphEdge[],
-  aliasOf: Record<string, string>,
-): GraphEdge[] {
+/** Deduplicate identical edges (same endpoints + type) and drop self-loops. */
+export function resolveEdges(edges: GraphEdge[]): GraphEdge[] {
   const seen = new Set<string>();
   const out: GraphEdge[] = [];
   for (const e of edges) {
-    const s = resolveEndpoint(e.source, aliasOf);
-    const t = resolveEndpoint(e.target, aliasOf);
-    if (s === t) continue; // self-loop through an aggregate
-    const key = `${s}->${t}:${e.type}`;
+    if (e.source === e.target) continue;
+    const key = `${e.source}->${e.target}:${e.type}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ ...e, source: s, target: t });
+    out.push(e);
   }
   return out;
 }

@@ -44,29 +44,32 @@ test("equal-spaced year axis: gaps between ticks are uniform", () => {
   assert.ok(Math.abs(gaps[0] - gaps[1]) < 1e-9, "tick spacing must be equal");
 });
 
-test("bucket overflow collapses into a +N aggregate with alias map", () => {
+test("every bucket member is positioned — nothing collapses into aggregates", () => {
   const nodes = Array.from({ length: 6 }, (_, i) =>
     N(`p${i}`, { year: 2020, citation_count: i * 100 }));
-  const r = layoutGenealogy({ nodes, edges: [] }, { bucketTopN: 3 });
-  assert.equal(r.nodes.length, 3, "only top-3 per bucket shown");
-  assert.equal(r.aggregates.length, 1);
-  const agg = r.aggregates[0];
-  assert.equal(agg.count, 3);
-  assert.equal(agg.members.length, 3);
-  // top-3 by citations kept visible; the rest aliased to the aggregate
-  const shownIds = new Set(r.nodes.map((n) => n.id));
-  assert.ok(shownIds.has("p5") && shownIds.has("p4") && shownIds.has("p3"));
-  for (const hidden of ["p0", "p1", "p2"]) assert.equal(r.aliasOf[hidden], agg.id);
+  const r = layoutGenealogy({ nodes, edges: [] });
+  assert.equal(r.nodes.length, 6, "all members shown individually");
+  // stacked at the same x (same year) on distinct rows, ranked by citations
+  // desc so the most-cited paper sits on top
+  const xs = new Set(r.nodes.map((n) => n.x));
+  assert.equal(xs.size, 1);
+  const rows = r.nodes.map((n) => n.y).sort((a, b) => a - b);
+  for (let i = 1; i < rows.length; i++) {
+    assert.ok(rows[i] - rows[i - 1] > 0, "distinct rows, no overlap");
+  }
+  const top = r.nodes.reduce((a, b) => (a.y < b.y ? a : b));
+  assert.equal(top.id, "p5", "highest-cited paper on the first row");
 });
 
-test("fixed lane height regardless of bucket overflow (stable canvas size)", () => {
-  const small = layoutGenealogy({ nodes: [N("a")], edges: [] });
-  const big = layoutGenealogy({
-    nodes: Array.from({ length: 30 }, (_, i) => N(`p${i}`, { year: 2020, citation_count: i })),
+test("lane height grows with the tallest bucket (min one row)", () => {
+  const one = layoutGenealogy({ nodes: [N("a", { year: 2020 }), N("b", { year: 2021 })], edges: [] });
+  const dense = layoutGenealogy({
+    nodes: Array.from({ length: 5 }, (_, i) => N(`p${i}`, { year: 2020, citation_count: i })),
     edges: [],
   });
-  assert.equal(small.lanes[0].height, big.lanes[0].height, "lane height is fixed");
-  assert.equal(small.lanes.length, big.lanes.length);
+  assert.equal(one.lanes[0].height, 24 + 1 * 44, "single-row lane keeps the minimum height");
+  assert.equal(dense.lanes[0].height, 24 + 5 * 44, "lane grows to fit its tallest bucket");
+  assert.ok(dense.height > one.height);
 });
 
 test("lanes sorted by cluster size desc", () => {
@@ -77,16 +80,16 @@ test("lanes sorted by cluster size desc", () => {
   assert.ok(r.lanes[1].y > r.lanes[0].y);
 });
 
-test("resolveEdges re-attaches hidden endpoints and dedupes", () => {
+test("resolveEdges drops self-loops and duplicate edges", () => {
   const edges = [
     { source: "x", target: "p1", type: "cites", weight: 1 },
-    { source: "x", target: "p2", type: "cites", weight: 1 },
-    { source: "p1", target: "p2", type: "cites", weight: 1 }, // self-loop via agg
+    { source: "x", target: "p1", type: "cites", weight: 1 }, // exact duplicate
+    { source: "p1", target: "p1", type: "cites", weight: 1 }, // self-loop
+    { source: "x", target: "p1", type: "semantic", weight: 0.7 }, // different type: kept
   ];
-  const aliasOf = { p1: "agg::0::2020", p2: "agg::0::2020" };
-  const out = resolveEdges(edges, aliasOf);
-  assert.equal(out.length, 1, "dupes and self-loops removed");
-  assert.equal(out[0].target, "agg::0::2020");
+  const out = resolveEdges(edges);
+  assert.equal(out.length, 2);
+  assert.deepEqual(out.map((e) => e.type).sort(), ["cites", "semantic"]);
 });
 
 test("nodeRadius has exactly three tiers", () => {
