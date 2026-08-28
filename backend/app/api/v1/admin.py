@@ -378,6 +378,7 @@ class DisplayPolicyUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     expected_version: int = Field(gt=0)
     tool_cards_enabled: bool | None = None
+    tool_error_cards_enabled: bool | None = None
     skill_card_enabled: bool | None = None
     research_map_svg_enabled: bool | None = None
     research_map_mermaid_enabled: bool | None = None
@@ -852,3 +853,56 @@ def put_performance_policy_api(body: PerformancePolicyUpdate,
     if "startup_prewarm_mode" in body.changes():
         response["restart_required"] = True
     return response
+
+
+# ---------------------------------------------------------------------------
+# User feedback administration (反馈仅管理员可见)
+# ---------------------------------------------------------------------------
+
+
+class FeedbackStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    resolved: bool
+
+
+@router.get("/feedback")
+def get_feedback(
+    status: str | None = None,
+    offset: int = 0,
+    limit: int = 50,
+    authorization: str | None = Header(None),
+) -> dict:
+    _administrator(authorization)
+    from core.feedback_store import list_feedback
+
+    if status is not None and status not in {"open", "resolved"}:
+        raise HTTPException(400, "status 必须是 open 或 resolved")
+    return list_feedback(status=status, offset=offset, limit=limit)
+
+
+@router.put("/feedback/{feedback_id}")
+def put_feedback_status(
+    feedback_id: str,
+    body: FeedbackStatusUpdate,
+    authorization: str | None = Header(None),
+) -> dict:
+    admin = _administrator(authorization)
+    from core.feedback_store import set_feedback_status
+
+    item = set_feedback_status(feedback_id, body.resolved, resolved_by=admin["id"])
+    if item is None:
+        raise HTTPException(404, "反馈不存在或已删除")
+    return {"item": item}
+
+
+@router.delete("/feedback/{feedback_id}")
+def delete_feedback_api(
+    feedback_id: str,
+    authorization: str | None = Header(None),
+) -> dict:
+    _administrator(authorization)
+    from core.feedback_store import delete_feedback
+
+    if not delete_feedback(feedback_id):
+        raise HTTPException(404, "反馈不存在或已删除")
+    return {"status": "deleted", "id": feedback_id}

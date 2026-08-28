@@ -5,7 +5,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  ArrowLeft, Database, Gauge, KeyRound, LayoutGrid, Search,
+  ArrowLeft, Database, Gauge, KeyRound, LayoutGrid, MessageSquare, Search,
   ShieldCheck, SlidersHorizontal, Trash2, Wrench, type LucideIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -18,6 +18,7 @@ const NAV_GROUPS: Array<{ name: string; items: AdminNavItem[] }> = [
     items: [
       { href: "/admin/auth-settings", label: "访问控制", icon: ShieldCheck },
       { href: "/admin/agent-keys", label: "Agent Keys", icon: KeyRound },
+      { href: "/admin/feedback", label: "用户反馈", icon: MessageSquare },
       { href: "/admin/accounts-data", label: "账号数据", icon: Trash2 },
     ],
   },

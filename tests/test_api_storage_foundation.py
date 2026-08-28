@@ -313,6 +313,64 @@ def test_schema_v8_strategy_migrates_to_v9(tmp_path: Path, strategy: str, markdo
     assert policy.version == 9 and policy.updated_by == "v8-admin"
 
 
+def test_display_policy_tool_error_cards_default_and_update(tmp_path: Path):
+    store = ApiStorageStore(StorageContext.openai_api(root_dir=tmp_path / "api"))
+    store.initialize()
+    # 全新库默认「不提示」：错误状态卡不进正式输出
+    policy = store.get_display_policy()
+    assert policy.tool_cards_enabled is True
+    assert policy.tool_error_cards_enabled is False
+
+    updated = store.update_display_policy(
+        {"tool_error_cards_enabled": True}, expected_version=policy.version,
+        updated_by="admin-1")
+    assert updated.tool_error_cards_enabled is True
+    assert updated.version == policy.version + 1
+    # 传非法类型仍被拒绝
+    with pytest.raises(ValueError):
+        store.update_display_policy(
+            {"tool_error_cards_enabled": "yes"},
+            expected_version=updated.version, updated_by="admin-1")
+    with pytest.raises(ValueError):
+        store.update_display_policy(
+            {"tool_error_cards": True}, expected_version=updated.version,
+            updated_by="admin-1")
+
+
+def test_schema_v9_gains_tool_error_cards_suppressed(tmp_path: Path):
+    """v9 旧库增量迁移：新列默认 0（不提示），原有开关与版本号原样保留。"""
+    context = StorageContext.openai_api(root_dir=tmp_path / "api")
+    store = ApiStorageStore(context)
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute("ALTER TABLE api_display_policy RENAME TO api_display_policy_v9")
+        conn.execute("""
+            CREATE TABLE api_display_policy (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                tool_cards_enabled INTEGER NOT NULL,
+                skill_card_enabled INTEGER NOT NULL,
+                research_map_svg_enabled INTEGER NOT NULL,
+                research_map_mermaid_enabled INTEGER NOT NULL,
+                research_map_html_enabled INTEGER NOT NULL,
+                research_map_markdown_enabled INTEGER NOT NULL,
+                version INTEGER NOT NULL,
+                updated_by TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO api_display_policy VALUES(1, 0, 1, 1, 0, 0, 1, 9, 'v9-admin', 789.0)")
+        conn.execute("DROP TABLE api_display_policy_v9")
+        conn.commit()
+
+    store.initialize()
+    policy = store.get_display_policy()
+    assert policy.tool_error_cards_enabled is False
+    assert policy.tool_cards_enabled is False
+    assert policy.skill_card_enabled is True
+    assert policy.version == 9 and policy.updated_by == "v9-admin"
+
+
 def test_policy_upload_limit_validation(tmp_path: Path):
     store = ApiStorageStore(StorageContext.openai_api(root_dir=tmp_path / "api"))
     store.initialize()

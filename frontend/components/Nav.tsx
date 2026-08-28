@@ -1,5 +1,5 @@
 "use client";
-import { BookOpen, BookOpenText, LogOut, ShieldCheck } from "lucide-react";
+import { BookOpen, BookOpenText, LogOut, MessageSquarePlus, ShieldCheck } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
@@ -44,6 +44,14 @@ export function Nav() {
         >
           <BookOpenText className="h-3.5 w-3.5" />
           使用文档
+        </button>
+        <button
+          onClick={() => router.push("/feedback")}
+          title="意见反馈"
+          className="flex h-7 items-center gap-1.5 rounded-lg border border-border-light px-2.5 text-xs text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg"
+        >
+          <MessageSquarePlus className="h-3.5 w-3.5" />
+          反馈
         </button>
         {authRequired && (user ? (
           <div className="flex items-center gap-1.5">

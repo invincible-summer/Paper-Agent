@@ -782,7 +782,12 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                                     if prepared["cards_allowed"] else "")
                             block_parts.append(
                                 (f"{line}\n\n{table}" if line else table, True, "table"))
-                        elif prepared["cards_allowed"]:
+                        elif prepared["cards_allowed"] and (
+                                result.get("status") != "error"
+                                or policy.tool_error_cards_enabled):
+                            # Error-status one-liners are model-steering text;
+                            # the tool_error_cards_enabled policy (off by
+                            # default) decides whether they reach the user.
                             card = render_tool_card(tool, result)
                             if card:
                                 block_parts.append((card, False, "card"))
@@ -1098,7 +1103,13 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                             if state.get("cards_allowed") else "")
                     block = f"{line}\n\n{table}" if line else table
                     out += emit_block(block, required=True)
-                elif state.get("cards_allowed"):
+                elif state.get("cards_allowed") and (
+                        result.get("status") != "error"
+                        or (state.get("policy") is not None
+                            and state["policy"].tool_error_cards_enabled)):
+                    # Mirror of the non-streaming gate: error one-liners stay
+                    # out of delta.content unless the administrator re-enabled
+                    # them; the model still receives the raw tool result.
                     card = render_tool_card(tool, result)
                     if card:
                         out += emit_block(card)

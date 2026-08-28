@@ -189,6 +189,7 @@ export async function cleanupAccount(
 
 export interface ApiDisplayPolicy {
   tool_cards_enabled: boolean;
+  tool_error_cards_enabled: boolean;
   skill_card_enabled: boolean;
   research_map_svg_enabled: boolean;
   research_map_mermaid_enabled: boolean;
@@ -255,9 +256,8 @@ export async function getDisplayPolicy(): Promise<{
 export async function updateDisplayPolicy(
   expectedVersion: number,
   changes: Partial<Pick<
-    ApiDisplayPolicy,
-    "tool_cards_enabled" | "skill_card_enabled" | "research_map_svg_enabled"
-    | "research_map_mermaid_enabled" | "research_map_html_enabled"
+    ApiDisplayPolicy, "tool_cards_enabled" | "tool_error_cards_enabled" | "skill_card_enabled"
+    | "research_map_svg_enabled" | "research_map_mermaid_enabled" | "research_map_html_enabled"
     | "research_map_markdown_enabled"
   >>,
 ): Promise<{ policy: ApiDisplayPolicy }> {
@@ -495,6 +495,60 @@ export async function recoverToolBreaker(tool: string): Promise<{
 
 export type StartupPrewarmMode = "blocking" | "background" | "role_first" | "off";
 export type MapCitationMode = "fast" | "quality" | "off";
+
+export interface FeedbackItem {
+  id: string;
+  user_id: string;
+  username: string;
+  role: string;
+  category: string;
+  content: string;
+  contact: string;
+  status: "open" | "resolved";
+  created_at: number;
+  resolved_at: number | null;
+  resolved_by: string | null;
+}
+
+export interface FeedbackListResponse {
+  items: FeedbackItem[];
+  counts: { open: number; resolved: number; total: number };
+}
+
+export async function listFeedback(
+  status?: "open" | "resolved",
+  offset = 0,
+  limit = 50,
+): Promise<FeedbackListResponse> {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  if (status) params.set("status", status);
+  const res = await fetch(`${BASE}/feedback?${params.toString()}`, {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  return parseResponse(res);
+}
+
+export async function updateFeedbackStatus(
+  feedbackId: string,
+  resolved: boolean,
+): Promise<{ item: FeedbackItem }> {
+  const res = await fetch(`${BASE}/feedback/${encodeURIComponent(feedbackId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ resolved }),
+  });
+  return parseResponse(res);
+}
+
+export async function deleteFeedback(feedbackId: string): Promise<void> {
+  const res = await fetch(`${BASE}/feedback/${encodeURIComponent(feedbackId)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  await parseResponse(res);
+}
+
 export interface PerformancePolicy {
   startup_prewarm_mode: StartupPrewarmMode;
   map_citation_mode: MapCitationMode;

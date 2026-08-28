@@ -63,7 +63,7 @@
 - 检索超时采用部分成功：多源检索保留已完成来源，时间紧时切换词项重合 + 被引 + 时效的确定性快速重排，分层后立即发布可恢复 snapshot；网络论文全文能力已下线，SQLite/Chroma 增强可跳过。`partial` 结果仍输出标准论文表、工具状态行并写入 Checkpoint，不会因后续增强超时丢弃论文列表
 - 多模态输入：支持 OpenAI content 数组——`file.url` 存在时始终作为实际下载地址（与 `file_id` 同时存在也不例外），`file_id` 只保留为来源标识，绝不拼接成本地路径或猜测公网 URL；仅有 `file_id` 时不联网、不报 500，而是在本轮明确提示缺少可下载 URL。`file` 与 `image_url`（URL 或 data URI）统一注册为会话附件，HTTP(S) 下载逐跳执行 SSRF 公网校验。`/v1` 文件上限默认 200 MiB，可由管理员在 `/admin/api-storage` 下调但不能超过 200 MiB；Web `/chat/upload` 仍为 20 MiB。PDF/DOCX/TEX/TXT/MD/BIB/PNG/JPG/JPEG/WebP 按原能力处理；DOC/XLS/XLSX 可安全保存到 API 私有会话并生成空 sidecar，但标记为 `deferred`、当前不解析；PPT/PPTX 和其他未知格式继续拒绝。`input_audio` 当前明确降级为不支持音频解析
 - 文件产物输出：研究地图按管理员四开关组合生成唯一美化 SVG（`fileType: image`、`mimeType: image/svg+xml`）、自包含可下载 HTML（`fileType: text`、`mimeType: text/html`）和/或普通 Markdown 关系说明（`fileType: text`、`mimeType: text/markdown`）；正文 Mermaid 是可选源码块，不是附件。美化 SVG 无脚本、外链资源或 Mermaid 依赖；HTML 下载后才在浏览器执行。综述可生成为 markdown；`export_manuscript` 可导出 md / docx / tex，下载路由支持 `.txt` 与 `.html` 文本产物。所有文件均由 `GET /files/{name}` 下载，长中文文件名受 basename 与后缀白名单保护并可正常获取
-- 富展示（按接口文档能力实现）：工具完成时正文插入一行式 Markdown 状态行；文献检索完成后确定性生成完整论文清单表格，不受卡片开关控制；技能加载触发思考折叠提示 + 正文技能行。管理员在 `/admin/display-policy` 配置工具/技能提示与研究图谱四开关（`api_display_policy` 单行表，schema v9，5 秒读缓存、乐观锁）：`research_map_svg_enabled`、`research_map_mermaid_enabled`、`research_map_html_enabled`、`research_map_markdown_enabled`。Mermaid 进入正文和下一轮回显，不进入附件；SVG、HTML、Markdown 只在非流式顶层或流式唯一 stop 帧的 `x_soda.attachments` 中出现。显式 `export_report` 固定导出美化 SVG + Markdown，不受展示策略影响。
+- 富展示（按接口文档能力实现）：工具完成时正文插入一行式 Markdown 状态行；文献检索完成后确定性生成完整论文清单表格，不受卡片开关控制；技能加载触发思考折叠提示 + 正文技能行。管理员在 `/admin/display-policy` 配置工具/技能提示与研究图谱四开关（`api_display_policy` 单行表，schema v9，5 秒读缓存、乐观锁）：`research_map_svg_enabled`、`research_map_mermaid_enabled`、`research_map_html_enabled`、`research_map_markdown_enabled`；另有 `tool_error_cards_enabled`（默认关闭）单独控制错误状态卡——关闭时 ⚠️ 超时/失败提示不进入正式输出，错误仍交给模型处理并在回答文字中说明，超时与调用控制逻辑不变，可随时打开恢复原有提示。Mermaid 进入正文和下一轮回显，不进入附件；SVG、HTML、Markdown 只在非流式顶层或流式唯一 stop 帧的 `x_soda.attachments` 中出现。显式 `export_report` 固定导出美化 SVG + Markdown，不受展示策略影响。
 - 接入向导：`baseUrl = https://你的域名/v1`，`credential = 管理员创建的长期 Agent API Key`；附件 URL 由 `PUBLIC_BASE_URL` 生成
 
 ## 多用户账号（自有前端公开部署时开启）
@@ -72,6 +72,7 @@
 - 关闭账号登录（高危，需输入「确认」二次确认）会让所有未登录访问立即变为本地用户并穿透数据隔离；误关后用 `scripts/enable_auth_required.py` 恢复（约 5 秒生效，无需重启）
 - 历史记录按账号隔离（跨账号访问一律 404）；注册邮箱要求三档可选：不要求 / 仅填写 / 邮箱 + 6 位验证码（需在 `.env` 配置 `SMTP_*`，管理页可发测试邮件验证；验证码 10 分钟有效、60 秒重发冷却、同邮箱唯一绑定）。管理员账号豁免：邮箱可留空、无需验证。密码 PBKDF2 60 万次加盐哈希，浏览器令牌只存 SHA-256（SQLite `data/users.db`）
 - `scripts/bootstrap_administrator.py` 交互式幂等初始化管理员；管理员页面 `/admin/agent-keys` 可管理清小搭长期密钥和修改密码（改密后撤销全部浏览器令牌）
+- **用户反馈**：聊天顶部 Nav「反馈」按钮进入 `/feedback` 页面，选择类型（问题报告 / 功能建议 / 其他）、填写内容与可选联系方式后提交（登录用户、游客与本地模式均可，同一提交者 60 秒冷却防刷）。反馈存于 `data/users.db`，**仅管理员**可在 `/admin/feedback` 按待处理/已处理筛选查看、标记处理状态或删除
 - 默认关闭 = 本地单用户模式，`start.sh` 本地开发零配置；清小搭渠道（`/v1`）使用独立 Agent API Key，不使用浏览器登录令牌
 
 ## 快速开始

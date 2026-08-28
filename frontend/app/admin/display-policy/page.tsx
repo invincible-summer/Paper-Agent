@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  BookMarked, ImageIcon, LayoutGrid, ListChecks, Loader2, RotateCcw, Save,
+  AlertTriangle, BookMarked, ImageIcon, LayoutGrid, ListChecks, Loader2, RotateCcw, Save,
 } from "lucide-react";
 import {
   AdminHeader, AdminSection, AdminToggle, HelpModal, InfoButton, type HelpEntry,
@@ -23,6 +23,16 @@ const HELP: Record<string, HelpEntry> = {
       ["检索结果表格", "文献检索完成后，正文中的完整论文清单表格（核心集 / 候选集、全文可取性、原文链接）是规范化输出，不受此开关控制，始终生成。"],
       ["对自制前端的影响", "无。此策略只作用于清小搭 /v1 通道的输出；自制前端始终显示原生 React 卡片。"],
       ["生效时间", "保存后立即生效，下一条 /v1 消息即按新策略渲染；已经发出的历史消息不变。"],
+    ],
+  },
+  toolErrors: {
+    title: "工具错误提示是什么",
+    entries: [
+      ["哪里会显示", "工具出错或超时时，回复正文顶部出现一行「⚠️ 🔎 文献检索 · 工具 search_papers 本轮已开始执行过一次…」之类的错误摘要。"],
+      ["这个开关控制什么", "只控制正文里的错误状态行。默认关闭：正式输出不显示任何 ⚠️ 工具错误提示，正文更干净。"],
+      ["关闭后错误去哪了", "错误信息仍会完整交给模型处理，模型会在回答文字中自行说明；超时、防重复调用等控制逻辑完全不变，只是不再展示给最终用户。"],
+      ["思考折叠受影响吗", "不受影响。工具进度、技能加载等思考折叠里的提示始终保留。"],
+      ["什么时候打开它", "排查问题时可临时打开，观察每个工具的失败原因；日常使用建议保持关闭。"],
     ],
   },
   skill: {
@@ -49,7 +59,7 @@ const HELP: Record<string, HelpEntry> = {
     entries: [
       ["乐观锁", "策略带版本号。若其他管理员刚保存过，本页保存会返回 409 冲突——刷新页面拿到最新版本后再修改。"],
       ["重置修改", "放弃当前未保存的改动，回到上次保存（或服务器上）的策略。"],
-      ["默认值", "首次部署默认开启工具状态行、技能行和美化 SVG；Mermaid、HTML、Markdown 默认关闭。旧配置会按原有语义迁移。"],
+      ["默认值", "首次部署默认开启工具状态行、技能行和美化 SVG；工具错误提示行、Mermaid、HTML、Markdown 默认关闭。旧配置会按原有语义迁移。"],
     ],
   },
 };
@@ -93,6 +103,9 @@ export default function DisplayPolicyAdminPage() {
     const out: Partial<ApiDisplayPolicy> = {};
     if (draft.tool_cards_enabled !== policy.tool_cards_enabled) {
       out.tool_cards_enabled = draft.tool_cards_enabled;
+    }
+    if (draft.tool_error_cards_enabled !== policy.tool_error_cards_enabled) {
+      out.tool_error_cards_enabled = draft.tool_error_cards_enabled;
     }
     if (draft.skill_card_enabled !== policy.skill_card_enabled) {
       out.skill_card_enabled = draft.skill_card_enabled;
@@ -156,6 +169,18 @@ export default function DisplayPolicyAdminPage() {
           </p>
           <AdminToggle checked={draft.tool_cards_enabled} label="工具状态行"
             onChange={(next) => setDraft({ ...draft, tool_cards_enabled: next })} />
+        </div>
+      </AdminSection>
+
+      <AdminSection title="工具错误提示" icon={<AlertTriangle className="h-5 w-5 text-warning" />}
+        info={<InfoButton onClick={() => setHelpItem(HELP.toolErrors)} label="工具错误提示说明" />}>
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-sm text-muted">
+            工具出错或超时时在正文顶部显示「⚠️ …」错误摘要行。默认关闭：正式输出不显示任何工具错误提示；
+            错误仍会交给模型处理并在回答文字中说明，超时与调用控制逻辑不变。
+          </p>
+          <AdminToggle checked={draft.tool_error_cards_enabled} label="错误状态卡片"
+            onChange={(next) => setDraft({ ...draft, tool_error_cards_enabled: next })} />
         </div>
       </AdminSection>
 

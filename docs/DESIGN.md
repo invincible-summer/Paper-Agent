@@ -181,6 +181,10 @@ Paper_Agent/
 
 `GET /api/v1/usage-document` 提供全局公开的 Markdown 使用文档，前端页面为 `/usage-doc`，聊天顶部 Nav 始终显示入口。文档正文与版本信息存储在 `data/users.db` 的单行 `usage_document` 表中，首次读取自动 seed 默认功能说明；保存使用 `expected_version` 乐观锁，避免多个管理员标签页互相覆盖。
 
+### 用户反馈页
+
+`POST /api/v1/feedback` 是用户反馈提交入口（前端页面 `/feedback`，Nav「反馈」按钮直达）：登录用户、游客（`X-Guest-Id`）与本地模式均可提交，body 为严格 Pydantic（`category` ∈ 问题报告/功能建议/其他，`content` 1..4000 必填，`contact` ≤120 可选）。反馈记录存于 `data/users.db` 的 `feedback` 表（`core/feedback_store.py`，追加型记录，含提交者 id/用户名/角色、`open`/`resolved` 状态与处理审计字段）；同一提交者 60 秒内重复提交返回 429。反馈内容仅管理员可见：`GET /admin/feedback`（status 筛选 + 分页 + 全局计数）、`PUT /admin/feedback/{id}`（标记已处理/重新打开）、`DELETE /admin/feedback/{id}`，均通过 `_administrator` 鉴权，前端管理页为 `/admin/feedback`。
+
 管理员在同一页面看到一个纯 Markdown 文本框，以及独立的“上传图片并插入”按钮；上传接口为 `POST /api/v1/admin/usage-document/assets`，仅管理员可用，图片写入 `data/usage_document/assets/`，服务端生成 UUID 文件名并只接受 PNG/JPEG/GIF/WebP raster 文件（单文件 ≤10MB）。上传响应返回 Markdown 图片语法，前端按当前 textarea 光标位置插入；普通用户、游客和未登录访问者均只能读取。文档渲染复用 `react-markdown` + `remark-gfm`，不启用原始 HTML，链接协议和图片地址经过安全过滤。
 
 管理员保存接口为 `PUT /api/v1/admin/usage-document`；认证失败返回 403，版本冲突返回 409，内容长度上限为 500,000 字符。公告文档与聊天历史、用户上传、OpenAI API 私有存储相互隔离。
@@ -418,7 +422,7 @@ HTTP(S) URL 逐 redirect 做 SSRF/公网地址校验并流式写入 0600 temp，
 
 ### 7.6 生命周期、磁盘压力与 API Trace
 
-默认保留：session/upload 7 天、export 24 小时、语义/视觉缓存 90 天、Trace off；API 单文件上限默认 200 MiB。`api_storage_policy.max_upload_bytes` 使用同一乐观锁更新，管理员页面以 MiB 输入并由后端强制校验 1–200 MiB，保存后立即影响后续请求，不删除或重处理既有文件。旧数据库里的 `public_pdf_ttl_seconds` 仅作 schema 迁移兼容，不进入公开策略或运行时写入。`state.db` schema 迁移在初始化时进行：v6 用受检 `ALTER TABLE` 为旧库补 `max_upload_bytes` 列和 200 MiB 默认值，v7 重建 `api_display_policy` 为双开关形状，v8 曾加入研究地图渲染枚举，v9 重建该表为四个研究图谱布尔开关（见 §7.7）；迁移均保留旧 policy 的乐观锁版本与审计字段。
+默认保留：session/upload 7 天、export 24 小时、语义/视觉缓存 90 天、Trace off；API 单文件上限默认 200 MiB。`api_storage_policy.max_upload_bytes` 使用同一乐观锁更新，管理员页面以 MiB 输入并由后端强制校验 1–200 MiB，保存后立即影响后续请求，不删除或重处理既有文件。旧数据库里的 `public_pdf_ttl_seconds` 仅作 schema 迁移兼容，不进入公开策略或运行时写入。`state.db` schema 迁移在初始化时进行：v6 用受检 `ALTER TABLE` 为旧库补 `max_upload_bytes` 列和 200 MiB 默认值，v7 重建 `api_display_policy` 为双开关形状，v8 曾加入研究地图渲染枚举，v9 重建该表为四个研究图谱布尔开关（见 §7.7）；迁移均保留旧 policy 的乐观锁版本与审计字段。此后新增的 `tool_error_cards_enabled` 列沿用 v6 `max_upload_bytes` 的受检 `ALTER TABLE` 增量模式，为存量库补默认值 0（不提示），不提升乐观锁版本。
 
 hourly cleanup 只在 API 根目录内执行过期、孤立对账和压力清理。75% 清过期并告警；85% 连续清理公共/生成/向量/视觉等可重建数据，不提前删除未过期私有上传；95% 默认 `pause_heavy`（上传、下载、deep_read、OCR、VLM、导出暂停，文字聊天继续），管理员可经预览和二次确认改为 `emergency_evict`；98% 强制暂停文件重任务，不可关闭。in-flight、`protected_until` 和一小时内未完成登记文件受保护。
 
@@ -428,11 +432,11 @@ API Trace 与 web Trace 独立：off 只写匿名请求/错误/Token/耗时聚�
 
 ### 7.7 一行式状态行、检索表格、图谱附件与展示策略（`/admin/display-policy`）
 
-`tools/export/cards.py` 是 `/v1` 通道专属的卡片渲染层。回显的 assistant content 会作为下一轮 messages 回到模型上下文，因此卡片采用 **context-first 一行式设计**：每个工具结果（`ToolResult.to_dict()` 载荷）只渲染一行状态摘要（emoji 卡头对齐前端 `TOOL_META`，如 `**🔎 文献检索 · 核心集 12 篇 / 候选 13 篇**`、`**📖 上传文件深读 · 2/2 个已解析**`），在工具完成时以 `delta.content` 插入、位于最终回答之前；错误/部分成功仍加 `⚠️`/`🟡` 前缀，缺字段降级为一行摘要，单行 1200 字符上限，渲染永不抛异常。
+`tools/export/cards.py` 是 `/v1` 通道专属的卡片渲染层。回显的 assistant content 会作为下一轮 messages 回到模型上下文，因此卡片采用 **context-first 一行式设计**：每个工具结果（`ToolResult.to_dict()` 载荷）只渲染一行状态摘要（emoji 卡头对齐前端 `TOOL_META`，如 `**🔎 文献检索 · 核心集 12 篇 / 候选 13 篇**`、`**📖 上传文件深读 · 2/2 个已解析**`），在工具完成时以 `delta.content` 插入、位于最终回答之前；部分成功加 `🟡` 前缀，缺字段降级为一行摘要，单行 1200 字符上限，渲染永不抛异常。错误状态的 `⚠️` 单行卡由 `tool_error_cards_enabled` 策略单独门控（默认关闭，见下）：关闭时任何错误卡都不进入正式输出与下一轮回显，但错误 ToolMessage 原样交给模型，超时/防重复/预算控制逻辑完全不变——被抑制的只是用户可见展示。
 
 **检索结果规范化表格**：`search_papers` 成功后，通道层用 `render_search_table` 确定性地生成完整论文清单 markdown 表格（列：分层（核心/候选）/标题（截 60 字符、转义管道符）/年份/被引/摘要（有/无）/链接（DOI 优先，无 DOI 取 `urls` 来源页，再无则 —）），与状态行同块插在回答之前。表格是规范化正式输出：由代码保证存在（不依赖模型自觉），不受工具状态行开关控制，仅在 `max_tokens` 派生的 content 预算 < 2000 字符时让位给回答本身；流式路径经 `emit_block(required=True)` 绕过 60% 卡片份额，非流式路径的尾部裁剪只丢弃可选状态行、绝不丢表格块。候选集精简 dict 补带 `doi` 字段以保证链接列数据完整。
 
-策略存于 `data/openai_api/state.db` 的 `api_display_policy` 单行表（schema v9，乐观锁版本并发）。除 `tool_cards_enabled`、`skill_card_enabled` 外，研究图谱使用四个严格布尔字段：`research_map_svg_enabled`、`research_map_mermaid_enabled`、`research_map_html_enabled`、`research_map_markdown_enabled`。后端在合并部分更新后再次校验 SVG / Mermaid / HTML 至少一个为 `true`；Markdown 完全独立。新安装默认仅启用 SVG。v9 迁移保持版本号、更新人和更新时间不变，并按旧策略语义映射：历史兼容输出与“美化 SVG + Markdown”迁为 SVG + Markdown，“美化 SVG”迁为仅 SVG，Mermaid / HTML 均默认关闭。运行时不再接受旧枚举。读路径继续使用进程内 5 秒缓存，管理员更新成功后立即失效；读取失败降级到安全默认而不让对话回合失败。管理 API 使用严格 Pydantic、额外字段拒绝与 `expected_version` 乐观锁，前端也阻止关闭最后一种图形输出。
+策略存于 `data/openai_api/state.db` 的 `api_display_policy` 单行表（schema v9，乐观锁版本并发）。除 `tool_cards_enabled`、`tool_error_cards_enabled`、`skill_card_enabled` 外，研究图谱使用四个严格布尔字段：`research_map_svg_enabled`、`research_map_mermaid_enabled`、`research_map_html_enabled`、`research_map_markdown_enabled`。`tool_error_cards_enabled` 默认 `false`：错误状态卡（`⚠️` 一行式超时/失败提示）不进入 `delta.content`/`message.content` 与 checkpoint 回显，错误仍完整交给模型决策并由其在回答文字中说明；管理员可在 `/admin/display-policy` 打开以保留原有提示，对成功/部分成功状态卡、检索表格与技能行无影响。后端在合并部分更新后再次校验 SVG / Mermaid / HTML 至少一个为 `true`；Markdown 完全独立。新安装默认仅启用 SVG。v9 迁移保持版本号、更新人和更新时间不变，并按旧策略语义映射：历史兼容输出与“美化 SVG + Markdown”迁为 SVG + Markdown，“美化 SVG”迁为仅 SVG，Mermaid / HTML 均默认关闭。已有 v9 库通过受检 `ALTER TABLE` 增量补 `tool_error_cards_enabled` 列（默认 0，同样不动乐观锁版本）。运行时不再接受旧枚举。读路径继续使用进程内 5 秒缓存，管理员更新成功后立即失效；读取失败降级到安全默认而不让对话回合失败。管理 API 使用严格 Pydantic、额外字段拒绝与 `expected_version` 乐观锁，前端也阻止关闭最后一种图形输出。
 
 `tools/export/report.py` 先构建共享、确定性的研究图谱视图模型：统一规范主题簇、年份、奠基/候选层、边去重和安全文本，然后由所有格式读取同一模型。每篇论文在所有格式中都保持独立节点，绝不折叠为 "+N" 聚合点。Web 通道仍使用原有 React `GenealogyGraph`，数据结构与交互不变。`/v1` 可同时输出：
 

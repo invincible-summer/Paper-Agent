@@ -39,11 +39,16 @@ class ApiDisplayPolicy:
     tool_cards_enabled: emit the per-tool one-line status cards into
     delta.content (the mandated search-results table and file attachments
     stay on regardless of this switch).
+    tool_error_cards_enabled: additionally allow error-status cards (the
+    ⚠️ one-liners, e.g. tool timeouts) into delta.content. Off by default:
+    errors keep steering the model through the unchanged tool-result
+    channel; only the user-facing display is suppressed.
     skill_card_enabled: emit the in-content skill-loading line.
     research_map_*_enabled: independently select SVG attachment, Mermaid
     content, self-contained HTML attachment, and Markdown relation listing.
     """
     tool_cards_enabled: bool = True
+    tool_error_cards_enabled: bool = False
     skill_card_enabled: bool = True
     research_map_svg_enabled: bool = True
     research_map_mermaid_enabled: bool = False
@@ -276,6 +281,7 @@ CREATE TABLE IF NOT EXISTS api_runtime_state (
 CREATE TABLE IF NOT EXISTS api_display_policy (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     tool_cards_enabled INTEGER NOT NULL DEFAULT 1 CHECK (tool_cards_enabled IN (0, 1)),
+    tool_error_cards_enabled INTEGER NOT NULL DEFAULT 0 CHECK (tool_error_cards_enabled IN (0, 1)),
     skill_card_enabled INTEGER NOT NULL DEFAULT 1 CHECK (skill_card_enabled IN (0, 1)),
     research_map_svg_enabled INTEGER NOT NULL DEFAULT 1 CHECK (research_map_svg_enabled IN (0, 1)),
     research_map_mermaid_enabled INTEGER NOT NULL DEFAULT 0 CHECK (research_map_mermaid_enabled IN (0, 1)),
@@ -402,6 +408,19 @@ class ApiStorageStore:
                         "version, updated_by, updated_at FROM api_display_policy_pre_v9"
                     )
                 conn.execute("DROP TABLE api_display_policy_pre_v9")
+            if "tool_error_cards_enabled" not in {
+                str(column[1])
+                for column in conn.execute("PRAGMA table_info(api_display_policy)").fetchall()
+            }:
+                # Error-status cards (the ⚠️ timeout/failure one-liners) leave
+                # the formal output by default; administrators can re-enable
+                # them. Additive column like the max_upload_bytes precedent —
+                # existing databases inherit the suppressed default without
+                # changing their optimistic-lock policy version.
+                conn.execute(
+                    "ALTER TABLE api_display_policy ADD COLUMN tool_error_cards_enabled "
+                    "INTEGER NOT NULL DEFAULT 0 CHECK (tool_error_cards_enabled IN (0, 1))"
+                )
             if previous_version < 4:
                 # Legacy public-paper PDF retention is no longer a runtime
                 # policy.  The retirement migration removes active artifacts;
@@ -444,11 +463,12 @@ class ApiStorageStore:
             )
             display_insert = conn.execute(
                 "INSERT OR IGNORE INTO api_display_policy"
-                "(id, tool_cards_enabled, skill_card_enabled, "
+                "(id, tool_cards_enabled, tool_error_cards_enabled, "
+                "skill_card_enabled, "
                 "research_map_svg_enabled, research_map_mermaid_enabled, "
                 "research_map_html_enabled, research_map_markdown_enabled, "
                 "version, updated_by, updated_at) "
-                "VALUES(1, 1, 1, 1, 0, 0, 0, 1, 'bootstrap', ?)",
+                "VALUES(1, 1, 0, 1, 1, 0, 0, 0, 1, 'bootstrap', ?)",
                 (now,),
             )
             display_policy_changed = display_policy_changed or display_insert.rowcount == 1
@@ -571,6 +591,7 @@ class ApiStorageStore:
 
     _DISPLAY_COLUMNS = {
         "tool_cards_enabled": "tool_cards_enabled",
+        "tool_error_cards_enabled": "tool_error_cards_enabled",
         "skill_card_enabled": "skill_card_enabled",
         "research_map_svg_enabled": "research_map_svg_enabled",
         "research_map_mermaid_enabled": "research_map_mermaid_enabled",
@@ -591,6 +612,7 @@ class ApiStorageStore:
         else:
             policy = ApiDisplayPolicy(
                 tool_cards_enabled=bool(row["tool_cards_enabled"]),
+                tool_error_cards_enabled=bool(row["tool_error_cards_enabled"]),
                 skill_card_enabled=bool(row["skill_card_enabled"]),
                 research_map_svg_enabled=bool(row["research_map_svg_enabled"]),
                 research_map_mermaid_enabled=bool(row["research_map_mermaid_enabled"]),

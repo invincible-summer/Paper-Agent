@@ -908,6 +908,47 @@ async def test_tool_cards_disabled_keeps_search_table(client, monkeypatch, tmp_p
     assert any(r and "正在检索：gnn" in r for r in reasonings)
 
 
+def _error_card_events():
+    return [
+        {"type": "tool_start", "name": "search_papers", "args": {"topic": "gnn"}},
+        {"type": "tool_result", "result": {
+            "tool": "search_papers", "status": "error",
+            "error": {"code": "TIMEOUT",
+                      "message": "工具 search_papers 本轮已开始执行过一次。请直接总结已有结果。"}}},
+        {"type": "answer", "content": "已根据现有检索结果总结如下。", "is_delta": True},
+        {"type": "done", "thinking": "", "answer": "已根据现有检索结果总结如下。",
+         "tool_calls": [], "trace_id": "t", "usage": {
+             "prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}},
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("error_cards_enabled", [False, True])
+async def test_tool_error_cards_policy(
+    client, monkeypatch, tmp_path, stream, error_cards_enabled,
+):
+    if error_cards_enabled:
+        _set_display_policy(tmp_path, tool_error_cards_enabled=True)
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_error_card_events()))
+    resp = await _post(client, {
+        "stream": stream, "user": f"err-cards-{stream}-{error_cards_enabled}",
+        "messages": [{"role": "user", "content": "搜"}]})
+    if stream:
+        content = _content_of(_parse_sse(resp.text))
+    else:
+        content = resp.json()["choices"][0]["message"]["content"]
+    assert content.endswith("已根据现有检索结果总结如下。")
+    if error_cards_enabled:
+        # 保留原有提示：错误单行卡仍在正文顶部
+        assert "⚠️ 🔎 文献检索" in content
+        assert "本轮已开始执行过一次" in content
+    else:
+        # 默认（不提示）：错误卡不进正式输出，答案本身不受影响
+        assert "⚠️" not in content
+        assert "本轮已开始执行过一次" not in content
+
+
 @pytest.mark.anyio
 async def test_small_budget_skips_search_table(client, monkeypatch):
     monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_card_events()))
