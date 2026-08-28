@@ -3,16 +3,34 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  AlertTriangle, BookMarked, ImageIcon, LayoutGrid, ListChecks, Loader2, RotateCcw, Save,
+  AlertTriangle, BookMarked, FileText, ImageIcon, LayoutGrid, ListChecks, Loader2, RotateCcw, Save,
 } from "lucide-react";
 import {
   AdminHeader, AdminSection, AdminToggle, HelpModal, InfoButton, type HelpEntry,
 } from "@/components/admin/AdminUI";
 import {
   AdminApiError, getDisplayPolicy, updateDisplayPolicy,
-  type ApiDisplayPolicy,
+  type ApiDisplayPolicy, type BibtexExportMode,
 } from "@/lib/admin-api";
 import { useAuthStore } from "@/stores/auth";
+
+const BIBTEX_EXPORT_MODES: Array<{ key: BibtexExportMode; name: string; hint: string }> = [
+  {
+    key: "bib_and_md",
+    name: "同时导出 .bib 与 .md",
+    hint: "保留 .bib 附件，并额外附一份内容完全相同的 .md 副本。",
+  },
+  {
+    key: "md_only",
+    name: "仅导出 .md",
+    hint: "只附 .md 文件（默认）。内容与 .bib 逐字节一致，改回 .bib 扩展名即可使用。",
+  },
+  {
+    key: "bib_only",
+    name: "仅导出 .bib",
+    hint: "历史行为：只生成 .bib 附件，清小搭侧无法下载，且不追加末行说明。",
+  },
+];
 
 const HELP: Record<string, HelpEntry> = {
   toolCards: {
@@ -54,12 +72,22 @@ const HELP: Record<string, HelpEntry> = {
       ["生效范围", "只影响保存后新生成的 /v1 研究地图；历史附件与自有 Web 前端的 GenealogyGraph 均不改变。"],
     ],
   },
+  bibtexExport: {
+    title: "BibTeX 导出格式",
+    entries: [
+      ["为什么需要这个设置", "清小搭侧无法下载 .bib 格式的附件文件，参考文献导出需要借助 .md 格式传递。"],
+      [".md 文件内容", "与 .bib 文件逐字节一致的原始 BibTeX 文本：下载后把扩展名从 .md 改成 .bib 即可直接使用。"],
+      ["末行说明", "只要本轮借助 .md 导出（即模式不是「仅导出 .bib」），正式输出的最后一行会提示用户手动转存为 .bib；该说明行不受「工具状态行」开关控制。"],
+      ["影响范围", "只作用于清小搭 /v1 通道的 BibTeX 参考文献导出；GB/T 7714（.txt）与自有 Web 前端的 .bib 下载不受影响。"],
+      ["生效时间", "保存后立即生效，下一条含参考文献导出的 /v1 消息即按新模式生成附件。"],
+    ],
+  },
   save: {
     title: "保存与版本说明",
     entries: [
       ["乐观锁", "策略带版本号。若其他管理员刚保存过，本页保存会返回 409 冲突——刷新页面拿到最新版本后再修改。"],
       ["重置修改", "放弃当前未保存的改动，回到上次保存（或服务器上）的策略。"],
-      ["默认值", "首次部署默认开启工具状态行、技能行和美化 SVG；工具错误提示行、Mermaid、HTML、Markdown 默认关闭。旧配置会按原有语义迁移。"],
+      ["默认值", "首次部署默认开启工具状态行、技能行和美化 SVG；工具错误提示行、Mermaid、HTML、Markdown 默认关闭；BibTeX 导出格式默认「仅导出 .md」。旧配置会按原有语义迁移。"],
     ],
   },
 };
@@ -115,6 +143,9 @@ export default function DisplayPolicyAdminPage() {
       "research_map_html_enabled", "research_map_markdown_enabled",
     ] as const) {
       if (draft[key] !== policy[key]) out[key] = draft[key];
+    }
+    if (draft.bibtex_export_mode !== policy.bibtex_export_mode) {
+      out.bibtex_export_mode = draft.bibtex_export_mode;
     }
     return out;
   }, [policy, draft]);
@@ -218,6 +249,34 @@ export default function DisplayPolicyAdminPage() {
             <p>Markdown：普通关系清单，不嵌 Mermaid，可复制论文、DOI/来源和聚合成员。</p>
             <p>保存后从下一轮 /v1 请求开始生效；历史附件与 Web 端 GenealogyGraph 不变。</p>
           </div>
+        </div>
+      </AdminSection>
+
+      <AdminSection title="BibTeX 导出格式" icon={<FileText className="h-5 w-5 text-accent" />}
+        info={<InfoButton onClick={() => setHelpItem(HELP.bibtexExport)} label="BibTeX 导出格式说明" />}>
+        <div className="space-y-3">
+          <p className="text-sm text-muted">
+            清小搭侧无法下载 .bib 格式附件，参考文献导出可借助 .md 格式传递；.md 文件内容与
+            .bib 完全一致，改回扩展名即可使用。GB/T 7714（.txt）与自有 Web 前端不受此设置影响。
+          </p>
+          <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="BibTeX 导出格式">
+            {BIBTEX_EXPORT_MODES.map(({ key, name }) => {
+              const active = draft.bibtex_export_mode === key;
+              return (
+                <button key={key} type="button" role="radio" aria-checked={active}
+                  onClick={() => setDraft({ ...draft, bibtex_export_mode: key })}
+                  className={`h-10 rounded-lg border px-3 text-sm transition-colors ${
+                    active ? "border-accent bg-accent/10 font-medium text-accent"
+                      : "border-border-light text-fg-secondary hover:bg-surface-hover hover:text-fg"}`}>
+                  {name}
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-xs leading-5 text-muted">
+            {BIBTEX_EXPORT_MODES.find((m) => m.key === draft.bibtex_export_mode)?.hint}
+            {" "}模式不为「仅导出 .bib」时，正式输出最后一行会提示用户手动转存为 .bib。
+          </p>
         </div>
       </AdminSection>
     </div>

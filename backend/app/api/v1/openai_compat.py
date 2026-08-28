@@ -536,10 +536,14 @@ def _save_api_export(session, text: str | None, *, data: bytes | None,
         temp.unlink(missing_ok=True)
 
 
-def _extra_attachments(request: Request, session, tool_results: list[dict]) -> list[dict]:
+def _extra_attachments(request: Request, session, tool_results: list[dict], *,
+                       bibtex_export_mode: str = "md_only") -> list[dict]:
     """Best-effort extra x_soda file cards: element crop PNG, citation
     export file, field-census trend SVG. Reads only this turn's tool
-    results; the explain_element ownership guard is re-checked here."""
+    results; the explain_element ownership guard is re-checked here.
+    bibtex_export_mode (admin display policy) decides whether a BibTeX
+    citation export rides a .bib attachment, a byte-identical .md copy
+    (清小搭 cannot download .bib), or both."""
     out: list[dict] = []
     seen_names: set[str] = set()
 
@@ -593,14 +597,26 @@ def _extra_attachments(request: Request, session, tool_results: list[dict]) -> l
             citations = str(result.get("citations") or "").strip()
             if not citations:
                 continue
-            gbt = result.get("format") == "gbt7714"
-            ext = ".txt" if gbt else ".bib"
-            label = "GB_T7714" if gbt else "bibtex"
             stamp = time.strftime("%Y%m%d_%H%M%S")
-            add(_save_api_export(
-                session, citations, data=None,
-                display_name=f"references_{label}_{stamp}_{_uuid.uuid4().hex[:4]}{ext}",
-                mime_type="text/plain", file_type="text"))
+            if result.get("format") == "gbt7714":
+                add(_save_api_export(
+                    session, citations, data=None,
+                    display_name=f"references_GB_T7714_{stamp}_{_uuid.uuid4().hex[:4]}.txt",
+                    mime_type="text/plain", file_type="text"))
+                continue
+            # BibTeX: 清小搭 cannot download .bib files, so the admin policy
+            # decides between the legacy .bib attachment, a byte-identical
+            # .md copy (rename back to .bib), or both.
+            if bibtex_export_mode != "md_only":
+                add(_save_api_export(
+                    session, citations, data=None,
+                    display_name=f"references_bibtex_{stamp}_{_uuid.uuid4().hex[:4]}.bib",
+                    mime_type="text/plain", file_type="text"))
+            if bibtex_export_mode != "bib_only":
+                add(_save_api_export(
+                    session, citations, data=None,
+                    display_name=f"references_bibtex_{stamp}_{_uuid.uuid4().hex[:4]}.md",
+                    mime_type="text/markdown", file_type="text"))
         elif tool == "field_census":
             svg = render_field_census_svg(result, title=str(session.topic or "领域普查"))
             if not svg:
@@ -611,6 +627,23 @@ def _extra_attachments(request: Request, session, tool_results: list[dict]) -> l
                 display_name=f"field_census_{stamp}_{_uuid.uuid4().hex[:4]}.svg",
                 mime_type="image/svg+xml", file_type="image"))
     return out
+
+
+def _bibtex_md_note_needed(tool_results: list[dict], policy) -> bool:
+    """True when a BibTeX export rode a .md attachment this turn, so the
+    trailing rename notice must be appended to the formal output. Mirrors
+    the _extra_attachments citation_export gate and is deliberately not
+    governed by tool_cards_enabled — it explains the attachment behavior,
+    not a decorative card."""
+    if getattr(policy, "bibtex_export_mode", "bib_only") == "bib_only":
+        return False
+    return any(
+        result.get("tool") == "citation_export"
+        and result.get("status") != "error"
+        and result.get("format") != "gbt7714"
+        and str(result.get("citations") or "").strip()
+        for result in tool_results
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +863,12 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                     if selected_blocks:
                         prefix = "\n\n".join(selected_blocks) + "\n\n"
                 content = prefix + answer
+                if _bibtex_md_note_needed(tool_results, policy):
+                    # Must land before truncation and finalize_checkpoint so
+                    # the response content and the checkpointed alias chain
+                    # stay byte-identical.
+                    from tools.export.cards import BIBTEX_MD_EXPORT_NOTE
+                    content += "\n\n" + BIBTEX_MD_EXPORT_NOTE
                 if content_budget is not None and len(content) > content_budget:
                     content = content[:content_budget]
                     truncated = True
@@ -858,7 +897,9 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                         research_map_markdown_enabled=policy.research_map_markdown_enabled,
                     )
                     + result_files
-                    + _extra_attachments(request, session, tool_results)
+                    + _extra_attachments(
+                        request, session, tool_results,
+                        bibtex_export_mode=policy.bibtex_export_mode)
                 )
                 if attachments_out:
                     resp["x_soda"] = {"attachments": attachments_out}
@@ -1225,8 +1266,21 @@ async def chat_completions(request: Request, authorization: str | None = Header(
                         research_map_markdown_enabled=state["policy"].research_map_markdown_enabled,
                     )
                     + result_files
-                    + _extra_attachments(request, session, tool_results)
+                    + _extra_attachments(
+                        request, session, tool_results,
+                        bibtex_export_mode=state["policy"].bibtex_export_mode)
                 )
+            if session is not None and not deadline_hit and not terminal_emitted \
+                    and _bibtex_md_note_needed(tool_results, state["policy"]):
+                # Emitted through emit_content so the notice reaches both the
+                # delta.content stream and content_parts before the checkpoint
+                # finalize below — the alias chain must match what 清小搭 echoes
+                # back next turn. Dropped automatically when the budget is
+                # already exhausted.
+                from tools.export.cards import BIBTEX_MD_EXPORT_NOTE
+                out = emit_content("\n\n" + BIBTEX_MD_EXPORT_NOTE)
+                if out:
+                    yield out
             if not terminal_emitted and done_event is not None and \
                     not done_event.get("deadline_exceeded") and \
                     state.get("finalize_checkpoint") is not None:

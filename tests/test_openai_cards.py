@@ -333,6 +333,7 @@ def test_display_policy_store_roundtrip(tmp_path):
     assert policy.research_map_mermaid_enabled is False
     assert policy.research_map_html_enabled is False
     assert policy.research_map_markdown_enabled is False
+    assert policy.bibtex_export_mode == "md_only"
 
     updated = store.update_display_policy(
         {"tool_cards_enabled": False, "research_map_html_enabled": True,
@@ -394,17 +395,21 @@ async def test_display_policy_admin_routes(client, monkeypatch):
     assert body["policy"]["research_map_mermaid_enabled"] is False
     assert body["policy"]["research_map_html_enabled"] is False
     assert body["policy"]["research_map_markdown_enabled"] is False
+    # BibTeX 导出格式默认「仅导出 .md」
+    assert body["policy"]["bibtex_export_mode"] == "md_only"
 
     put = await client.put("/api/v1/admin/display-policy", json={
         "expected_version": body["policy"]["version"],
         "tool_cards_enabled": False, "skill_card_enabled": False,
         "research_map_svg_enabled": False, "research_map_mermaid_enabled": True,
-        "research_map_html_enabled": True, "research_map_markdown_enabled": True})
+        "research_map_html_enabled": True, "research_map_markdown_enabled": True,
+        "bibtex_export_mode": "bib_and_md"})
     assert put.status_code == 200
     updated = put.json()["policy"]
     assert updated["research_map_mermaid_enabled"] is True
     assert updated["research_map_html_enabled"] is True
     assert updated["research_map_markdown_enabled"] is True
+    assert updated["bibtex_export_mode"] == "bib_and_md"
 
     conflict = await client.put("/api/v1/admin/display-policy", json={
         "expected_version": body["policy"]["version"], "tool_cards_enabled": True})
@@ -412,6 +417,9 @@ async def test_display_policy_admin_routes(client, monkeypatch):
     bad_type = await client.put("/api/v1/admin/display-policy", json={
         "expected_version": updated["version"], "research_map_svg_enabled": "yes"})
     assert bad_type.status_code == 422
+    bad_mode = await client.put("/api/v1/admin/display-policy", json={
+        "expected_version": updated["version"], "bibtex_export_mode": "pdf"})
+    assert bad_mode.status_code == 422
     all_off = await client.put("/api/v1/admin/display-policy", json={
         "expected_version": updated["version"], "research_map_svg_enabled": False,
         "research_map_mermaid_enabled": False, "research_map_html_enabled": False})

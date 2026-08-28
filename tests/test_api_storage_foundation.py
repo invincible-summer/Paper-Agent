@@ -371,6 +371,71 @@ def test_schema_v9_gains_tool_error_cards_suppressed(tmp_path: Path):
     assert policy.version == 9 and policy.updated_by == "v9-admin"
 
 
+def test_display_policy_bibtex_export_mode_default_and_update(tmp_path: Path):
+    store = ApiStorageStore(StorageContext.openai_api(root_dir=tmp_path / "api"))
+    store.initialize()
+    # 全新库默认「仅导出 .md」：清小搭无法下载 .bib 附件
+    policy = store.get_display_policy()
+    assert policy.bibtex_export_mode == "md_only"
+
+    updated = store.update_display_policy(
+        {"bibtex_export_mode": "bib_and_md"}, expected_version=policy.version,
+        updated_by="admin-1")
+    assert updated.bibtex_export_mode == "bib_and_md"
+    assert updated.version == policy.version + 1
+    # 非法枚举值仍被拒绝
+    with pytest.raises(ValueError):
+        store.update_display_policy(
+            {"bibtex_export_mode": "pdf"}, expected_version=updated.version,
+            updated_by="admin-1")
+    # 布尔开关的类型校验不受枚举字段影响
+    with pytest.raises(ValueError):
+        store.update_display_policy(
+            {"tool_cards_enabled": "md_only"}, expected_version=updated.version,
+            updated_by="admin-1")
+    # 枚举可与布尔字段同批更新
+    merged = store.update_display_policy(
+        {"bibtex_export_mode": "bib_only", "tool_cards_enabled": False},
+        expected_version=updated.version, updated_by="admin-1")
+    assert merged.bibtex_export_mode == "bib_only"
+    assert merged.tool_cards_enabled is False
+
+
+def test_schema_v9_gains_bibtex_export_mode_md_only(tmp_path: Path):
+    """v9 旧库增量迁移：新列默认 md_only，原有开关与版本号原样保留。"""
+    context = StorageContext.openai_api(root_dir=tmp_path / "api")
+    store = ApiStorageStore(context)
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute("ALTER TABLE api_display_policy RENAME TO api_display_policy_pre_mode")
+        conn.execute("""
+            CREATE TABLE api_display_policy (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                tool_cards_enabled INTEGER NOT NULL,
+                tool_error_cards_enabled INTEGER NOT NULL,
+                skill_card_enabled INTEGER NOT NULL,
+                research_map_svg_enabled INTEGER NOT NULL,
+                research_map_mermaid_enabled INTEGER NOT NULL,
+                research_map_html_enabled INTEGER NOT NULL,
+                research_map_markdown_enabled INTEGER NOT NULL,
+                version INTEGER NOT NULL,
+                updated_by TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO api_display_policy VALUES(1, 0, 1, 1, 1, 0, 0, 1, 9, 'v9-admin', 789.0)")
+        conn.execute("DROP TABLE api_display_policy_pre_mode")
+        conn.commit()
+
+    store.initialize()
+    policy = store.get_display_policy()
+    assert policy.bibtex_export_mode == "md_only"
+    assert policy.tool_cards_enabled is False
+    assert policy.tool_error_cards_enabled is True
+    assert policy.version == 9 and policy.updated_by == "v9-admin"
+
+
 def test_policy_upload_limit_validation(tmp_path: Path):
     store = ApiStorageStore(StorageContext.openai_api(root_dir=tmp_path / "api"))
     store.initialize()

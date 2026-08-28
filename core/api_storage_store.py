@@ -46,6 +46,11 @@ class ApiDisplayPolicy:
     skill_card_enabled: emit the in-content skill-loading line.
     research_map_*_enabled: independently select SVG attachment, Mermaid
     content, self-contained HTML attachment, and Markdown relation listing.
+    bibtex_export_mode: how citation_export BibTeX files are attached on the
+    /v1 channel — "md_only" (default; 清小搭 cannot download .bib, so the
+    raw BibTeX text rides a .md attachment), "bib_and_md" (both files), or
+    "bib_only" (legacy .bib-only behavior). A trailing notice line is
+    appended to the formal output whenever the .md copy is exported.
     """
     tool_cards_enabled: bool = True
     tool_error_cards_enabled: bool = False
@@ -54,9 +59,13 @@ class ApiDisplayPolicy:
     research_map_mermaid_enabled: bool = False
     research_map_html_enabled: bool = False
     research_map_markdown_enabled: bool = False
+    bibtex_export_mode: str = "md_only"
     version: int = 1
     updated_by: str = "bootstrap"
     updated_at: float = 0.0
+
+
+_BIBTEX_EXPORT_MODES = frozenset({"bib_and_md", "md_only", "bib_only"})
 
 
 _display_policy_cache: dict[str, tuple[float, ApiDisplayPolicy]] = {}
@@ -287,6 +296,8 @@ CREATE TABLE IF NOT EXISTS api_display_policy (
     research_map_mermaid_enabled INTEGER NOT NULL DEFAULT 0 CHECK (research_map_mermaid_enabled IN (0, 1)),
     research_map_html_enabled INTEGER NOT NULL DEFAULT 0 CHECK (research_map_html_enabled IN (0, 1)),
     research_map_markdown_enabled INTEGER NOT NULL DEFAULT 0 CHECK (research_map_markdown_enabled IN (0, 1)),
+    bibtex_export_mode TEXT NOT NULL DEFAULT 'md_only'
+        CHECK (bibtex_export_mode IN ('bib_and_md', 'md_only', 'bib_only')),
     version INTEGER NOT NULL CHECK (version > 0),
     updated_by TEXT NOT NULL,
     updated_at REAL NOT NULL,
@@ -421,6 +432,20 @@ class ApiStorageStore:
                     "ALTER TABLE api_display_policy ADD COLUMN tool_error_cards_enabled "
                     "INTEGER NOT NULL DEFAULT 0 CHECK (tool_error_cards_enabled IN (0, 1))"
                 )
+            if "bibtex_export_mode" not in {
+                str(column[1])
+                for column in conn.execute("PRAGMA table_info(api_display_policy)").fetchall()
+            }:
+                # 清小搭 cannot download .bib attachments, so citation exports
+                # default to a byte-identical .md copy the user renames back to
+                # .bib. Additive column like the tool_error_cards_enabled
+                # precedent — existing databases inherit the md_only default
+                # without changing their optimistic-lock policy version.
+                conn.execute(
+                    "ALTER TABLE api_display_policy ADD COLUMN bibtex_export_mode "
+                    "TEXT NOT NULL DEFAULT 'md_only' "
+                    "CHECK (bibtex_export_mode IN ('bib_and_md', 'md_only', 'bib_only'))"
+                )
             if previous_version < 4:
                 # Legacy public-paper PDF retention is no longer a runtime
                 # policy.  The retirement migration removes active artifacts;
@@ -467,8 +492,9 @@ class ApiStorageStore:
                 "skill_card_enabled, "
                 "research_map_svg_enabled, research_map_mermaid_enabled, "
                 "research_map_html_enabled, research_map_markdown_enabled, "
+                "bibtex_export_mode, "
                 "version, updated_by, updated_at) "
-                "VALUES(1, 1, 0, 1, 1, 0, 0, 0, 1, 'bootstrap', ?)",
+                "VALUES(1, 1, 0, 1, 1, 0, 0, 0, 'md_only', 1, 'bootstrap', ?)",
                 (now,),
             )
             display_policy_changed = display_policy_changed or display_insert.rowcount == 1
@@ -597,6 +623,7 @@ class ApiStorageStore:
         "research_map_mermaid_enabled": "research_map_mermaid_enabled",
         "research_map_html_enabled": "research_map_html_enabled",
         "research_map_markdown_enabled": "research_map_markdown_enabled",
+        "bibtex_export_mode": "bibtex_export_mode",
     }
 
     def get_display_policy(self) -> ApiDisplayPolicy:
@@ -618,6 +645,7 @@ class ApiStorageStore:
                 research_map_mermaid_enabled=bool(row["research_map_mermaid_enabled"]),
                 research_map_html_enabled=bool(row["research_map_html_enabled"]),
                 research_map_markdown_enabled=bool(row["research_map_markdown_enabled"]),
+                bibtex_export_mode=str(row["bibtex_export_mode"]),
                 version=int(row["version"]),
                 updated_by=str(row["updated_by"]),
                 updated_at=float(row["updated_at"]),
@@ -646,7 +674,13 @@ class ApiStorageStore:
             for field in self._DISPLAY_COLUMNS
         }
         for field, value in merged.items():
-            if not isinstance(value, bool):
+            if field == "bibtex_export_mode":
+                if value not in _BIBTEX_EXPORT_MODES:
+                    raise ValueError(
+                        "bibtex_export_mode must be one of: "
+                        + ", ".join(sorted(_BIBTEX_EXPORT_MODES))
+                    )
+            elif not isinstance(value, bool):
                 raise ValueError(f"{field} must be a boolean")
         if not any(merged[field] for field in (
             "research_map_svg_enabled", "research_map_mermaid_enabled",
@@ -656,7 +690,11 @@ class ApiStorageStore:
         ordered = sorted(changes)
         assignments = [f"{self._DISPLAY_COLUMNS[column]} = ?" for column in ordered]
         now = time.time()
-        params: list[Any] = [1 if changes[column] else 0 for column in ordered]
+        params: list[Any] = [
+            changes[column] if column == "bibtex_export_mode"
+            else (1 if changes[column] else 0)
+            for column in ordered
+        ]
         params.extend([actor, now, expected_version])
         with self.connect() as conn:
             cursor = conn.execute(

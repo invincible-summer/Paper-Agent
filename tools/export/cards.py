@@ -45,6 +45,14 @@ _TOOL_META: dict[str, tuple[str, str]] = {
 
 MAX_CARD_CHARS = 1200
 
+# Appended as the last line of the formal output whenever a BibTeX export
+# rode a .md attachment (bibtex_export_mode != "bib_only"): 清小搭 cannot
+# download .bib files, so the user must rename the .md copy back to .bib.
+BIBTEX_MD_EXPORT_NOTE = (
+    "注：清小搭侧暂不支持下载 .bib 格式文件，本轮参考文献已通过 .md 格式导出，"
+    "麻烦您手动转存为 .bib 格式。"
+)
+
 
 _KIND_LABEL = {"figure": "图", "table": "表", "formula": "公式"}
 

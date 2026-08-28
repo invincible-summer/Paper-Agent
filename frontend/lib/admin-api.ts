@@ -187,6 +187,8 @@ export async function cleanupAccount(
   return parseResponse(res);
 }
 
+export type BibtexExportMode = "bib_and_md" | "md_only" | "bib_only";
+
 export interface ApiDisplayPolicy {
   tool_cards_enabled: boolean;
   tool_error_cards_enabled: boolean;
@@ -195,6 +197,7 @@ export interface ApiDisplayPolicy {
   research_map_mermaid_enabled: boolean;
   research_map_html_enabled: boolean;
   research_map_markdown_enabled: boolean;
+  bibtex_export_mode: BibtexExportMode;
   version: number;
   updated_by: string;
   updated_at: number;
@@ -258,7 +261,7 @@ export async function updateDisplayPolicy(
   changes: Partial<Pick<
     ApiDisplayPolicy, "tool_cards_enabled" | "tool_error_cards_enabled" | "skill_card_enabled"
     | "research_map_svg_enabled" | "research_map_mermaid_enabled" | "research_map_html_enabled"
-    | "research_map_markdown_enabled"
+    | "research_map_markdown_enabled" | "bibtex_export_mode"
   >>,
 ): Promise<{ policy: ApiDisplayPolicy }> {
   const res = await fetch(`${BASE}/display-policy`, {

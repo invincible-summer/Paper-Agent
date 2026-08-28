@@ -985,7 +985,9 @@ async def test_bibtex_and_census_attachments(client, monkeypatch):
     frames = _parse_sse(resp.text)
     attachments = frames[-1]["x_soda"]["attachments"]
     by_mime = {a["mimeType"]: a for a in attachments}
-    assert by_mime["text/plain"]["fileName"].endswith(".bib")
+    # 默认 bibtex_export_mode=md_only：清小搭无法下载 .bib，导出走 .md 副本
+    assert by_mime["text/markdown"]["fileName"].endswith(".md")
+    assert "text/plain" not in by_mime
     assert by_mime["image/svg+xml"]["fileName"].endswith(".svg")
     # image attachments carry previewUrl
     assert by_mime["image/svg+xml"]["previewUrl"] == by_mime["image/svg+xml"]["fileUrl"]
@@ -993,6 +995,92 @@ async def test_bibtex_and_census_attachments(client, monkeypatch):
     content = _content_of(frames)
     assert "📑 参考文献导出 · BibTeX · 1 篇" in content
     assert "📊 领域普查" in content
+    # 末行说明进入正式输出（别名链不变量）
+    assert content.rstrip().endswith("麻烦您手动转存为 .bib 格式。")
+
+
+def _citation_events(fmt="bibtex"):
+    return [
+        {"type": "tool_result", "result": {
+            "tool": "citation_export", "status": "success",
+            "citations": "@article{a,\n  title={T},\n}", "format": fmt,
+            "count": 1}},
+        {"type": "answer", "content": "完成。", "is_delta": True},
+        {"type": "done", "thinking": "", "answer": "完成。", "tool_calls": [],
+         "trace_id": "t", "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                                     "total_tokens": 2}},
+    ]
+
+
+def _citation_attachments(resp, stream):
+    if stream:
+        frames = _parse_sse(resp.text)
+        return _content_of(frames), frames[-1].get("x_soda", {}).get("attachments", [])
+    body = resp.json()
+    return body["choices"][0]["message"]["content"], body.get("x_soda", {}).get("attachments", [])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("mode", ["md_only", "bib_and_md", "bib_only"])
+async def test_bibtex_export_mode_attachments_and_note(
+    client, monkeypatch, tmp_path, stream, mode,
+):
+    _set_display_policy(tmp_path, bibtex_export_mode=mode)
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_citation_events()))
+    resp = await _post(client, {
+        "stream": stream, "user": f"bib-mode-{mode}-{stream}",
+        "messages": [{"role": "user", "content": "导出"}]})
+    content, attachments = _citation_attachments(resp, stream)
+    names = [a["fileName"] for a in attachments]
+    mimes = {a["mimeType"] for a in attachments}
+    if mode == "bib_only":
+        assert [n for n in names if n.endswith(".bib")]
+        assert not [n for n in names if n.endswith(".md")]
+        assert "麻烦您手动转存为 .bib" not in content
+        assert content.rstrip().endswith("完成。")
+    else:
+        assert [n for n in names if n.endswith(".md")]
+        assert "text/markdown" in mimes
+        if mode == "bib_and_md":
+            assert [n for n in names if n.endswith(".bib")]
+            assert "text/plain" in mimes
+        else:
+            assert not [n for n in names if n.endswith(".bib")]
+        # 末行说明是正式输出的最后一行，且在答案之后
+        assert content.rstrip().endswith("麻烦您手动转存为 .bib 格式。")
+        assert content.index("完成。") < content.index("手动转存为 .bib")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["md_only", "bib_and_md", "bib_only"])
+async def test_gbt7714_export_unaffected_by_bibtex_mode(
+    client, monkeypatch, tmp_path, mode,
+):
+    _set_display_policy(tmp_path, bibtex_export_mode=mode)
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_citation_events("gbt7714")))
+    resp = await _post(client, {
+        "stream": True, "user": f"gbt-mode-{mode}",
+        "messages": [{"role": "user", "content": "导出"}]})
+    content, attachments = _citation_attachments(resp, True)
+    # GB/T 7714 始终走 .txt，不触发 .md 副本与末行说明
+    assert [a["fileName"] for a in attachments if a["fileName"].endswith(".txt")]
+    assert not [a["fileName"] for a in attachments
+                if a["fileName"].endswith((".md", ".bib"))]
+    assert "手动转存为 .bib" not in content
+
+
+@pytest.mark.anyio
+async def test_bibtex_md_note_not_gated_by_tool_cards(client, monkeypatch, tmp_path):
+    _set_display_policy(tmp_path, tool_cards_enabled=False)
+    monkeypatch.setattr(orch, "chat_turn", _stub_chat_turn(_citation_events()))
+    resp = await _post(client, {"stream": True, "user": "bib-note-nocards",
+                                "messages": [{"role": "user", "content": "导出"}]})
+    content, attachments = _citation_attachments(resp, True)
+    # 状态行关闭时正文不再有工具卡，但转存说明行照常追加
+    assert "📑 参考文献导出" not in content
+    assert [a["fileName"] for a in attachments if a["fileName"].endswith(".md")]
+    assert content.rstrip().endswith("麻烦您手动转存为 .bib 格式。")
 
 
 @pytest.mark.anyio

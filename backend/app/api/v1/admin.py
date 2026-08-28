@@ -384,6 +384,7 @@ class DisplayPolicyUpdate(BaseModel):
     research_map_mermaid_enabled: bool | None = None
     research_map_html_enabled: bool | None = None
     research_map_markdown_enabled: bool | None = None
+    bibtex_export_mode: Literal["bib_and_md", "md_only", "bib_only"] | None = None
 
     def changes(self) -> dict:
         return self.model_dump(exclude={"expected_version"}, exclude_none=True)
