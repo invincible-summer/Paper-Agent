@@ -345,3 +345,19 @@ def test_restricted_orchestrator_rejects_unadvertised_tool_and_indexes_bound_upl
     assert tool_names == ["ask_papers"] and calls == ["index"]
     assert not session.attachments[0]["rag_index_pending"]
     assert any(e["type"] == "done" for e in events)
+
+
+def test_region_selection_preserves_coordinates_without_claiming_verified_text(workbench):
+    w = workbench
+    rects = [[0.1, 0.2, 0.7, 0.6]]
+    response = w.client.post(w.base + "/anchors", json={"page": 1, "quote": "", "rects": rects,
+                                                       "fingerprint": w.info["fingerprint"]})
+    assert response.status_code == 200
+    region = response.json()
+    assert region["rects"] == rects and region["precision"] == "region"
+    assert not region["verified"] and region["quote"] == ""
+    assert region["id"] != anchor(w, "", 1)["id"]
+    note = w.client.post(w.base + "/notes", json={"anchor_id": region["id"], "note": "图表待核对"})
+    assert note.status_code == 200
+    assert any(a["id"] == region["id"] and a["rects"] == rects for a in w.client.get(w.base).json()["anchors"])
+    assert w.client.post(w.base + "/actions", json={"action": "translate", "anchor_id": region["id"], "request_id": "a" * 32}).status_code == 422

@@ -6,7 +6,7 @@ import type { ChatAttachment } from "@/lib/chat-api";
 // panel's active tab and the file currently shown in the viewer. Sidebar
 // collapse state persists to localStorage so it sticks across reloads.
 
-export type RightPanelTab = "viewer" | "list";
+export type RightPanelTab = "viewer" | "list" | "workbench";
 
 interface UIState {
   leftSidebarOpen: boolean;
@@ -48,7 +48,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   // causes a hydration mismatch: server always renders the fallback).
   leftSidebarOpen: true,
   rightSidebarOpen: true,
-  rightPanelTab: "list",
+  rightPanelTab: "workbench",
   activeFileId: null,
   activeFileMeta: null,
   composerDraft: "",

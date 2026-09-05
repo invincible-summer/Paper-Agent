@@ -1,7 +1,7 @@
 "use client";
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { PanelLeftOpen, PanelRightOpen, Plus, FileText, BookOpen } from "lucide-react";
+import { PanelLeftOpen, PanelRightOpen, Plus, BookOpen } from "lucide-react";
 import { Nav } from "./Nav";
 import { Sidebar } from "./Sidebar";
 import { RightSidebar } from "./RightSidebar";
@@ -121,7 +121,7 @@ function CollapsedRail({
       >
         <PanelRightOpen className="h-4 w-4" />
       </button>
-      <FileText className="mt-1 h-3.5 w-3.5 text-muted/40" />
+      <button aria-label="打开工作台空间" title="打开工作台空间" onClick={() => { useUIStore.getState().setRightPanelTab("workbench"); useUIStore.getState().setRightSidebarOpen(true); }} className="flex flex-col items-center gap-2 rounded-lg px-1 py-3 text-accent hover:bg-surface-hover"><BookOpen className="h-4 w-4" /><span className="text-[10px] [writing-mode:vertical-rl]">工作台</span></button>
     </aside>
   );
 }

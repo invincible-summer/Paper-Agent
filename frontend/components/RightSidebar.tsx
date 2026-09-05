@@ -2,7 +2,7 @@
 import { OpenReaderButton } from "@/components/reader/OpenReaderButton";
 import { useEffect, useMemo, useState } from "react";
 import {
-  PanelRightClose, FileText, Files, Loader2, FileWarning, ExternalLink,
+  BookOpen, PanelRightClose, FileText, Files, Loader2, FileWarning, ExternalLink,
   Image as ImageIcon,
 } from "lucide-react";
 import { useChatStore } from "@/stores/chat";
@@ -50,6 +50,7 @@ export function RightSidebar() {
   return (
     <aside className="flex h-full w-[340px] shrink-0 flex-col border-l border-border-light bg-surface/50">
       <div className="flex items-center gap-1 px-2 py-2.5">
+        <TabButton active={rightPanelTab === "workbench"} onClick={() => setRightPanelTab("workbench")}><BookOpen className="h-3.5 w-3.5" />工作台</TabButton>
         <TabButton active={rightPanelTab === "viewer"} onClick={() => setRightPanelTab("viewer")}>
           {selectedMeta && isImageAttachment(selectedMeta)
             ? <ImageIcon className="h-3.5 w-3.5" />
@@ -58,7 +59,7 @@ export function RightSidebar() {
         </TabButton>
         <TabButton active={rightPanelTab === "list"} onClick={() => setRightPanelTab("list")}>
           <Files className="h-3.5 w-3.5" />
-          {`上传列表${files.length ? ` (${files.length})` : ""}`}
+          {`文件${files.length ? ` (${files.length})` : ""}`}
         </TabButton>
         <button
           onClick={() => setRightSidebarOpen(false)}
@@ -70,7 +71,12 @@ export function RightSidebar() {
       </div>
 
       <div className="flex-1 overflow-hidden">
-        {rightPanelTab === "viewer" ? (
+        {rightPanelTab === "workbench" ? <div className="h-full overflow-y-auto p-5">
+          <div className="mb-6 rounded-2xl border border-accent/15 bg-accent-soft/30 p-5"><BookOpen className="mb-3 h-7 w-7 text-accent" /><h2 className="font-serif text-xl text-fg">阅研 · 阅读空间</h2><p className="mt-2 text-xs leading-6 text-muted">回到原文，圈定图表、划选句子，将理解留下，带着发现继续对话。</p></div>
+          <h3 className="mb-3 text-xs font-medium text-fg-secondary">选择当前会话论文</h3>
+          {files.filter(f => /\.pdf$/i.test(f.filename) || f.ext === "pdf").map(f => <article key={f.id} className="mb-3 rounded-xl border border-border-light bg-surface p-4"><h4 className="mb-3 break-words text-sm text-fg">{f.filename}</h4><OpenReaderButton attachment={f} /></article>)}
+          {!files.some(f => /\.pdf$/i.test(f.filename) || f.ext === "pdf") && <p className="rounded-xl border border-dashed border-border-light p-4 text-xs leading-6 text-muted">当前会话还没有 PDF。在对话中添加论文后，它会出现在这里；无需先向 AI 发送问题。</p>}
+        </div> : rightPanelTab === "viewer" ? (
           <FileViewer fileMeta={selectedMeta} />
         ) : (
           <FileList files={files} activeId={activeFileId} />

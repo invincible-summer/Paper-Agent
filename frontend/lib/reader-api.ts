@@ -4,7 +4,7 @@ import { BACKEND_DIRECT } from "./chat-api";
 
 export interface Anchor {
   id: string; version: number; page: number; quote: string; rects: number[][];
-  fingerprint: string; verified: boolean; precision: "text" | "page";
+  fingerprint: string; verified: boolean; precision: "text" | "page" | "region";
 }
 export interface ReaderNote {
   id: string; version: number; anchor_id: string; category: string; note: string; interpretation: string;

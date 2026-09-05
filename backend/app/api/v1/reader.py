@@ -280,7 +280,7 @@ async def reading_action(sid: ID, aid: ID, req: ActionRequest, uid: str = Depend
                         previous["thread"] = _record(uid, sid, aid, "thread", previous["thread_id"])
                     await queue.put({"type": "done", **previous})
                     return
-                evidence = await run_cpu_bound(page_evidence, path, anchor["page"], anchor["quote"])
+                evidence = await run_cpu_bound(page_evidence, path, anchor["page"], anchor["quote"], anchor.get("rects"))
                 position = store.get(uid, sid, aid, "position", "current") or {}
                 committed = False
                 if req.action == "translate":
@@ -333,7 +333,9 @@ async def reading_action(sid: ID, aid: ID, req: ActionRequest, uid: str = Depend
                         context = ASK.text + "\n阅读目标：" + position.get("goal", "理解方法")
                         prompt = (f"当前附件：{aid}；PDF 第 {anchor['page']} 页。\n"
                                   f"选文：{anchor['quote']}\n页内上下文：{evidence['context']}\n"
-                                  f"我的问题：{req.question}")
+                                  + (f"用户框选区域（未旋转页面归一化坐标）：{anchor['rects']}。"
+                                     "\n" if anchor.get("precision") == "region" else "")
+                                  + f"我的问题：{req.question}")
                         answer, thinking, completed = "", "", False
                         async for event in chat_turn(prompt, branch, system_instructions=context,
                                 allowed_tools=frozenset({"ask_papers", "deep_read", "explain_element", "exhibit_index"}),

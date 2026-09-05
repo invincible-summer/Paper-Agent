@@ -52,6 +52,7 @@ def page_evidence(path: Path, page: int, quote: str = "", rects: list | None = N
                 abs((r[0] + r[2]) / 2 - (s[0] + s[2]) / 2) < .08
                 and abs((r[1] + r[3]) / 2 - (s[1] + s[3]) / 2) < .04 for s in rects)]
             canonical = selected
-        return {"page": page, "quote": quote, "rects": canonical,
-                "verified": verified, "precision": "text" if verified and canonical else "page",
+        region = not quote and bool(rects)
+        return {"page": page, "quote": quote, "rects": rects if region else canonical,
+                "verified": verified, "precision": "region" if region else "text" if verified and canonical else "page",
                 "context": text[:18000], "has_text": bool(text.strip())}

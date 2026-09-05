@@ -550,13 +550,13 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 `OpenReaderButton` 从当前会话 PDF 附件卡、文件列表或“只上传”后的附件打开新标签页。`POST /api/v1/reader/open` 校验原件 owner 并绑定到已有/新草稿会话，返回稳定 `session_id` 和历史 filename；不发送模型消息。新绑定的附件标记 `rag_index_pending`，首次真正对话时再补会话向量索引。
 
-`ReadingWorkbench` 使用独立三栏布局：目录/标记、原版 PDF、助读/发现；面板可折叠，小屏改为抽屉。`PdfReader` 通过 PDF.js 6.3.289 的 worker 在客户端渲染原始页面，以 text layer 提供选择，以受限链接层支持外部 HTTP(S) 和 PDF 内部跳转；不运行文档脚本。原始公式、表格和图片不重排。可见页及相邻区域才分配画布，离开时取消 render 并释放；连续、单页、宽屏双页三种视图共享缩放与页码。worker/CMaps/fonts/WASM 在 `predev`/`prebuild` 从同版本依赖准备，Node 要求 >=22.13，生成资源不提交。
+聊天右侧默认显示“工作台”空间及当前会话 PDF 列表，折叠边栏保留专用入口。`ReadingWorkbench` 使用独立三栏布局：目录/标记、原版 PDF、助读/发现；面板可折叠，小屏改为抽屉。`PdfReader` 通过 PDF.js 6.3.289 的 worker 在客户端渲染原始页面，以 text layer 提供选择，以受限链接层支持外部 HTTP(S) 和 PDF 内部跳转；不运行文档脚本。原始公式、表格和图片不重排。临时文字选择使用原页虚线下划线，保存标记使用实线，框选区域使用虚线/实线边框；选文不在助读栏重复显示，选择本身不自动展开边栏。可见页及相邻区域才分配画布，离开时取消 render 并释放；连续、单页、宽屏双页三种视图共享缩放与页码。worker/CMaps/fonts/WASM 在 `predev`/`prebuild` 从同版本依赖准备，Node 要求 >=22.13，生成资源不提交。
 
-`/api/v1/reader/sessions/{sid}/documents/{aid}` 下提供 manifest/content、position、anchors、notes 和 actions。所有操作同时校验账号、会话成员关系和上传原件所有者；PDF 原件返回 `application/pdf`、private/no-store 与 nosniff，不使用公开文件别名。manifest 由 PyMuPDF 确定性获取页数、内置书签及 SHA-256，并按路径/stat 缓存；不等 Docling 或 VLM。锚点包含文档 fingerprint、物理页号、原文 quote 与未旋转页面归一化矩形；服务端核对选文与该页文本并重新定位矩形。无法精确定位时仅页级引用；文本未匹配拒绝伪造来源，文档版本变化使旧锚点失效。当前跨页选择要求分段，扫描页无文字选择层时提供页级问答。
+`/api/v1/reader/sessions/{sid}/documents/{aid}` 下提供 manifest/content、position、anchors、notes 和 actions。所有操作同时校验账号、会话成员关系和上传原件所有者；PDF 原件返回 `application/pdf`、private/no-store 与 nosniff，不使用公开文件别名。manifest 由 PyMuPDF 确定性获取页数、内置书签及 SHA-256，并按路径/stat 缓存；不等 Docling 或 VLM。锚点包含文档 fingerprint、物理页号、原文 quote 与未旋转页面归一化矩形；服务端核对选文与该页文本并重新定位矩形。无法精确定位时仅页级引用；文本未匹配拒绝伪造来源，文档版本变化使旧锚点失效。当前跨页选择要求分段。框选模式用 Pointer Events 捕获鼠标/触控矩形并转为未旋转归一化坐标，保存为 `precision=region, verified=false` 的用户区域锚点，不伪装成 OCR 或文本证据；可标记图片、表格、公式与扫描区域。问答收到区域坐标，按现有论文元素工具核对，未提供裁图识别能力时明确降级。
 
 `reading.translate` v1 通过 `ainvoke_utility`，输入选文、页内上下文、主题、目标语言及本篇术语表，输出上限 3000 tokens；保留数字、变量、引用和限定条件，解释与译文区分。翻译缓存按账号/会话/文档、fingerprint、上下文、术语、模型与提示词版本隔离，每篇保留最近 100 项；同一翻译并发去重。选择变化取消前次操作，“划选即译”在选区稳定 450ms 后触发。助读 Markdown 支持受限 KaTeX（trust=false、展开/尺寸有界），外部图片不自动加载。
 
-`reading.ask` v1 复用 `orchestrator.chat_turn`，创建拥有原 session RAG id、单篇附件和独立阅读消息的临时 ChatSession；工具 schema 与执行时双重限制为 ask_papers/deep_read/explain_element/exhibit_index，不能发起网络检索或写作导出。选文与页内证据仅参与本轮，不直接复制到持久线程消息；线程存用户问题、正式答复和思考。讨论围绕固定锚点，最多 40 轮；前端显示原文位置，页码引用可跳转。研究问答使用主会话写锁并可见排队，取消/错误/未完成答复不提交半轮；成功的线程与 request-id 幂等结果同 SQLite 事务写入，重试缓存只存线程引用而非复制整段历史。外层 SSE 150 秒上限，问答执行预算 100/120 秒，10 秒心跳；模型失败不影响原文和笔记。
+`reading.ask` v2 复用 `orchestrator.chat_turn`，创建拥有原 session RAG id、单篇附件和独立阅读消息的临时 ChatSession；工具 schema 与执行时双重限制为 ask_papers/deep_read/explain_element/exhibit_index，不能发起网络检索或写作导出。选文与页内证据仅参与本轮，不直接复制到持久线程消息；线程存用户问题、正式答复和思考。讨论围绕固定锚点，最多 40 轮；前端显示原文位置，页码引用可跳转。研究问答使用主会话写锁并可见排队，取消/错误/未完成答复不提交半轮；成功的线程与 request-id 幂等结果同 SQLite 事务写入，重试缓存只存线程引用而非复制整段历史。外层 SSE 150 秒上限，问答执行预算 100/120 秒，10 秒心跳；模型失败不影响原文和笔记。
 
 笔记区分作者引文、助读解释与用户判断，支持分类、编辑和删除；position/notes 用 expected_version 乐观锁防覆盖，冲突保留草稿。用户点击“带回对话”后，在主聊天加入带 publication_id 的来源卡，不启动额外模型轮次；同一笔记版本重复发布幂等。主聊天只为这些来源卡渲染可点击 Markdown，普通用户消息仍按原有文本显示。BroadcastChannel 通知原聊天在空闲时刷新，保留输入草稿；独立打开时用 `/chat?history=...` 返回所属对话。主聊天 source link 可打开原文锚点。工作台不修改 `/v1` 显示协议。
 

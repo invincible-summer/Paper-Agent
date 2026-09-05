@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, BookOpen, ChevronLeft, ChevronRight, PanelLeftClose, PanelRightClose,
   Languages, MessageSquare, Highlighter, Plus, Minus, Send, Square, Bookmark, Check,
-  X, Maximize2, List, FileText, Pencil, Trash2 } from "lucide-react";
+  X, Maximize2, List, FileText, Pencil, Trash2, Scan } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/auth";
 import { PdfReader } from "./PdfReader";
@@ -31,6 +31,7 @@ export function ReadingWorkbench({ sessionId, attachmentId }: { sessionId: strin
   const [glossary, setGlossary] = useState("");
   const [settings, setSettings] = useState(false);
   const [jump, setJump] = useState({ page: 1, serial: 0 });
+  const [regionMode, setRegionMode] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [selectedAnchor, setSelectedAnchor] = useState<Anchor | null>(null);
   const [autoTranslate, setAutoTranslate] = useState(false);
@@ -99,7 +100,7 @@ export function ReadingWorkbench({ sessionId, attachmentId }: { sessionId: strin
       if ((event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable]")) return;
       if (event.key === "ArrowRight") { event.preventDefault(); goPage(page + (view === "spread" ? 2 : 1)); }
       if (event.key === "ArrowLeft") { event.preventDefault(); goPage(page - (view === "spread" ? 2 : 1)); }
-      if (event.key === "Escape") { setSelection(null); setSelectedAnchor(null); setSettings(false); window.getSelection()?.removeAllRanges(); }
+      if (event.key === "Escape") { setSelection(null); setSelectedAnchor(null); setRegionMode(false); setSettings(false); window.getSelection()?.removeAllRanges(); }
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
@@ -134,7 +135,7 @@ export function ReadingWorkbench({ sessionId, attachmentId }: { sessionId: strin
     controller.current?.abort(); currentAction.current = "";
     setBusy(false); setSelection(value); setSelectedAnchor(null); setThread(null); setEditingNote(null);
     setAnswer(""); setThinking(""); setComplete(false);
-    setTab("assist"); setRightOpen(true);
+    setTab("assist"); setRegionMode(false);
   }, []);
   const activateAnchor = (anchor: Anchor) => {
     setSelection(anchor); setSelectedAnchor(anchor); goPage(anchor.page); setRightOpen(true);
@@ -201,7 +202,8 @@ export function ReadingWorkbench({ sessionId, attachmentId }: { sessionId: strin
       const value = await readerCall<ReaderNote>(base + "/notes" + (editingNote ? `/${editingNote.id}` : ""), editingNote ? "PUT" : "POST", body);
       setData(d => d ? { ...d, notes: [...d.notes.filter(n => n.id !== value.id), value] } : d);
       setNoteText(""); setEditingNote(null); setNotice(highlightOnly ? "已保存划线" : "发现已记下，可带回主对话");
-      setTab("notes"); setRightOpen(true);
+      if (!highlightOnly) { setTab("notes"); setRightOpen(true); }
+      if (highlightOnly) { setSelection(null); window.getSelection()?.removeAllRanges(); }
     } catch (e) { setError(e instanceof Error ? e.message : "保存失败，草稿仍保留"); }
     finally { setNoteSaving(false); }
   };
@@ -254,7 +256,7 @@ export function ReadingWorkbench({ sessionId, attachmentId }: { sessionId: strin
         <button className="reader-zoom" title="恢复适合宽度" onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button>
         <button className="reader-icon" title="放大" onClick={() => setZoom(z => Math.min(3, +(z + .1).toFixed(1)))}><Plus size={15} /></button>
       </div>
-      <div className="reader-toolbar-group"><label className="reader-auto"><input type="checkbox" checked={autoTranslate} onChange={e => setAutoTranslate(e.target.checked)} />划选即译</label>
+      <div className="reader-toolbar-group"><button className="reader-region-toggle" aria-pressed={regionMode} onClick={() => setRegionMode(!regionMode)}><Scan size={15} />{regionMode ? "取消框选" : "框选图片"}</button><label className="reader-auto"><input type="checkbox" checked={autoTranslate} onChange={e => setAutoTranslate(e.target.checked)} />划选即译</label>
         <button className="reader-icon" title="展开助读" onClick={() => setRightOpen(!rightOpen)}><MessageSquare size={17} /></button></div>
     </div>
     {(error || notice) && <div className={error ? "reader-banner error" : "reader-banner"} role={error ? "alert" : "status"}>
@@ -269,18 +271,19 @@ export function ReadingWorkbench({ sessionId, attachmentId }: { sessionId: strin
           {data.outline.length ? data.outline.map((item, i) => <button key={i} className={`reader-outline-item ${page === item.page ? "active" : ""}`} style={{ paddingLeft: 12 + Math.min(item.level - 1, 3) * 12 }} onClick={() => goPage(item.page)}>
             <span>{item.title}</span><small>{item.page}</small></button>) : <div className="reader-empty"><FileText size={23} /><p>这篇 PDF 没有内置目录</p><small>按页翻阅或在原文中选句，助读随时可用。</small></div>}
           <div className="reader-nav-caption">PAGE NAVIGATION</div><div className="reader-page-grid">{Array.from({ length: Math.min(data.page_count, 200) }, (_, i) => <button key={i} className={page === i + 1 ? "active" : ""} onClick={() => goPage(i + 1)}>{i + 1}</button>)}</div>
-        </> : marked.length ? marked.map(a => <button key={a.id} className="reader-mark-item" onClick={() => activateAnchor(a)}><small>第 {a.page} 页 · {a.precision === "text" ? "原文标记" : "页面标记"}</small><p>{a.quote || "整页阅读讨论"}</p></button>)
+        </> : marked.length ? marked.map(a => <button key={a.id} className="reader-mark-item" onClick={() => activateAnchor(a)}><small>第 {a.page} 页 · {a.precision === "text" ? "原文标记" : a.precision === "region" ? "图文区域" : "页面标记"}</small><p>{a.quote || (a.precision === "region" ? "框选图文区域" : "整页阅读讨论")}</p></button>)
           : <div className="reader-empty"><Bookmark size={24} /><p>留下你的阅读线索</p><small>选中原文记下发现，或围绕一句话展开讨论。</small></div>}
         </div><div className="reader-nav-bottom">{user?.display_name || "我的"}阅读空间<br /><span>原文 · 理解 · 判断</span></div>
       </aside>}
       <main className="reader-main">
         <PdfReader url={base + "/content"} page={page} zoom={zoom} view={view} jump={jump} anchors={marked} activeAnchor={selectedAnchor?.id}
+          selection={selection} regionMode={regionMode} savedAnchorIds={data.notes.map(n => n.anchor_id)}
           onPage={setPage} onSelection={select} onAnchor={activateAnchor} />
-        {selection?.quote && <div className="reader-selection-bar" role="toolbar" aria-label="选文操作" onMouseDown={e => e.preventDefault()}>
-          <small>已选 {selection.quote.length} 字</small><button onClick={() => void runAction("translate")}><Languages size={15} />翻译</button>
-          <button onClick={() => void runAction("ask", "请解释选中这段话的含义、必要背景和适用条件。" )}><BookOpen size={15} />解释</button>
+        {selection && <div className="reader-selection-bar" role="toolbar" aria-label="选文操作" onMouseDown={e => e.preventDefault()}>
+          <small>第 {selection.page} 页 · {selection.quote ? `已选 ${selection.quote.length} 字` : selection.rects.length ? "已选图文区域" : "当前页"}</small>{selection.quote && <button onClick={() => void runAction("translate")}><Languages size={15} />翻译</button>}
+          <button onClick={() => void runAction("ask", selection.quote ? "请解释选中这段话的含义、必要背景和适用条件。" : "请结合这一页解释框选的图表或公式，说明依据；若无法读取图像内容请明确说明。" )}><BookOpen size={15} />解释</button>
           <button onClick={() => { setRightOpen(true); setTab("assist"); questionRef.current?.focus(); }}><MessageSquare size={15} />追问</button>
-          <button disabled={noteSaving} onClick={() => void saveNote(false, true)}><Highlighter size={15} />划线</button>
+          <button disabled={noteSaving} onClick={() => void saveNote(false, true)}><Highlighter size={15} />{selection.quote ? "划线" : "标记区域"}</button>
           <button onClick={() => { setTab("notes"); setRightOpen(true); }}><Bookmark size={15} />记下</button>
           <button aria-label="取消选区" onClick={() => { setSelection(null); setSelectedAnchor(null); window.getSelection()?.removeAllRanges(); }}><X size={13} /></button>
         </div>}
@@ -294,8 +297,6 @@ export function ReadingWorkbench({ sessionId, attachmentId }: { sessionId: strin
         <button className={tab === "notes" ? "active" : ""} onClick={() => setTab("notes")}>我的发现 <small>{data.notes.length}</small></button></div>
         <button className="reader-icon" title="收起助读" onClick={() => setRightOpen(false)}><PanelRightClose size={16} /></button></div>
         <div className="reader-assist-scroll">
-          <div className="reader-context"><span className="reader-context-label">{selection?.quote ? "正在理解的原文" : "当前阅读范围"}</span><small>第 {selection?.page || page} 页 · 当前论文</small>
-            {selection?.quote ? <blockquote>{selection.quote}</blockquote> : <p>选中一句话，或直接对当前页提问。</p>}</div>
           {tab === "assist" ? <>
             {!answer && !thread && !busy && <div className="reader-welcome"><div className="reader-welcome-icon"><BookOpen size={25} /></div><h2>和论文一起思考</h2><p>读懂一句话，也追问它为什么成立。解释与原文始终相连。</p>
               <div className="reader-question-presets">{["这一页的核心意思是什么？", "总结这篇论文的问题、方法、结论和局限。", "这段论述依赖哪些假设？", "请解释这里的公式或符号。"].map(q => <button key={q} onClick={() => void runAction("ask", q)}>{q}<Plus size={13} /></button>)}</div></div>}
@@ -305,7 +306,7 @@ export function ReadingWorkbench({ sessionId, attachmentId }: { sessionId: strin
             {(busy || (answer && (!thread || answerKind === "translate"))) && <div className="reader-answer"><div className="reader-answer-heading"><Languages size={15} /><span>{busy ? status : "助读结果"}</span>{busy && <span className="reader-spinner" />}</div>
               {thinking && <details className="reader-thinking"><summary>思考过程</summary><ReaderMarkdown>{thinking}</ReaderMarkdown></details>}
               {answer && <ReaderMarkdown onPage={goPage}>{answer}</ReaderMarkdown>}
-              {answerAnchor && <button className="reader-source" onClick={() => activateAnchor(answerAnchor)}>↗ 第 {answerAnchor.page} 页 · {answerAnchor.precision === "text" ? "提问原文" : "提问页面"}</button>}
+              {answerAnchor && <button className="reader-source" onClick={() => activateAnchor(answerAnchor)}>↗ 第 {answerAnchor.page} 页 · {answerAnchor.precision === "text" ? "提问原文" : answerAnchor.precision === "region" ? "框选区域" : "提问页面"}</button>}
               {complete && <button className="reader-save-answer" onClick={() => { setTab("notes"); }}>记为发现 <Bookmark size={14} /></button>}
             </div>}
             <button className="reader-glossary-toggle" onClick={() => setSettings(!settings)}><Languages size={14} />本篇术语表 {settings ? "−" : "+"}</button>
@@ -319,7 +320,7 @@ export function ReadingWorkbench({ sessionId, attachmentId }: { sessionId: strin
                 <small>该笔记已更新。下方发现卡显示最新内容，当前草稿仍保留。</small>
                 <button onClick={() => setEditingNote(latestEditingNote)}>已核对，基于新版继续保存草稿</button>
               </div>}
-              <div className="reader-note-editor-actions"><button className="reader-primary" disabled={noteSaving || (!noteText.trim() && !selection?.quote && !editingNote)} onClick={() => void saveNote()}>{noteSaving ? "保存中…" : editingNote ? "保存修改" : "保存笔记"}</button>
+              <div className="reader-note-editor-actions"><button className="reader-primary" disabled={noteSaving || (!noteText.trim() && !selection && !editingNote)} onClick={() => void saveNote()}>{noteSaving ? "保存中…" : editingNote ? "保存修改" : "保存笔记"}</button>
                 {complete && answer && !editingNote && <button disabled={noteSaving} onClick={() => void saveNote(true)}>附解释保存</button>}
                 {editingNote && <button onClick={() => { setEditingNote(null); setNoteText(""); }}>取消编辑</button>}</div>
             </div>

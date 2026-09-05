@@ -58,3 +58,25 @@
 @media(prefers-reduced-motion:reduce){.reading-workbench *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 
 .reader-note-conflict{padding:10px;margin-bottom:12px;background:#fff0df;border-radius:6px;color:#9b753c;font-size:10px}.reader-note-conflict small{display:block;line-height:1.7}.reader-note-conflict button{margin-top:6px;text-decoration:underline}
+
+/* 选区留在原页；临时虚线，保存后实线，不覆盖正文。 */
+.reader-highlights span,.reader-highlights span.active{background:transparent;outline:none;border-radius:0;mix-blend-mode:normal;border-bottom:2px solid #b77837}
+.reader-highlights span.temporary{border-bottom-style:dashed;border-color:#42836a}
+.reader-highlights span.region{border:2px solid #b77837}
+.reader-highlights span.region.temporary{border-style:dashed;border-color:#42836a}
+.reader-current-selection{position:absolute;inset:0;pointer-events:none;z-index:4}
+.reader-current-selection span{position:absolute;border-bottom:2px dashed #247957}
+.reader-current-selection span.region{border:2px dashed #247957;background:#4b9d7010}
+.reader-region-selector{position:absolute;inset:0;z-index:5;cursor:crosshair;touch-action:none}
+.reader-region-toggle{display:flex;align-items:center;gap:5px;font-size:11px;padding:6px;border-radius:6px;color:#476b53}
+.reader-region-toggle[aria-pressed=true]{background:#dcebdc}
+
+.reader-highlights span:not(.region),.reader-current-selection span:not(.region){transform:translateY(3px)}
+@media(max-width:600px){
+  .reader-toolbar{height:auto;min-height:82px;display:grid;grid-template-columns:1fr auto;gap:0 8px;padding:5px 10px}
+  .reader-toolbar-group{white-space:nowrap;min-width:0}
+  .reader-toolbar-group:nth-child(2){grid-column:1 / -1;grid-row:2;justify-content:center}
+  .reader-toolbar-group:nth-child(3){justify-content:flex-end}
+  .reader-region-toggle{white-space:nowrap;font-size:10px}
+  .reader-auto{white-space:nowrap}
+}

@@ -6,6 +6,7 @@ import { authHeaders } from "@/lib/auth";
 
 interface Props {
   url: string; page: number; zoom: number; view: "continuous" | "single" | "spread";
+  selection: Selection | null; regionMode: boolean; savedAnchorIds: string[];
   jump: { page: number; serial: number }; anchors: Anchor[]; activeAnchor?: string;
   onPage: (page: number) => void; onSelection: (value: Selection) => void;
   onAnchor: (anchor: Anchor) => void;
@@ -60,6 +61,7 @@ export function PdfReader(props: Props) {
     if (selected !== props.page) props.onPage(selected);
   };
   const onSelect = () => {
+    if (props.regionMode) return;
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || !selection.rangeCount) return;
     const range = selection.getRangeAt(0);
@@ -81,6 +83,7 @@ export function PdfReader(props: Props) {
         Math.max(...points.map(p => p[0])), Math.max(...points.map(p => p[1]))].map(v => Math.max(0, Math.min(1, v)));
     });
     props.onSelection({ page: Number(parent.dataset.pdfPage), quote: text, rects });
+    selection.removeAllRanges();
   };
   const pages = doc ? props.view === "continuous" ? Array.from({ length: doc.numPages }, (_, i) => i + 1)
     : props.view === "spread" && width > 900 ? [props.page, props.page + 1].filter(p => p <= doc.numPages) : [props.page] : [];
@@ -102,16 +105,21 @@ export function PdfReader(props: Props) {
     <div className={`reader-pages ${spread ? "reader-spread" : ""}`}>
       {doc && pages.map(number => <PdfPage key={number} document={doc} number={number} width={pageWidth}
         anchors={props.anchors.filter(a => a.page === number)} activeAnchor={props.activeAnchor}
+        selection={props.selection?.page === number ? props.selection : null} regionMode={props.regionMode} savedAnchorIds={props.savedAnchorIds} onSelection={props.onSelection}
         onAnchor={props.onAnchor} onDestination={go} />)}
     </div>
   </div>;
 }
 
-function PdfPage({ document: doc, number, width, anchors, activeAnchor, onAnchor, onDestination }: {
+function PdfPage({ document: doc, number, width, anchors, activeAnchor, onAnchor, onDestination, selection, regionMode, savedAnchorIds, onSelection }: {
+  selection: Selection | null; regionMode: boolean; savedAnchorIds: string[]; onSelection: (value: Selection) => void;
   document: PDFDocumentProxy; number: number; width: number; anchors: Anchor[]; activeAnchor?: string;
   onAnchor: (anchor: Anchor) => void; onDestination: (destination: string | unknown[]) => void;
 }) {
   const root = useRef<HTMLDivElement>(null);
+  const drag = useRef<number[] | null>(null);
+  const [draftRect, setDraftRect] = useState<number[] | null>(null);
+  useEffect(() => { drag.current = null; setDraftRect(null); }, [regionMode, width]);
   const canvas = useRef<HTMLCanvasElement>(null);
   const text = useRef<HTMLDivElement>(null);
   const [near, setNear] = useState(false);
@@ -186,12 +194,28 @@ function PdfPage({ document: doc, number, width, anchors, activeAnchor, onAnchor
     <div ref={root} data-pdf-page={number} data-rotation={rotation} className="reader-pdf-page" style={{ width, height: width * ratio }}>
       {!ready && <div className="reader-page-placeholder">{failed ? "此页渲染失败，请重新打开论文" : `第 ${number} 页`}</div>}
       <canvas ref={canvas} aria-hidden="true" />
-      <div className="reader-highlights" aria-hidden="true">{anchors.flatMap(a => a.rects.map((raw, i) => {
+      <div className="reader-highlights" aria-hidden="true">{anchors.filter(a => savedAnchorIds.includes(a.id) || a.id === activeAnchor).flatMap(a => a.rects.map((raw, i) => {
         const r = rotateRect(raw);
-        return <span key={`${a.id}-${i}`} className={a.id === activeAnchor ? "active" : ""}
+        return <span key={`${a.id}-${i}`} className={`${a.id === activeAnchor ? "active" : ""} ${savedAnchorIds.includes(a.id) ? "saved" : "temporary"} ${!a.quote ? "region" : ""}`}
           style={{ left: `${r[0] * 100}%`, top: `${r[1] * 100}%`, width: `${(r[2] - r[0]) * 100}%`, height: `${(r[3] - r[1]) * 100}%` }} />;
       }))}</div>
+      <div className="reader-current-selection" aria-hidden="true">{(draftRect ? [draftRect] : selection?.rects.map(rotateRect) || []).map((r, i) => <span key={i} className={draftRect || !selection?.quote ? "region" : ""}
+        style={{ left: `${r[0] * 100}%`, top: `${r[1] * 100}%`, width: `${(r[2] - r[0]) * 100}%`, height: `${(r[3] - r[1]) * 100}%` }} />)}</div>
       <div ref={text} className="textLayer reader-text-layer" />
+      {regionMode && <div className="reader-region-selector" role="img" aria-label="拖动框选图片、表格或公式区域"
+        onPointerDown={e => { if (e.button !== 0) return; e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId);
+          const b = e.currentTarget.getBoundingClientRect(); drag.current = [(e.clientX - b.left) / b.width, (e.clientY - b.top) / b.height]; setDraftRect(null); }}
+        onPointerMove={e => { if (!drag.current) return; const b = e.currentTarget.getBoundingClientRect();
+          const x = Math.max(0, Math.min(1, (e.clientX - b.left) / b.width)), y = Math.max(0, Math.min(1, (e.clientY - b.top) / b.height));
+          setDraftRect([Math.min(x, drag.current[0]), Math.min(y, drag.current[1]), Math.max(x, drag.current[0]), Math.max(y, drag.current[1])]); }}
+        onPointerCancel={() => { drag.current = null; setDraftRect(null); }}
+        onPointerUp={e => { if (!drag.current) return; const b = e.currentTarget.getBoundingClientRect();
+          const x = Math.max(0, Math.min(1, (e.clientX - b.left) / b.width)), y = Math.max(0, Math.min(1, (e.clientY - b.top) / b.height));
+          const r = [Math.min(x, drag.current[0]), Math.min(y, drag.current[1]), Math.max(x, drag.current[0]), Math.max(y, drag.current[1])];
+          drag.current = null; setDraftRect(null); if ((r[2] - r[0]) * b.width < 8 || (r[3] - r[1]) * b.height < 8) return;
+          const points = [[r[0], r[1]], [r[2], r[3]]].map(([a, c]) => rotation === 90 ? [c, 1-a] : rotation === 180 ? [1-a, 1-c] : rotation === 270 ? [1-c, a] : [a, c]);
+          onSelection({page: number, quote: "", rects: [[Math.min(...points.map(p => p[0])), Math.min(...points.map(p => p[1])), Math.max(...points.map(p => p[0])), Math.max(...points.map(p => p[1]))]]}); }} />}
+
       {links.map((link, i) => <a key={i} className="reader-pdf-link" href={link.url || "#"}
         target={link.url ? "_blank" : undefined} rel="noopener noreferrer" aria-label={link.url ? "打开论文链接" : "跳转论文引用"}
         onClick={e => { if (!link.url) { e.preventDefault(); if (link.dest) onDestination(link.dest); } }}
