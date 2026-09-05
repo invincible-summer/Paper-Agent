@@ -214,6 +214,30 @@ export default function ChatPage() {
     useUIStore.getState().clearActiveFile();
   };
   const loadHistory = useHistoryLoader();
+  // 阅读工作台在另一标签页运行；只在当前轮次结束后同步已发布的发现。
+  const readingDirty = useRef(false);
+  useEffect(() => {
+    const filename = new URLSearchParams(window.location.search).get("history");
+    if (filename && !useChatStore.getState().isResponding) void loadHistory(filename);
+    const channel = new BroadcastChannel("paper-reader");
+    const refresh = () => {
+      const current = useChatStore.getState();
+      if (current.isResponding) { readingDirty.current = true; return; }
+      if (current.currentChatFilename) void loadHistory(current.currentChatFilename);
+      readingDirty.current = false;
+    };
+    channel.onmessage = event => {
+      if (event.data?.history === useChatStore.getState().currentChatFilename) refresh();
+    };
+    const focused = () => { if (readingDirty.current) refresh(); };
+    window.addEventListener("focus", focused);
+    return () => { channel.close(); window.removeEventListener("focus", focused); };
+  }, [loadHistory]);
+  useEffect(() => {
+    if (!store.isResponding && readingDirty.current && store.currentChatFilename) {
+      readingDirty.current = false; void loadHistory(store.currentChatFilename);
+    }
+  }, [store.isResponding, store.currentChatFilename, loadHistory]);
   const handleSelectHistory = useCallback((filename: string) => {
     useUIStore.getState().clearActiveFile();
     void loadHistory(filename);
@@ -235,7 +259,8 @@ export default function ChatPage() {
               </h1>
               <p className="mb-8 max-w-md text-center text-[14px] leading-relaxed text-muted">
                 告诉我你的研究主题——我来检索文献、深读论文、绘制研究地图与谱系图、
-                规划阅读路径、撰写文献综述。
+                规划阅读路径、撰写文献综述。上传 PDF 后，还可以进入「阅研」工作台，
+                在原文中划选翻译、追问和记录自己的发现。
               </p>
               <div className="grid w-full max-w-lg grid-cols-2 gap-2.5">
                 {SUGGESTIONS.map((s) => (

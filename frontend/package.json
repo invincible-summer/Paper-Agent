@@ -7,15 +7,21 @@
     "build": "next build",
     "start": "next start -p 3000 -H 127.0.0.1",
     "lint": "next lint",
-    "screenshot:chat-graph": "node scripts/screenshot-chat-graph.cjs"
+    "screenshot:chat-graph": "node scripts/screenshot-chat-graph.cjs",
+    "predev": "node scripts/prepare-pdf-assets.cjs",
+    "prebuild": "node scripts/prepare-pdf-assets.cjs"
   },
   "dependencies": {
+    "katex": "0.16.47",
     "lucide-react": "0.408.0",
     "next": "14.2.5",
+    "pdfjs-dist": "6.3.289",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "react-markdown": "9.0.1",
+    "rehype-katex": "7.0.1",
     "remark-gfm": "4.0.0",
+    "remark-math": "6.0.0",
     "zustand": "4.5.4"
   },
   "devDependencies": {
@@ -29,5 +35,9 @@
     "postcss": "8.4.39",
     "tailwindcss": "3.4.6",
     "typescript": "5.5.3"
+  },
+  "packageManager": "pnpm@11.25.0+sha512.5cde925b4f075f725eb71fbae18a42ffe784524789f19b61c731cb8721ec28aaee160e01a8d5af4fedb2a42cdbf300efe23db356b0d4a17b4d63e11f8ab7c956",
+  "engines": {
+    "node": ">=22.13.0"
   }
 }

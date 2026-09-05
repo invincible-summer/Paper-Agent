@@ -1,4 +1,5 @@
 "use client";
+import { OpenReaderButton } from "@/components/reader/OpenReaderButton";
 import { useEffect, useMemo, useState } from "react";
 import {
   PanelRightClose, FileText, Files, Loader2, FileWarning, ExternalLink,
@@ -182,6 +183,7 @@ function FileViewer({ fileMeta }: { fileMeta: ChatAttachment | null }) {
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted">
           <span>{attachmentMetaLabel(fileMeta)}</span>
+          <OpenReaderButton attachment={fileMeta} />
           {!image && data?.truncated && <span className="text-amber-500/80">（已截断）</span>}
         </div>
       </div>
@@ -224,8 +226,8 @@ function FileList({ files, activeId }: { files: ChatAttachment[]; activeId: stri
             const image = isImageAttachment(f);
             const Icon = image ? ImageIcon : FileText;
             return (
+              <div key={f.id}>
               <button
-                key={f.id}
                 onClick={() => { openFile(f); setRightPanelTab("viewer"); }}
                 className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-surface-hover/60 ${active ? "bg-surface-hover/60" : ""}`}
               >
@@ -236,6 +238,8 @@ function FileList({ files, activeId }: { files: ChatAttachment[]; activeId: stri
                 </div>
                 <ExternalLink className="h-3 w-3 shrink-0 text-muted/30" />
               </button>
+              <div className="px-3 pb-2"><OpenReaderButton attachment={f} /></div>
+              </div>
             );
           })}
         </div>

@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect, memo } from "react";
+import { OpenReaderButton } from "@/components/reader/OpenReaderButton";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Brain, ChevronDown, ChevronRight, Loader2, Sparkles, Search, Map, BookOpen, FileText, Download, Copy, Check, RefreshCw, Route, ExternalLink, Quote, ClipboardCheck, FileCheck, FileDown, ShieldCheck, FileInput, Images, Image as ImageIcon, BarChart3, ZoomIn } from "lucide-react";
@@ -14,6 +15,7 @@ export interface ChatMsg {
   role: "user" | "assistant";
   content: string;
   thinking?: string;
+  readingPublication?: string;
   toolCalls?: ToolCall[];
   isStreaming?: boolean;
   attachments?: ChatAttachment[];
@@ -137,7 +139,7 @@ function FileChip({ attach }: { attach: ChatAttachment }) {
   const openFile = useUIStore(s => s.openFile);
   const image = isImageAttachment(attach);
   return (
-    <button
+    <span className="inline-flex items-center gap-1.5"><button
       onClick={() => openFile(attach)}
       className="flex max-w-[300px] items-center gap-1.5 rounded-lg border border-border-light bg-surface px-2 py-1 text-[11px] text-fg-secondary transition-colors hover:border-accent/30 hover:bg-surface-hover/60 hover:text-fg"
       title={`${attach.filename} — 点击${image ? "预览图片" : "查看提取文本"}`}
@@ -145,7 +147,7 @@ function FileChip({ attach }: { attach: ChatAttachment }) {
       {image ? <ImageIcon className="h-3 w-3 shrink-0 text-accent" /> : <FileText className="h-3 w-3 shrink-0 text-accent" />}
       <span className="max-w-[180px] truncate">{attach.filename}</span>
       <span className="tnum whitespace-nowrap text-muted/60">{attachmentMetaLabel(attach)}</span>
-    </button>
+    </button><OpenReaderButton attachment={attach} compact /></span>
   );
 }
 
@@ -1285,7 +1287,7 @@ export const ChatMessage = memo(function ChatMessage({ msg, isLast, disabled, on
       <div className="flex items-start justify-end gap-2.5 px-1 py-3">
         <div className="flex max-w-[70%] flex-col items-end">
           <div className="rounded-[18px] rounded-tr-md bg-accent px-4 py-2.5 text-[14px] leading-[1.6] text-white shadow-sm">
-            <p className="whitespace-pre-wrap">{msg.content}</p>
+            {msg.readingPublication ? <div className="whitespace-pre-wrap"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="underline">{children}</a>, img: () => null }}>{msg.content}</ReactMarkdown></div> : <p className="whitespace-pre-wrap">{msg.content}</p>}
           </div>
           {msg.attachments && msg.attachments.length > 0 && (
             <div className="mt-1.5 flex flex-wrap justify-end gap-1.5">

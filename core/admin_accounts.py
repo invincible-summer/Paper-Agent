@@ -158,6 +158,9 @@ def _web_account_rows(project_root: Path) -> dict[str, dict]:
                 row["trace_ids"].add(tid)
 
     for row in rows.values():
+        from core.reading_store import owner_bytes
+        row["reading_bytes"] = owner_bytes(row["account_id"], project_root / "data" / "reading.db")
+        row["history_bytes"] += row["reading_bytes"]
         for aid in row["attachment_ids"]:
             for _fp, size in _attachment_file_sizes(project_root, str(aid)):
                 row["upload_count"] += 1
@@ -355,6 +358,8 @@ def delete_web_account_data(account_id: str,
             deleted_bytes += size
             deleted_files += 1
 
+    from core.reading_store import delete_owner
+    delete_owner(account_id, root / "data" / "reading.db")
     _delete_web_vectors(root, session_ids)
     return {"deleted": True, "account_id": account_id, "bytes": deleted_bytes,
             "files": deleted_files, "histories": len(owned)}

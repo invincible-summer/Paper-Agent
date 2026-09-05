@@ -272,6 +272,8 @@ def delete_chat_history(filename: str, user_id: str | None = None) -> bool:
     data = load_session(filename, user_id=user_id)
     ok = delete_session(filename, user_id=user_id)
     if ok and data and data.get("session_id"):
+        from core.reading_store import delete_session as delete_reading_session
+        delete_reading_session(str(data.get("user_id") or "local"), data["session_id"])
         try:
             from tools.storage.vectorstore import VectorStore
             VectorStore().delete_session(data["session_id"])

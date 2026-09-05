@@ -100,3 +100,6 @@ frontend/out/
 # Generic build artifacts
 /dist/
 /build/
+
+# Generated PDF.js worker/fonts (rebuilt by frontend predev/prebuild)
+/frontend/public/pdfjs/

@@ -13,6 +13,7 @@ interface ChatMessageDTO {
   role: "user" | "assistant";
   content: string;
   thinking?: string;
+  publication_id?: string;
   toolCalls?: { name: string; result?: unknown }[];
   attachments?: ChatAttachment[];
 }
@@ -39,6 +40,7 @@ function restoreChatState(
     role: m.role,
     content: m.content || "",
     thinking: m.thinking,
+    readingPublication: m.publication_id,
     toolCalls: (m.toolCalls as { name: string; result?: unknown }[] | undefined)
       ?.filter((tc) => tc.name !== "use_skill"),
     attachments: m.attachments,
@@ -64,6 +66,7 @@ function restoreChatState(
       role: "assistant",
       content: "",
       thinking: "",
+      readingPublication: undefined,
       toolCalls: [{ name: toolName, result: { [key]: value } }],
       attachments: undefined,
     });

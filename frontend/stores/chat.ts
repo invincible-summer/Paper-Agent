@@ -8,6 +8,7 @@ export interface ChatMessage {
   thinking?: string;
   toolCalls?: { name: string; result?: unknown }[];
   isStreaming?: boolean;
+  readingPublication?: string;
   // Per-message file metadata. User messages that carried an upload list the
   // attachments here so history renders file chips after reload.
   attachments?: ChatAttachment[];

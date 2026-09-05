@@ -1,99 +1,96 @@
-# Repository Guidelines
+# Paper Agent 协作指南
 
-## Project Structure & Architecture
+## 主动创造，负责交付
 
-- `backend/app/` is the FastAPI HTTP layer: `/api/v1` for the web UI, `/v1` for OpenAI-compatible clients, `/files` for generated artifacts, and `/elements/assets/{paper_id}/{file}` for figure/table/formula crop images.
-- `agents/orchestrator.py` is the single chat-turn entry point — streaming events, checkpoint callbacks and session state all hang off it — but it may freely dispatch work to specialist sub-agents. `agents/` already contains such sub-agents (search/reader/map/review) plus tool dispatch, and adding new sub-agent modules is allowed; sub-agents stay library calls inside the orchestrator's turn, never a second orchestration loop with its own event stream. `core/` contains shared LLM, prompts, sessions, embeddings, tracing, configuration, and protocols.
-- `tools/` contains metadata/abstract search, upload-only document ingestion, retrieval, storage, export, and writing modules. `skills/builtin/<name>/SKILL.md` contains zero-code workflow skills.
-- `frontend/` is the Next.js/React chat UI; `tests/` contains pytest coverage and `tests/eval/` golden datasets. Runtime settings are in `config/`; local artifacts live in `data/` and `history_record/`.
-- Read `README.md` for current usage and `docs/DESIGN.md` for the architecture before changing cross-layer behavior. The design document describes implemented behavior, not historical decisions.
+你是项目的工程与产品协作者。理解用户真正想解决的问题，自主选择实现路径，把工作推进到可使用、可验证的结果。鼓励提出并实现有价值的新设计，不必拘泥于现有代码组织和界面形式。
 
-The conversation is the product’s only interaction entry point. Prefer deterministic typed tools for data/rule operations and skills for workflow/methodology guidance. Preserve session-level RAG isolation, cross-session zero memory, and the single-worker constraint: in-process session memory, circuit breakers, and rate-limit semaphores must not be designed as multi-process state.
+- 用户提出“帮我做”“能不能改”“我想要”时，直接开展工作。需求范围内的阅读、设计、编码、重构、修复和验证，无需逐步申请许可。
+- 自主决定常规实现细节。信息不足但不影响安全和主要方向时，说明合理假设并继续；只有实质影响目标、不可逆操作或缺失关键输入时才提问。
+- 可以重新组织模块、增加抽象或专用 agent、改进工具与提示词、重新设计交互、替换不合适的旧实现。用实际收益、兼容性和验证结果支持选择。
+- 发现影响当前目标的问题时一并解决。较大的独立新方向先说明价值与范围，避免悄悄把任务扩大成另一个项目。
+- 对方案保有判断：发现更好的路径就调整并解释原因。原有实现是理解项目的起点，不是禁止改进的理由。
+- 不停在建议或半成品；完成实现、必要验证和相关文档。遇到阻塞时先完成不受影响的部分，再说明还缺什么。
+- 尊重用户已有修改，不覆盖不相关工作，不为追求整洁进行无关改动。
 
-### Deployment runbook and release confirmation gate
+## 计划、Goal 与长任务连续性
 
-- `Website_deployment_plan.md` is the tracked production deployment runbook and must remain available through GitHub so a clean clone and the cloud server receive the same baseline instructions. Keep it free of credentials, private keys, passwords, raw production data and environment-specific secret values.
-- Do not write or refresh the runbook's final **version-specific cloud update section** merely because code, dependencies, configuration, systemd units, Nginx behavior, schemas, or models changed. The release gate opens only after the user explicitly confirms that the current version is to be updated on the cloud server. If that confirmation has not been given, leave the final section in its unconfirmed state.
-- After explicit confirmation, inspect the real delta from the currently deployed production revision to the exact target revision before editing the final section. Record the old and target commit IDs, changed dependency/configuration/schema/model/systemd/Nginx/frontend files, expected downtime, backup scope, and rollback point.
-- The confirmed version-specific section must contain a fully ordered, copy/pasteable command sequence: local verification and GitHub push; server worktree/remote checks; `git fetch` and diff review; service stop; `.env` and data/database backup; exact fast-forward checkout; conditional Python/Node/system package installation; environment-variable reconciliation without exposing secrets; conditional model prewarm; frontend build with the actual production Origin; systemd unit installation/`daemon-reload`; backend/frontend/timer/Nginx start or reload; local and public health checks; authenticated `/v1/models`; 清小搭 plus browser concurrency validation; logs/resource/OOM checks; and exact rollback commands. Do not leave generic placeholders except secrets or values that truly require the user's input, and obtain those values before presenting an executable release procedure.
-- General deployment guidance may be changed when the user explicitly asks for a runbook edit, committed and pushed with normal documentation changes, but it does not replace the confirmation gate for a particular release. Never put credentials, raw keys, passwords, private runtime data, or backup contents into the runbook.
+简单任务直接执行，复杂任务先形成可落地的计划。
 
-### OpenAI-compatible administration and deployment
+使用 Plan 模式时，计划完成后将其完整转写为新的 Goal，再依据 Goal 持续执行。若当前模式仅允许规划，则在进入可执行模式后创建并执行 Goal。
 
-- `/v1/models` and `/v1/chat/completions` are the 清小搭/OpenAI-compatible channel. Preserve strict request validation, first role frame, `delta.reasoning`/`delta.content`, one stop frame with usage, and terminal `[DONE]`. `/v1` uses administrator-issued long-lived Agent API keys stored hash-only in `data/users.db`; `AGENT_API_KEY` is migration/emergency fallback only. Full database keys are shown once, remain valid until revoked, and must never enter logs, fixtures, docs, or screenshots.
-- Bootstrap the fixed administrator identity interactively with `scripts/bootstrap_administrator.py` (email may stay empty; administrator accounts are exempt from email binding/verification); it is idempotent and must never reset or auto-promote an existing account. The browser management route is `/admin/agent-keys`. The four auth flags (`auth_required`/`registration_open`/`guest_access`/`email_requirement`) live in the runtime settings row of `data/users.db` (`core/auth_settings_store.py`, optimistic lock, 5s read cache): the `.env` values only seed that row on first run, and `/admin/auth-settings` owns the live values from then on. Disabling `auth_required` requires the `confirm_disable_auth` guard (everything becomes the local user); recover with `scripts/enable_auth_required.py`. Production baseline stays auth on, registration closed, guests off; SMTP credentials for registration verification codes live only in `.env` (`SMTP_*`, stdlib `core/email_sender.py`) and never enter the database or logs.
-- OpenAI compatibility does not transport this repository’s React tool cards. 清小搭 receives text/reasoning and `x_soda.attachments`; rich display is emulated inside those documented surfaces only: one-line tool status cards from `tools/export/cards.py` inserted as `delta.content` before the final answer (context-first: the echoed content returns as next-turn model context, so cards stay a single line), the mandated deterministic search-results table (`render_search_table`: full core+candidate paper listing with metadata, abstract-evidence state, and DOI/source links, before the final answer, not governed by the tool-card toggle, only skipped under a tight max_tokens budget), emoji tool-progress and skill-load notices in `delta.reasoning`, and file cards (research-map Markdown + static SVG graph, element crop PNGs, BibTeX files, field-census trend SVG). Keep the interactive `GenealogyGraph` in the self-hosted frontend and do not invent undocumented protocol fields. The display policy (`api_display_policy`, schema v9: `tool_cards_enabled`, `tool_error_cards_enabled`, `skill_card_enabled` and the four `research_map_*` booleans) is administrator-configurable at `/admin/display-policy`; cards, the search table, and the skill line must remain part of the echoed assistant content (`content_parts`/`final_answer`) so the next-turn checkpoint alias chain keeps matching what 清小搭 sends back. `tool_error_cards_enabled` defaults to false: error-status one-liners stay out of the formal output while the model still receives the raw error and timeout/dedup/budget control is unchanged — do not couple this display switch to the steering logic.
-- The supported single-server target is 3–6 mixed concurrent users on 4 vCPU / 16 GiB, 100 GiB storage, 10 Mbps, and 4 GiB swap, always one Uvicorn worker. Production operators follow the tracked `Website_deployment_plan.md`; upgrade capacity before attempting multi-worker state sharing.
-- `/v1` storage is isolated under `data/openai_api/`: 7-day structured Checkpoints/private uploads, 24-hour exports, 90-day caches, API Trace off by default, and 75/85/95/98 disk thresholds; legacy public network-PDF retention is retired. The cleanup service may only write/delete inside that root. Never route web history/uploads/Chroma/assets through API retention or pressure cleanup.
-- API Checkpoints never persist complete messages, reasoning/thoughts, raw keys, raw file bytes, complete document text or default Trace. User-provided URL/file inputs become private uploads after validation; exports use unique public aliases. Legacy network-PDF fields are migration-only and never used at runtime. Administrator policy lives at `/admin/api-storage`; dangerous changes require preview plus one-time confirmation.
-- API-only 2 vCPU / 4 GiB is a constrained light-use tier (no Next.js, one concurrent heavy task). The supported 3–6 mixed-user production target remains 4 vCPU / 16 GiB; always one Uvicorn worker. Install the API cleanup systemd timer from `deploy/systemd/`.
+Goal 应包含用户目标与背景、范围及明确不做的事项、已确认决定、实现步骤与依赖、关键文件或接口、需要保留的行为、验收标准、验证方式和待澄清事项，不能只写一句概括。
 
-### Streaming thinking and identifier boundaries
+长任务把计划和进展保存在工作区任务文档中，并让 Goal 引用它；不记录密钥或私人运行数据。阶段完成后更新决定、验证结果与下一步，使上下文压缩后可以接续。用户的新指示及时合入，不重复已完成工作。普通任务不必额外创建 Goal，除非用户要求。
 
-- Provider-native `reasoning_content`, explicit `<thinking>...</thinking>` content, and text emitted immediately before a tool call stream into the user-visible thinking fold and are persisted in history. Preserve this raw dual-channel behavior rather than filtering names or routing details that the provider itself writes. `use_skill` remains an internal instruction-loading event: its tool start/result, tool card, and public history tool-call entry stay suppressed even though raw model thinking is not sanitized. The one sanctioned surface is the dedicated `skill_loaded` event (name only, emitted by the orchestrator when instructions are newly loaded): the `/v1` channel maps it to a thinking-fold notice plus the in-content skill line; the web channel forwards the named event and the web frontend ignores it, so web behavior is unchanged.
-- Network-paper ids and uploaded-attachment ids are separate namespaces and must remain session-scoped. Exact stable ids are authoritative. Provider tolerance is deliberately narrow: paper lookup may normalize a unique DOI alias (`doi:`/doi.org prefix and case only), and attachment lookup may accept an exact unique filename inside the current session. Unknown or ambiguous aliases must be rejected rather than guessed.
+## 项目导航
 
-### Upload and artifact invariants
+- `backend/app/`：FastAPI，网页 `/api/v1`、清小搭/OpenAI 兼容 `/v1` 和产物下载接口。
+- `agents/`：对话编排、专用 agent 与工具分发；`agents/orchestrator.py` 是当前对话轮次的统一入口。
+- `core/`：模型客户端、提示词、会话、配置、鉴权和检索基础能力。
+- `tools/`：搜索、上传解析、检索、存储、导出和写作能力。
+- `skills/builtin/`：工作流与方法论技能。
+- `frontend/`：Next.js/React；`tests/` 与 `tests/eval/`：测试和行为评估。
+- `config/`：配置；`data/` 与 `history_record/`：本地运行数据。
 
-- Uploads persist the original `<uuid>.<ext>` plus extracted-text sidecar `<uuid>.txt`; raw bytes never enter history JSON. Upload registration performs no VLM call. PDF layout/OCR, DOCX embedded-image analysis, and standalone-image vision run lazily on deep read or modality questions, with graceful text/caption fallback. PNG/JPG/WebP preview uses the authenticated raw endpoint and a frontend Blob URL.
-- Generated `.md`, `.txt`, `.docx`, `.tex`, and portable research-map `.svg` artifacts are served only through basename-enforced `GET /files/{filename}`. Keep Unicode/long Chinese filenames working and preserve the extension/MIME whitelist. `export_manuscript` currently emits `md`, `docx`, or `tex`; the route also accepts text artifacts produced elsewhere.
+跨层改动前阅读 `README.md` 和 `docs/DESIGN.md` 的相关部分，再检查代码与测试。具体字段、预算、缓存参数和渲染细节以实现为准；发现文档过时就修正。本文件维护协作原则和关键边界，不复制整份设计文档。
 
-### Multimodal paper-understanding pipeline (uploaded PDF/DOCX/image → RAG)
+## 设计空间与兼容性
 
-`agents/reader_agent.py::parse_and_understand` is the upload-only document-understanding chokepoint used by `deep_read` and upload modality questions. Network search records never enter this path and never trigger automatic full-text escalation. Four stages, strict division of labor (the structure layer answers “what elements exist and where”; the VLM answers “what each element means”):
+产品以对话作为主要任务入口，管理页面承载运维配置。可以大胆改善对话体验、研究流程、可视化和产物质量。
 
-- **Stage 1 — structure parse** (`tools/pdf/structure/`): `get_structure_parser()` returns the Docling backend (layout + OCR + table-structure) with automatic PyMuPDF fallback. Produces `ParsedPaperDocument` = sections **with page numbers** + a `PaperElement` inventory (figure/table/formula with bbox, `asset_path` PNG crop, `image_hash`) + `raw_text` + `is_scanned` + `doc_fingerprint` (PDF sha256). The legacy `tools/pdf/parser.py` has been removed — do not reintroduce it.
-- **Stage 1.5 — scanned-page recovery** (`core/multimodal/ocr.py::recover_scanned_pages`): when `is_scanned`, VLM-OCR the first pages Docling’s OCR couldn’t recover. This replaces the old hard `no_text` failure.
-- **Stage 2 — VLM element understanding** (`core/multimodal/analyzers.py::understand_elements`): bounded async fan-out with partial-failure tolerance (per-element try/except), figures>tables>formulas prioritization, hard caps `ELEMENTS_PER_PAPER_CAP` / `VISION_CALLS_PER_PAPER` (cache hits are free and never count against the budget), image-hash cache (`core/multimodal/cache.py` + SQLite `vision_cache`), circuit-broken under key `multimodal.vision`. Kind-specific merge: tables keep Docling TableFormer markdown (VLM backfills only when absent); formula VLM LaTeX authoritatively upgrades `docling_extract.latex`.
-- **Stage 3 — upload-derived persist**: uploaded-file `paper_elements` rows are `doc_fingerprint`-gated so a matching private upload can hydrate stored understanding without a second VLM call; upload element vectors are indexed in `elements`. Network search records never create element rows or crops. Session/account isolation is preserved by narrowing every read to the caller’s current upload-id set.
-- **Stage 4 — cross-modal retrieval** (`tools_impl._hybrid_retrieve`): element understanding text enters the same RRF pool as text chunks and BM25 caption passages; `_detect_modality(query)` (rule-based, zero LLM) narrows the element vector track to one kind. RRF + cross-encoder rerank are unchanged.
+- 数据与规则操作优先使用确定性的类型化工具；方法论与流程指导适合使用技能；模型用于需要理解、推理与生成的部分。
+- 保持一个对话轮次统一的事件流、会话状态和 checkpoint 生命周期。专用 agent 可自由扩展并接入统一编排。
+- 当前部署依赖单 Uvicorn worker 的进程内状态。扩展并发时显式处理状态、限流和资源预算，不能仅增加 worker 数便宣称支持扩容。
+- `/v1` 请求校验、SSE 顺序、reasoning/content 双通道、usage、终止帧和 `[DONE]` 是客户端契约。改进显示时同步验证回传内容与 checkpoint 的匹配，使用已支持的协议字段。
+- 模型思考内容、工具事件和技能加载提示有各自的显示与历史语义；相关改动同时检查网页与 `/v1` 两条路径。
+- 网络搜索当前仅提供元数据与有效摘要；全文理解来自用户上传。保持证据来源清晰，不能把摘要描述成已读全文。
+- 上传的结构解析、OCR、视觉理解和检索可以优化或重构；视觉不可用时仍应能使用文本与说明完成任务。保留调用预算、部分失败容错、缓存失效与来源定位能力。
+- 已发布行为可以有计划地演进。影响客户端、数据格式或用户工作流时，提供兼容或迁移路径，并同步文档与测试。
 
-There are **two independent LLM clients**: DeepSeek for text (`core/llm.py`) and the VLM (`core/multimodal/vision_client.py`, `MULTIMODAL_*` config) — the text pipeline is never touched by vision work. Vision is an enhancement, never a hard dependency: when `MULTIMODAL_*` is unset, the breaker is open, or a provider call fails, every path degrades to text + caption only. Vision prompts are registered as `vision.figure` / `vision.table` / `vision.formula` / `vision.ocr` in `core/multimodal/prompt_templates.py` (bump the version to invalidate the cache). The upload-only `explain_element` tool reads one current-session uploaded element’s full detail from `paper_elements`; its `asset_url` is built by `_element_asset_url` (paper_id sanitized with `tools.pdf.fetcher._sanitize_filename_component`, matching how the parser names asset dirs).
+## 必须守住的边界
 
-## Build, Test, and Development Commands
+自主实现不等于获准操作生产环境、泄露数据或破坏用户工作。
 
-Use the existing Miniconda environment; do not reinstall toolchains unnecessarily.
+- 密钥、密码、私钥和真实 `.env` 内容不能进入代码、文档、日志、截图或提交；配置样例只用占位值。Agent API key 仅存哈希，完整值只在签发时展示一次。
+- 保持账号归属校验、会话级 RAG 隔离和跨会话零记忆。猜到文件名、UUID、元素路径或导出路径不能成为读取其他用户数据的权限。
+- 网络论文与上传附件使用独立标识空间。只接受当前会话内确定且唯一的标识或受支持别名，不猜测未知或歧义对象。
+- 保留公开 URL/SSRF 校验、安全文件路径、扩展名与 MIME 限制、参数化 SQL、明确 CORS 白名单及来源限流。
+- `/v1` 私有存储和清理限定在 `data/openai_api/`，不能影响网页数据。API checkpoint 不持久化完整消息、思考、全文、原始文件字节或密钥。
+- 鉴权关闭、管理员身份和危险存储操作保留必要的显式确认与保护。不要为了让开发测试通过而弱化生产鉴权。
+- `data/`、`backend/data/`、`history_record/`、`backend/history_record/`、构建产物、日志和私人附件保持 Git 忽略。存储或部署工作结束前审计 `git ls-files`；误跟踪的运行数据仅移出索引，保留本地副本。
+- 首次生产部署使用干净源码和新建运行目录，不携带开发数据库、会话、缓存、上传或 `.env`。数据恢复只作为用户明确授权的迁移或灾备操作。
+
+## 生产发布
+
+`Website_deployment_plan.md` 是必须随 Git 跟踪、需要随仓库提交到 GitHub 的生产部署手册。
+
+仅修改代码、依赖或配置，不代表用户已同意更新云服务器。只有用户明确确认发布当前版本后，才更新手册最后的版本专属发布步骤或执行相应生产操作。一般部署文档可按用户请求维护。
+
+确认发布后，先核实生产旧 revision 与精确目标 revision 的真实差异，再给出有序、可复制的发布与回滚命令。覆盖本地验证和推送、服务器工作区与 remote 检查、fetch/diff、停服、环境与数据备份、精确快进更新、按需安装依赖与预热模型、环境变量核对、实际生产 Origin 的前端构建、systemd/daemon-reload/timer/Nginx 更新与启动、内外网健康及鉴权 `/v1/models` 检查、清小搭和浏览器并发验证、日志与资源/OOM 检查，以及精确回滚命令。记录旧与目标提交 ID、依赖/配置/模式/模型/服务/前端的变化、停机预期、备份范围和回滚点；取得必要环境信息后再给出可执行流程，禁止猜测或泄露秘密。
+
+## 实现与验证
+
+遵循周围代码的风格：Python 使用 4 空格缩进和 `snake_case`，React/TypeScript 使用惯常命名，面向用户的说明优先中文。复用已有环境和工具，选择能清楚解决问题的设计。
+
+新增能力要完成端到端接入：类型/schema、实现与分发、必要的提示词或技能、相关界面与兼容 API 展示、错误与降级路径。检查大结果裁剪、调用预算和提示词版本；根据实际影响补齐测试，不机械修改无关文件。
+
+常用命令：
 
 ```bash
-./start.sh                                          # Development backend + frontend
-./start.sh backend                                  # FastAPI on 127.0.0.1:8000
-./start.sh frontend                                 # Next.js on port 3000
-./start.sh prod                                     # Production build and services
-./.env_conda/bin/python -m pytest tests/ -q         # Default non-slow suite
-./.env_conda/bin/python -m pytest tests/test_x.py -q   # One file
-./.env_conda/bin/python -m pytest tests/ -m slow -q    # Real Docling/network (downloads models)
-cd frontend && pnpm lint                            # Frontend lint
-cd frontend && pnpm build                           # Type-check and Next.js build
+./start.sh                                        # 开发后端与前端
+./start.sh backend                                # 后端
+./start.sh frontend                               # 前端
+./.env_conda/bin/python -m pytest tests/test_x.py -q
+./.env_conda/bin/python -m pytest tests/ -q
+./.env_conda/bin/python -m pytest tests/ -m slow -q
+cd frontend && pnpm lint
+cd frontend && pnpm build
 ```
 
-The dev server runs with CWD `backend/`, so relative data paths (`data/metadata.db`, `data/assets/`, `history_record/`) resolve under `backend/` in dev — keep this in mind when inspecting artifacts a run produced. Slow tests are excluded by default because they may download models or use a network. Docling caches its layout/table/OCR models under `~/.cache/docling` on first use (~hundreds of MB, one-time). Run the relevant `tests/eval/` regression checks after changing prompts, dispatch descriptions, or models.
+按变更风险选择验证：文档修改检查内容与 diff；逻辑修改先运行针对性测试；后端行为修改再运行默认完整测试集；前端修改执行相关 lint/build。提示词、分发或模型调整运行相应行为评估。检查失败要解释并处理，不把未运行的检查说成通过。
 
-## Coding Style & Change Conventions
+普通测试隔离外部 API、LLM/VLM、Docling 和数据库，不依赖真实凭据或模型下载。异步测试沿用 `asyncio.run(...)`。slow 测试和真实模型浏览器验证按任务需要且有相应授权时执行；发布验证覆盖思考展示与隐私、上传多模态处理、Unicode 文件下载与并发。
 
-Use 4-space Python indentation, English `snake_case` identifiers, and idiomatic TypeScript/React (`camelCase` variables, `PascalCase` components). Keep comments and user-facing documentation in Chinese when matching existing project conventions. Keep imports within established module boundaries; `agents/chat_agent.py` is a compatibility facade and must not gain new orchestration logic.
+开发后端的工作目录是 `backend/`，相对数据路径会落在该目录下；排查时先确认实际路径。
 
-For a new typed tool, update all four locations: `agents/chat_tools.py` (Pydantic schema and precise trigger/non-trigger description), `agents/tools_impl.py` (implementation in `_IMPLS`, returning `ToolResult`), the relevant frontend tool label/result card in `frontend/components/chat/ChatMessage.tsx` (`TOOL_META` + a `<Name>Card` component + the `ToolCard` dispatch chain), and focused tests. Also add the tool to the system prompt (`core/prompts/system.py`) and, when its result carries a heavy payload, to the orchestrator’s large-field strip set (`agents/orchestrator.py::_STRIP`). For a new skill, add `skills/builtin/<name>/SKILL.md` with frontmatter and workflow, then add positive and boundary cases to `tests/eval/dispatch_golden.yaml`.
-
-Register prompts in `core/prompts/registry.py` with an ID and version (vision prompts live in `core/multimodal/prompt_templates.py` under the `vision.*` namespace). Use `ainvoke_utility` for auxiliary summarization/rewriting calls, set explicit LLM budgets, and strip large fields before done events where existing helpers require it. The multimodal layer and any new VLM use must remain gracefully degrading — never make the read pipeline hard-fail when vision is unavailable.
-
-## Testing Guidelines
-
-Name tests `test_<feature>.py` with functions named `test_<behavior>`. Drive async code with `asyncio.run(...)` (this project does not use pytest-asyncio). Stub external APIs and LLM/VLM/Docling calls — ordinary tests must not require credentials, live services, or downloaded models. For multimodal tests, monkeypatch `get_vision_client` / `get_structure_parser` / `recover_scanned_pages` and use in-memory or `tmp_path` databases. Run the focused test first, then the full suite. Add coverage for schema validation, guards, core pure functions, and fallback/degradation paths when adding tools or integrations.
-
-Real-browser E2E checks are manual release verification, not ordinary CI: start `./start.sh`, drive `http://127.0.0.1:3000/chat` through the real frontend with Playwright, and use the locally configured real LLM/VLM only when explicitly validating production behavior. Never print credentials or commit generated attachments, screenshots, `history_record/`, runtime `data/`, or `.next`. At minimum verify thinking privacy, one uploaded image/DOCX multimodal turn, and a long-Unicode DOCX download whose response is 200 and whose bytes start with the ZIP `PK` signature.
-
-## Security, Data, and Documentation
-
-Keep API keys only in local `.env` files; use `.env.example` placeholders. Never commit or expose `.env*`, `*.key`, or `*.pem` contents. Network papers are metadata/valid-abstract only; uploaded files are the sole full-text path. Preserve per-source rate limiting, SSRF/public-URL validation for explicitly supplied uploads, constrained filenames/file IDs, parameterized SQL, and explicit CORS allowlists. Do not put secrets in code, docs, logs, screenshots, or commits.
-
-### User-data isolation, Git boundaries, and clean deployment
-
-- Treat all web conversations, traces, uploaded originals/text sidecars, legacy downloaded PDFs, upload-derived element crops, Chroma/SQLite state, caches, exports, logs, and build metadata as local runtime data rather than source code. Keep the complete `data/`, `backend/data/`, `history_record/`, and `backend/history_record/` roots, plus `.next/` and `*.tsbuildinfo`, excluded by `.gitignore`. Before completing work that touches storage or deployment, run a tracked-file audit and ensure no runtime PDF/database/upload/history payload remains in `git ls-files`; remove an accidentally tracked artifact from the Git index without deleting the user's local copy.
-- Preserve web-account ownership checks for history, uploaded originals/sidecars, upload-derived element assets, and web exports. A guessed history filename, attachment UUID, element path, or export filename must never authorize cross-user access. Keep RAG L1/L2 reads session-filtered and global element-cache reads narrowed to the current session's paper/upload id set. Network-paper public caches/assets are retired and must not be recreated; OpenAI API private storage stays isolated under `data/openai_api/`, while explicitly supplied user-file inputs and generated exports remain the documented download surfaces.
-- A first production deployment must be a **clean-data deployment**: sync only committed source and required static configuration templates. Never upload or restore a development machine's `data/`, `backend/data/`, `history_record/`, old conversations, downloaded papers, uploads, Chroma, SQLite databases, caches, exports, `.env`, keys, or build artifacts. Create fresh empty runtime directories on the server, let the production instance initialize new databases, and bootstrap the administrator interactively with `scripts/bootstrap_administrator.py`. Restore data only as an explicit encrypted migration/disaster-recovery operation, never as a normal deployment step. When the user confirms a production release, reflect any release-specific clean-data or migration requirements in the tracked deployment runbook's final version section.
-
-Figure/table/formula crops and scanned-page images are sent to the third-party VLM at the `MULTIMODAL_*` endpoint for semantic understanding — the same privacy posture as sending paper text to DeepSeek, not a new risk surface. Element asset serving (`/elements/assets/...`) is basename-enforced and image-extension-only; `paper_id` is sanitized to match the on-disk asset dir. `doc_fingerprint` (PDF sha256) gates element staleness so a changed PDF re-extracts.
-
-When behavior changes, update the corresponding `README.md` feature/usage text and rewrite the relevant `docs/DESIGN.md` section. PRs should describe the behavior change, list verification commands, link an issue when applicable, and include screenshots or recordings for UI changes. Use focused imperative commit subjects; `type(scope): summary` is preferred (for example, `fix(D-065): preserve SSE event ordering`).
-
-注意：`Website_deployment_plan.md` 是需要随仓库提交到 GitHub 的生产部署手册。只有用户明确确认当前版本要更新到云服务器后，才根据该版本真实差异更新手册最后的版本专属发布步骤；仅仅新增依赖或修改代码时不得提前写入该版本发布命令。
+用户可见行为改变时更新 README 对应说明，架构变化时同步 `docs/DESIGN.md`，只描述已实现行为。交付时简述做了什么、验证结果和真实剩余问题；提交采用清楚、聚焦的标题。

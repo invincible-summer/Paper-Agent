@@ -7,7 +7,7 @@ import { authHeaders } from "./auth";
 // backend directly; non-streaming REST calls use the Next.js proxy.
 // On a deployed server set NEXT_PUBLIC_BACKEND_URL to the backend's public
 // origin; the fallback matches the backend's default port (8000).
-const BACKEND_DIRECT =
+export const BACKEND_DIRECT =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
   (typeof window !== "undefined"
    ? `${window.location.protocol}//${window.location.hostname}:8000`
@@ -29,8 +29,11 @@ export interface ChatHistoryItem {
 export const listChatHistory = () =>
   fetch(`${BASE}/chat/history`, { headers: authHeaders() }).then(r => r.json()) as Promise<{ records: ChatHistoryItem[] }>;
 
-export const loadChatHistory = (filename: string) =>
-  fetch(`${BASE}/chat/history/${filename}`, { headers: authHeaders() }).then(r => r.json());
+export const loadChatHistory = async (filename: string) => {
+  const response = await fetch(`${BASE}/chat/history/${encodeURIComponent(filename)}`, { headers: authHeaders(), cache: "no-store" });
+  if (!response.ok) throw new Error(`无法读取对话（${response.status}）`);
+  return response.json();
+};
 
 // D-087: an attachment uploaded via the chat paperclip. The full extracted
 // text lives server-side at data/uploads/<id>.txt; only metadata is sent.

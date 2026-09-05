@@ -115,6 +115,21 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(None)
         tool_call_active = False
 
         async def run_chat():
+            nonlocal tool_call_active, session
+            from core.web_session_lock import locked_session
+            lock_key = req.history_filename or session.session_id
+            async with locked_session(uid, lock_key):
+                if req.history_filename:
+                    fresh = load_chat_history(req.history_filename, user_id=uid)
+                    if fresh is None:
+                        await progress_queue.put(("event", {"type": "error", "message": "会话已删除，请创建新对话。"}))
+                        await progress_queue.put(("finished", None))
+                        return
+                    session = fresh
+                    session.owner_id = uid
+                await run_locked_chat()
+
+        async def run_locked_chat():
             nonlocal tool_call_active
             async for event in chat_turn(req.message, session, progress_cb,
                                           attachments=request_attachments,
@@ -171,6 +186,8 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(None)
                 elif kind == "progress":
                     msg = {"type": "tool_progress", "message": payload}
                     yield f"event: tool_progress\ndata: {json.dumps(msg, ensure_ascii=False)}\n\n"
+                elif kind == "finished":
+                    break
                 elif kind == "saved":
                     done_data = {
                         "type": "history_saved",
@@ -292,27 +309,31 @@ def load_chat_record(filename: str, authorization: str | None = Header(None),
 
 
 @router.delete("/history/{filename:path}")
-def delete_chat_record(filename: str, authorization: str | None = Header(None),
+async def delete_chat_record(filename: str, authorization: str | None = Header(None),
                             x_guest_id: str | None = Header(None)):
     """Delete a chat history record via the unified store (D-071)."""
     from agents.chat_agent import delete_chat_history
     user = current_user(authorization, x_guest_id)
     safe_name = Path(filename).name
-    if not delete_chat_history(safe_name, user_id=user["id"]):
-        raise HTTPException(404, "Chat history not found")
+    from core.web_session_lock import locked_session
+    async with locked_session(user["id"], safe_name):
+        if not delete_chat_history(safe_name, user_id=user["id"]):
+            raise HTTPException(404, "Chat history not found")
     return {"status": "deleted", "filename": safe_name}
 
 
 @router.patch("/history/{filename:path}")
-def rename_chat_record(filename: str, req: ChatRenameRequest,
+async def rename_chat_record(filename: str, req: ChatRenameRequest,
                        authorization: str | None = Header(None),
                             x_guest_id: str | None = Header(None)):
     """Rename a chat history record's title (D-071). Filename unchanged."""
     from agents.chat_agent import rename_chat_history
     user = current_user(authorization, x_guest_id)
     safe_name = Path(filename).name
-    if not rename_chat_history(safe_name, req.title, user_id=user["id"]):
-        raise HTTPException(404, "Chat history not found")
+    from core.web_session_lock import locked_session
+    async with locked_session(user["id"], safe_name):
+        if not rename_chat_history(safe_name, req.title, user_id=user["id"]):
+            raise HTTPException(404, "Chat history not found")
     return {"status": "renamed", "filename": safe_name, "title": req.title}
 
 

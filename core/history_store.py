@@ -23,7 +23,9 @@ Everything here is pure-Python filesystem ops; no network, no LLM.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -116,6 +118,22 @@ def _owner_of(data: dict[str, Any]) -> str:
     return str(data.get("user_id") or "local")
 
 
+def _write_record(fp: Path, data: dict[str, Any]) -> None:
+    """先写同目录临时文件再原子替换，并发读取始终看到完整 JSON。"""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=fp.parent,
+                                         prefix=".history-", suffix=".tmp", delete=False) as output:
+            temporary = Path(output.name)
+            json.dump(data, output, ensure_ascii=False, indent=2)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, fp)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def save_session(data: dict[str, Any], filename: str | None = None,
                  user_id: str = "local") -> str:
     """Persist `data` as one session record. Returns the bare filename.
@@ -159,7 +177,7 @@ def save_session(data: dict[str, Any], filename: str | None = None,
         merged["timestamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
     merged["timestamp_updated"] = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    fp.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_record(fp, merged)
     return fp.name
 
 
@@ -241,7 +259,7 @@ def rename_session(filename: str, new_title: str,
         return None
     data["title"] = title
     data["timestamp_updated"] = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_record(fp, data)
     return data
 
 
@@ -280,4 +298,4 @@ def add_trace_id(filename: str, trace_id: str) -> None:
     if trace_id not in ids:
         ids.append(trace_id)
         data["trace_ids"] = ids
-        fp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_record(fp, data)

@@ -6,7 +6,7 @@
 
 ## 1. 系统概述
 
-本地运行的论文调研智能体（个人工具 + 可接入清小搭广场），前后端分离，**对话是唯一交互入口**。覆盖研究前期全流程：
+本地运行的论文调研智能体（个人工具 + 可接入清小搭广场），前后端分离，**对话组织研究任务，阅研工作台承载原文阅读**。覆盖研究前期全流程：
 
 ```
 研究目标 → 理解意图 → 拆解研究方向 → 多源检索 → 语义相关性重排
@@ -18,7 +18,7 @@
 ### 部署形态
 
 - 后端：FastAPI（`backend/app`），uvicorn 单 worker（进程内状态约束，见 §8）
-- 前端：Next.js 14（`frontend/`），`/chat` 单页，`/` 重定向到 `/chat`
+- 前端：Next.js 14（`frontend/`），`/chat` 对话页与 `/chat/{session_id}/read/{attachment_id}` 阅读页，`/` 重定向到 `/chat`
 - 启动：`./start.sh`（开发）/ `./start.sh prod`（生产构建）
 - 密钥：LLM API Key 全程在本机 `.env`，不出本机
 
@@ -29,7 +29,7 @@
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ 入口层                                                        │
-│  浏览器: Next.js /chat（唯一页面）                             │
+│  浏览器: Next.js /chat + 阅研 PDF 阅读工作台                             │
 │  清小搭: POST /v1/chat/completions（OpenAI 兼容，真流式 SSE）  │
 └──────────────┬───────────────────────────────────────────────┘
 ┌──────────────▼───────────────────────────────────────────────┐
@@ -149,6 +149,8 @@ Paper_Agent/
 | `/chat/file/{file_id}` | GET | 取回提取文本（file_id 正则校验，>200k 字符截断） |
 | `/chat/file/{file_id}/raw` | GET | 当前用户上传图片的鉴权预览端点；file_id 仅接受 UUID，且只以内联方式返回 PNG/JPG/JPEG/WebP 原件，不开放任意文件读取 |
 | `/health` | GET | 健康检查（含 api_configured） |
+
+**会话写入协调**：网页聊天在 `core/web_session_lock.py` 的 owner + history filename 单 worker 异步锁内重新加载并保存历史；阅读问答、发现发布、附件绑定和普通历史重命名/删除使用同一锁，防止旧快照覆盖新消息。锁条目弱引用回收。历史 JSON 先写同目录临时文件再原子替换，并发读取不会读到半写内容。
 
 **流式取消**：客户端断开（前端 AbortController）时取消后台任务，且不保存当轮历史（干净回滚）。
 
@@ -532,7 +534,7 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 ## 11. 前端（`frontend/`）
 
-- **chat 单页**：`/` 重定向 `/chat`；思考折叠块、按工具类型渲染的结果卡片、文件上传 chip、复制/重新生成/停止。`use_skill` 完全是内部操作，不显示工具卡，也不会从旧历史恢复出来。
+- **chat 对话页**：`/` 重定向 `/chat`；思考折叠块、按工具类型渲染的结果卡片、文件上传 chip、复制/重新生成/停止。`use_skill` 完全是内部操作，不显示工具卡，也不会从旧历史恢复出来。
 - **附件 UI**：选择器与拖拽支持 PDF/DOCX/TEX/TXT/MD/BIB/PNG/JPG/JPEG/WebP。统一 `ChatAttachment` 保存扩展名、MIME、`multimodal_status`、元素数与预览 URL；图片通过带 `authHeaders()` 的 fetch 取 Blob URL 预览并在卸载时 revoke，不把受保护资源裸塞进 `<img src>`。右侧栏和消息 chip 显示“待按需理解 / 已理解 · N 个元素 / 视觉不可用 · 已降级 / 旧附件 · 仅文本”等状态，图片不显示误导性的“0 字”。deep_read/ask_papers 返回后会原位更新附件状态。
 - **流式渲染性能**：历史消息 `ChatMessage` 全部 `React.memo`（流式期间 msg 身份不变 → 旧消息零重渲染，markdown 不重解析）；thinking/answer delta 先入缓冲，**60ms 合帧**（~16 次/秒）再写 store（per-token setState 是卡顿与"成段吐出"的根因）；终态事件立即冲刷保证时序；`handleSend`/`handleRegenerate` 经 `useChatStore.getState()` 取 action 保持引用稳定（memo 不被回调身份击穿）；自动滚动仅在用户已贴近底部（240px）时触发。
 - **谱系图 v2**（`components/GenealogyGraph.tsx` + `lib/genealogy-layout.ts`，纯 SVG 零依赖）：**确定性布局纯函数**（输入确定→输出确定，Node 单测覆盖）：920px 固定内容宽、年份等距刻度（按年份序号而非真实间隔）、泳道按簇大小降序且高度随该簇最高 (簇,年) 桶自适应——每篇论文都是独立节点，绝不折叠为 "+N" 聚合点，同桶按被引降序堆叠、节点半径 3 档；920×560 固定视口 + fit-to-view + 滚轮缩放/拖拽平移/复位。**详情面板**（点节点展开）：元信息+角色徽章+摘要片段、引用关系双列（它引用的/被引用的，仅库内，点击跳转聚焦）、原文链接、**「深问这篇」**（经 `stores/ui.ts` 的 composerDraft 预填聊天输入框，打通图谱→RAG 问答）。**思想源流高亮**：聚焦节点时祖先引用链按年份渐变粗细（越老越粗）。顶部簇筛选 chips/候选集/语义边开关，底部谱系摘要统计行（核心/候选/引用边/语义边/奠基/桥梁）。
@@ -544,10 +546,25 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 ---
 
+### 11.1 阅研工作台（`components/reader/`）
+
+`OpenReaderButton` 从当前会话 PDF 附件卡、文件列表或“只上传”后的附件打开新标签页。`POST /api/v1/reader/open` 校验原件 owner 并绑定到已有/新草稿会话，返回稳定 `session_id` 和历史 filename；不发送模型消息。新绑定的附件标记 `rag_index_pending`，首次真正对话时再补会话向量索引。
+
+`ReadingWorkbench` 使用独立三栏布局：目录/标记、原版 PDF、助读/发现；面板可折叠，小屏改为抽屉。`PdfReader` 通过 PDF.js 6.3.289 的 worker 在客户端渲染原始页面，以 text layer 提供选择，以受限链接层支持外部 HTTP(S) 和 PDF 内部跳转；不运行文档脚本。原始公式、表格和图片不重排。可见页及相邻区域才分配画布，离开时取消 render 并释放；连续、单页、宽屏双页三种视图共享缩放与页码。worker/CMaps/fonts/WASM 在 `predev`/`prebuild` 从同版本依赖准备，Node 要求 >=22.13，生成资源不提交。
+
+`/api/v1/reader/sessions/{sid}/documents/{aid}` 下提供 manifest/content、position、anchors、notes 和 actions。所有操作同时校验账号、会话成员关系和上传原件所有者；PDF 原件返回 `application/pdf`、private/no-store 与 nosniff，不使用公开文件别名。manifest 由 PyMuPDF 确定性获取页数、内置书签及 SHA-256，并按路径/stat 缓存；不等 Docling 或 VLM。锚点包含文档 fingerprint、物理页号、原文 quote 与未旋转页面归一化矩形；服务端核对选文与该页文本并重新定位矩形。无法精确定位时仅页级引用；文本未匹配拒绝伪造来源，文档版本变化使旧锚点失效。当前跨页选择要求分段，扫描页无文字选择层时提供页级问答。
+
+`reading.translate` v1 通过 `ainvoke_utility`，输入选文、页内上下文、主题、目标语言及本篇术语表，输出上限 3000 tokens；保留数字、变量、引用和限定条件，解释与译文区分。翻译缓存按账号/会话/文档、fingerprint、上下文、术语、模型与提示词版本隔离，每篇保留最近 100 项；同一翻译并发去重。选择变化取消前次操作，“划选即译”在选区稳定 450ms 后触发。助读 Markdown 支持受限 KaTeX（trust=false、展开/尺寸有界），外部图片不自动加载。
+
+`reading.ask` v1 复用 `orchestrator.chat_turn`，创建拥有原 session RAG id、单篇附件和独立阅读消息的临时 ChatSession；工具 schema 与执行时双重限制为 ask_papers/deep_read/explain_element/exhibit_index，不能发起网络检索或写作导出。选文与页内证据仅参与本轮，不直接复制到持久线程消息；线程存用户问题、正式答复和思考。讨论围绕固定锚点，最多 40 轮；前端显示原文位置，页码引用可跳转。研究问答使用主会话写锁并可见排队，取消/错误/未完成答复不提交半轮；成功的线程与 request-id 幂等结果同 SQLite 事务写入，重试缓存只存线程引用而非复制整段历史。外层 SSE 150 秒上限，问答执行预算 100/120 秒，10 秒心跳；模型失败不影响原文和笔记。
+
+笔记区分作者引文、助读解释与用户判断，支持分类、编辑和删除；position/notes 用 expected_version 乐观锁防覆盖，冲突保留草稿。用户点击“带回对话”后，在主聊天加入带 publication_id 的来源卡，不启动额外模型轮次；同一笔记版本重复发布幂等。主聊天只为这些来源卡渲染可点击 Markdown，普通用户消息仍按原有文本显示。BroadcastChannel 通知原聊天在空闲时刷新，保留输入草稿；独立打开时用 `/chat?history=...` 返回所属对话。主聊天 source link 可打开原文锚点。工作台不修改 `/v1` 显示协议。
+
 ## 12. 持久化与安全
 
 - **会话**：`history_record/chat_<ts>_<slug>.json`（basename 防穿越；重命名只改文件内 title）；trace JSONL 于 `history_record/trace/`。
 - **SQLite**（`data/metadata.db`）：papers 元数据、summary_cache、全局 `paper_elements` 与 `vision_cache`——均是降本/重建缓存，不作为跨会话记忆授权。`doc_fingerprint` 防止 PDF 变化后复用陈旧元素。`data/users.db`：多用户账号与令牌（§3.4）。
+- **阅读数据**（`data/reading.db`，`core/reading_store.py`）：Web 会话映射与 position/anchor/note/thread/action/translation 记录，按 owner/session/document/kind/id 组合主键收敛；外键级联清理、版本锁、secure_delete。普通会话删除清理关联阅读数据；管理员账号数据删除清理该 owner，阅读 JSON 占用计入账号历史统计。它不是跨会话知识库，也不进入 API retention/checkpoint。
 - **向量库**（`data/chroma/`）：L1/L2 会话隔离索引 + L3 全局 elements 缓存；L3 检索由调用方当前 paper/upload ID 集合强制收窄。
 - **上传/产物**：`data/uploads/` 同时保存用户原件 `<uuid>.<ext>` 与文本 sidecar `<uuid>.txt`；`data/assets/upload_*` 保存上传图片/DOCX media 等元素资产；`data/exports/` 保存 `.md/.txt/.docx/.tex` 产物。原始 bytes 从不写入历史 JSON。Web 上传与导出额外写入被 `.gitignore` 排除的 `data/web_artifacts.db` 所有者索引；原始文件、文本、图像资产和导出文件读取前按当前账号/游客身份校验。OpenAI API 私有文件不进入这些目录，而是按会话隔离在 `data/openai_api/`；API 公共别名保持短期可公开读取。
 - **安全**：SSRF 防护（URL 下载统一走公网校验）、API URL 下载/私有保存默认且最大 200 MiB（管理员可下调）/20 MiB 网页直传上限、UUID/file_id/basename/后缀收敛、图片 raw endpoint 仅开放安全 raster MIME、CORS 显式白名单（永不 `*`）、/v1 Bearer 常量时间比较、Web 附件/导出/上传元素按所有者校验、错误不回显 OS 路径；口令 PBKDF2 加盐哈希、令牌只存哈希、历史按账号隔离（§3.4）。图表裁图与扫描页在按需理解时会发送到配置的第三方 VLM，未配置时优雅降级。

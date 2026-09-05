@@ -162,3 +162,17 @@ def test_list_sessions_includes_source_field(monkeypatch, tmp_path):
     hs.save_session({"topic": "x"})
     items = hs.list_sessions()
     assert "source" in items[0]
+
+
+def test_atomic_write_failure_keeps_previous_history(tmp_path, monkeypatch):
+    import core.history_store as hs
+    monkeypatch.setattr(hs, "HISTORY_DIR", tmp_path)
+    filename = hs.save_session({"topic": "before"})
+    def fail_replace(*_):
+        raise OSError("simulated storage failure")
+    monkeypatch.setattr(hs.os, "replace", fail_replace)
+    import pytest
+    with pytest.raises(OSError):
+        hs.save_session({"topic": "after"}, filename=filename)
+    assert hs.load_session(filename)["topic"] == "before"
+    assert not list(tmp_path.glob(".history-*.tmp"))

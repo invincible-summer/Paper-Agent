@@ -1,6 +1,8 @@
 "use client";
 import { useRef, useEffect, useState } from "react";
 import { ArrowUp, Square, Paperclip, X, FileText, Image as ImageIcon, Loader2 } from "lucide-react";
+import { OpenReaderButton } from "@/components/reader/OpenReaderButton";
+import { useChatStore } from "@/stores/chat";
 import { useUIStore } from "@/stores/ui";
 
 import type { ChatAttachment } from "@/lib/chat-api";
@@ -116,6 +118,21 @@ export function ChatInput({
     setUploadError(null);
   };
 
+  const prepareReading = async () => {
+    setUploading(true); setUploadError(null);
+    try {
+      const result = await uploadFiles(pending);
+      const ok = result.filter(a => !a.error);
+      setUploaded(u => [...u, ...ok]);
+      setPending(files => files.filter((_file, index) => result[index]?.error));
+      const chat = useChatStore.getState();
+      chat.setSessionAttachments([...chat.sessionAttachments, ...ok]);
+      const failures = result.filter(a => a.error);
+      if (failures.length) setUploadError(failures.map(a => `${a.filename}: ${a.error}`).join("；"));
+    } catch (e) { setUploadError(e instanceof Error ? e.message : "上传失败"); }
+    finally { setUploading(false); }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -224,6 +241,12 @@ export function ChatInput({
               </span>
               );
             })}
+          </div>
+        )}
+        {(pending.some(f => /\.pdf$/i.test(f.name)) || uploaded.some(a => /\.pdf$/i.test(a.filename))) && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+            {pending.length > 0 && <button type="button" disabled={disabled || uploading} onClick={() => void prepareReading()} className="rounded-md border border-accent/20 px-3 py-1 text-accent">{uploading ? "正在准备…" : "只上传，开始阅读"}</button>}
+            {uploaded.map(a => <OpenReaderButton key={a.id} attachment={a} />)}
           </div>
         )}
         {uploadError && <p className="mt-1 text-[11px] text-red-500/70">{uploadError}</p>}

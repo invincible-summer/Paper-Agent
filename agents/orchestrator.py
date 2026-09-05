@@ -405,6 +405,7 @@ async def chat_turn(
     checkpoint_cb: Callable[..., Any] | None = None,
     execution_context: TurnExecutionContext | None = None,
     system_instructions: str = "",
+    allowed_tools: frozenset[str] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Run one conversation turn, yielding SSE events.
 
@@ -448,6 +449,12 @@ async def chat_turn(
         if new_attachments:
             await run_cpu_bound(_index_attachments, session, new_attachments)
             await _run_checkpoint_callback(checkpoint_cb, session)
+    # 工作台绑定附件不运行模型/向量索引；首次真正对话时补齐会话 RAG。
+    pending_reading = [a for a in session.attachments if a.get("rag_index_pending")]
+    if pending_reading:
+        await run_cpu_bound(_index_attachments, session, pending_reading)
+        for attachment in pending_reading:
+            attachment["rag_index_pending"] = False
     turn_attachments = [
         {key: a.get(key, "" if key not in {"char_count", "element_count"} else 0)
          for key in ("id", "filename", "char_count", "ext", "media_type",
@@ -482,7 +489,10 @@ async def chat_turn(
         session.messages.append({"role": "user", "content": user_message,
                                  "attachments": turn_attachments})
 
-    react_llm = llm.bind_tools(get_chat_tools())
+    available_tools = get_chat_tools()
+    if allowed_tools is not None:
+        available_tools = [tool for tool in available_tools if tool.name in allowed_tools]
+    react_llm = llm.bind_tools(available_tools)
     all_tool_calls: list[dict] = []
     executed_tool_count = 0
     seen_calls: set[str] = set()
@@ -698,7 +708,11 @@ async def chat_turn(
             if not is_internal_skill:
                 public_batch_index += 1
             call_key = make_call_key(tool_name, tool_args)
-            if call_key in seen_calls:
+            if allowed_tools is not None and tool_name not in allowed_tools:
+                entries.append({"tc": tc, "result": err(tool_name, ErrorCode.VALIDATION_ERROR,
+                                "此阅读线程不允许调用该工具。请围绕当前上传论文回答。"),
+                                "internal": is_internal_skill, "batch_index": current_public_index})
+            elif call_key in seen_calls:
                 result = err(
                     tool_name, ErrorCode.VALIDATION_ERROR,
                     "本轮已用相同参数调用过该工具。请改变做法：换关键词、换工具，"
