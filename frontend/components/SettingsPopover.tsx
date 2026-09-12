@@ -1,17 +1,16 @@
 "use client";
 import { useState, useEffect } from "react";
-import { Settings, Globe, Key, Sun, Moon, Check } from "lucide-react";
+import { Settings, Globe, Key, Check } from "lucide-react";
 import { useChatStore } from "@/stores/chat";
 import { t } from "@/lib/i18n";
+import { useOverlayFocus } from "./useOverlayFocus";
 
 export function SettingsPopover() {
-  const { uiLang, setUiLang, theme, setTheme } = useChatStore();
+  const { uiLang, setUiLang } = useChatStore();
   const [open, setOpen] = useState(false);
   const [apiConfigured, setApiConfigured] = useState<boolean | null>(null);
   const lang = uiLang;
-
-  // Theme class is synced by hydratePrefs() (AppShell mount) and setTheme();
-  // the inline script in layout.tsx applies the persisted theme pre-hydration.
+  const ref = useOverlayFocus(open, () => setOpen(false));
 
   // Health check on open (self-contained; no global store needed).
   useEffect(() => {
@@ -26,99 +25,70 @@ export function SettingsPopover() {
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-surface"
+        aria-label={t("settings", lang)}
+        title={t("settings", lang)}
+        className="btn-ghost"
       >
         <Settings className="h-4 w-4" />
-        {t("settings", lang)}
       </button>
 
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full z-50 mt-2 w-72 rounded-xl border border-border bg-bg p-4 shadow-lg">
-            {/* Theme */}
-            <div className="mb-4">
-              <label className="mb-1 flex items-center gap-1.5 text-sm font-semibold">
-                {theme === "dark" ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
-                {t("settings_theme", lang)}
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setTheme("light")}
-                  className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium ${
-                    theme === "light" ? "bg-accent text-white" : "border border-border hover:bg-surface"
-                  }`}
-                >
-                  <Sun className="h-3.5 w-3.5" />
-                  {t("settings_theme_light", lang)}
-                </button>
-                <button
-                  onClick={() => setTheme("dark")}
-                  className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium ${
-                    theme === "dark" ? "bg-accent text-white" : "border border-border hover:bg-surface"
-                  }`}
-                >
-                  <Moon className="h-3.5 w-3.5" />
-                  {t("settings_theme_dark", lang)}
-                </button>
-              </div>
-            </div>
-
-            <hr className="my-3 border-border" />
-
+          <div ref={ref} role="dialog" aria-modal="true" aria-label={t("settings", lang)} tabIndex={-1} className="settings-dialog fixed bottom-20 left-16 z-50 w-64 max-w-[calc(100vw-32px)] rounded-[9px] border border-border-light bg-surface p-4 shadow-lg max-lg:left-4">
             {/* Language */}
             <div className="mb-4">
-              <label className="mb-1 flex items-center gap-1.5 text-sm font-semibold">
-                <Globe className="h-4 w-4" />
+              <label className="label-text mb-1 flex items-center gap-1.5">
+                <Globe className="h-3.5 w-3.5" />
                 {t("settings_language", lang)}
               </label>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={() => setUiLang("en")}
-                  className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium ${
-                    uiLang === "en" ? "bg-accent text-white" : "border border-border hover:bg-surface"
+                  className={`flex items-center justify-center gap-1.5 rounded-[7px] px-3 py-2 text-[12px] font-medium ${
+                    uiLang === "en" ? "bg-accent text-white" : "border border-border hover:bg-surface-hover hover:text-accent"
                   }`}
                 >
-                  {uiLang === "en" && <Check className="h-3.5 w-3.5" />}
+                  {uiLang === "en" && <Check className="h-3 w-3" />}
                   English
                 </button>
                 <button
                   onClick={() => setUiLang("zh")}
-                  className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium ${
-                    uiLang === "zh" ? "bg-accent text-white" : "border border-border hover:bg-surface"
+                  className={`flex items-center justify-center gap-1.5 rounded-[7px] px-3 py-2 text-[12px] font-medium ${
+                    uiLang === "zh" ? "bg-accent text-white" : "border border-border hover:bg-surface-hover hover:text-accent"
                   }`}
                 >
-                  {uiLang === "zh" && <Check className="h-3.5 w-3.5" />}
+                  {uiLang === "zh" && <Check className="h-3 w-3" />}
                   中文
                 </button>
               </div>
             </div>
 
-            <hr className="my-3 border-border" />
+            <hr className="my-3 border-border-light" />
 
             {/* API Key */}
-            <div>
-              <label className="mb-1 flex items-center gap-1.5 text-sm font-semibold">
-                <Key className="h-4 w-4" />
+            <div className="mb-4">
+              <label className="label-text mb-1 flex items-center gap-1.5">
+                <Key className="h-3.5 w-3.5" />
                 {t("settings_api_key", lang)}
               </label>
               {apiConfigured === null ? (
-                <p className="text-sm text-muted">…</p>
+                <p className="hint-text">…</p>
               ) : apiConfigured ? (
-                <p className="text-sm text-success">{t("settings_api_configured", lang)}</p>
+                <p className="hint-text text-success">{t("settings_api_configured", lang)}</p>
               ) : (
-                <p className="text-sm text-muted">{t("settings_api_not_configured", lang)}</p>
+                <p className="hint-text">{t("settings_api_not_configured", lang)}</p>
               )}
             </div>
 
-            <hr className="my-3 border-border" />
+            <hr className="my-3 border-border-light" />
 
             {/* Data source attribution (CC-BY / CC-BY-SA obligations) */}
             <div>
-              <label className="mb-1 text-sm font-semibold">
+              <label className="label-text mb-1 block">
                 {t("settings_data_sources", lang)}
               </label>
-              <p className="text-[11px] leading-relaxed text-muted">
+              <p className="text-[12px] leading-relaxed text-muted">
                 {t("settings_data_sources_body", lang)}
               </p>
             </div>

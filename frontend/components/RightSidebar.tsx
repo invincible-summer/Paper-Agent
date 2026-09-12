@@ -48,8 +48,9 @@ export function RightSidebar() {
     : activeFileMeta;
 
   return (
-    <aside className="flex h-full w-[340px] shrink-0 flex-col border-l border-border-light bg-surface/50">
-      <div className="flex items-center gap-1 px-2 py-2.5">
+    <aside className="resource-panel flex h-full w-[320px] shrink-0 flex-col border-l border-border-light bg-surface">
+      <div className="studio-panel-heading"><span>资料与阅读</span><small>当前会话</small></div>
+      <div className="resource-tabs flex items-center gap-1 px-2 py-2.5">
         <TabButton active={rightPanelTab === "workbench"} onClick={() => setRightPanelTab("workbench")}><BookOpen className="h-3.5 w-3.5" />工作台</TabButton>
         <TabButton active={rightPanelTab === "viewer"} onClick={() => setRightPanelTab("viewer")}>
           {selectedMeta && isImageAttachment(selectedMeta)
@@ -63,7 +64,7 @@ export function RightSidebar() {
         </TabButton>
         <button
           onClick={() => setRightSidebarOpen(false)}
-          className="ml-auto flex h-7 w-7 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-fg"
+          className="ml-auto flex h-7 w-7 items-center justify-center rounded-[7px] text-muted transition-colors hover:bg-surface-hover hover:text-fg"
           title="收起右边栏"
         >
           <PanelRightClose className="h-4 w-4" />
@@ -72,10 +73,10 @@ export function RightSidebar() {
 
       <div className="flex-1 overflow-hidden">
         {rightPanelTab === "workbench" ? <div className="h-full overflow-y-auto p-5">
-          <div className="mb-6 rounded-2xl border border-accent/15 bg-accent-soft/30 p-5"><BookOpen className="mb-3 h-7 w-7 text-accent" /><h2 className="font-serif text-xl text-fg">阅研 · 阅读空间</h2><p className="mt-2 text-xs leading-6 text-muted">回到原文，圈定图表、划选句子，将理解留下，带着发现继续对话。</p></div>
-          <h3 className="mb-3 text-xs font-medium text-fg-secondary">选择当前会话论文</h3>
-          {files.filter(f => /\.pdf$/i.test(f.filename) || f.ext === "pdf").map(f => <article key={f.id} className="mb-3 rounded-xl border border-border-light bg-surface p-4"><h4 className="mb-3 break-words text-sm text-fg">{f.filename}</h4><OpenReaderButton attachment={f} /></article>)}
-          {!files.some(f => /\.pdf$/i.test(f.filename) || f.ext === "pdf") && <p className="rounded-xl border border-dashed border-border-light p-4 text-xs leading-6 text-muted">当前会话还没有 PDF。在对话中添加论文后，它会出现在这里；无需先向 AI 发送问题。</p>}
+          <div className="mb-6 rounded-[9px] border border-accent/15 bg-accent-soft/30 p-5"><BookOpen className="mb-3 h-7 w-7 text-accent" /><h2 className="font-serif text-xl text-fg">阅研 · 阅读空间</h2><p className="mt-2 text-[12px] leading-6 text-muted">回到原文，圈定图表、划选句子，将理解留下，带着发现继续对话。</p></div>
+          <h3 className="mb-3 text-[12px] font-medium text-fg-secondary">选择当前会话论文</h3>
+          {files.filter(f => /\.pdf$/i.test(f.filename) || f.ext === "pdf").map(f => <article key={f.id} className="mb-3 rounded-[7px] border border-border-light bg-surface p-4"><h4 className="mb-3 break-words text-[13px] text-fg">{f.filename}</h4><OpenReaderButton attachment={f} /></article>)}
+          {!files.some(f => /\.pdf$/i.test(f.filename) || f.ext === "pdf") && <p className="rounded-[7px] border border-dashed border-border-light p-4 text-[12px] leading-6 text-muted">当前会话还没有 PDF。在对话中添加论文后，它会出现在这里；无需先向 AI 发送问题。</p>}
         </div> : rightPanelTab === "viewer" ? (
           <FileViewer fileMeta={selectedMeta} />
         ) : (
@@ -92,7 +93,7 @@ function TabButton({ active, onClick, children }: {
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
+      className={`flex items-center gap-1.5 rounded-[7px] px-2.5 py-1.5 text-[13px] font-medium transition-colors ${
         active ? "bg-surface text-fg shadow-sm" : "text-muted hover:text-fg-secondary hover:bg-surface-hover/60"
       }`}
     >
@@ -161,9 +162,9 @@ function FileViewer({ fileMeta }: { fileMeta: ChatAttachment | null }) {
   if (!fileId || !fileMeta) {
     return (
       <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-        <FileText className="mb-3 h-8 w-8 text-muted/30" />
+        <FileText className="mb-3 h-8 w-8 text-muted" />
         <p className="text-[13px] text-muted">点击对话中的文件图标</p>
-        <p className="mt-1 text-[11px] text-muted/60">或从上传列表选择文件</p>
+        <p className="mt-1 text-[12px] text-muted">或从上传列表选择文件</p>
       </div>
     );
   }
@@ -175,7 +176,7 @@ function FileViewer({ fileMeta }: { fileMeta: ChatAttachment | null }) {
       <div className="flex h-full flex-col items-center justify-center px-6 text-center">
         <FileWarning className="mb-3 h-8 w-8 text-red-400/60" />
         <p className="text-[13px] text-muted">无法加载文件</p>
-        <p className="mt-1 text-[11px] text-muted/60">{error}</p>
+        <p className="mt-1 text-[12px] text-muted">{error}</p>
       </div>
     );
   }
@@ -187,18 +188,18 @@ function FileViewer({ fileMeta }: { fileMeta: ChatAttachment | null }) {
           {image ? <ImageIcon className="h-3.5 w-3.5 shrink-0 text-accent" /> : <FileText className="h-3.5 w-3.5 shrink-0 text-accent" />}
           <span className="truncate text-[13px] font-semibold text-fg" title={fileMeta.filename}>{fileMeta.filename}</span>
         </div>
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted">
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-muted">
           <span>{attachmentMetaLabel(fileMeta)}</span>
           <OpenReaderButton attachment={fileMeta} />
-          {!image && data?.truncated && <span className="text-amber-500/80">（已截断）</span>}
+          {!image && data?.truncated && <span className="text-warning/80">（已截断）</span>}
         </div>
       </div>
       {image ? (
         <div className="flex flex-1 items-center justify-center overflow-auto bg-surface-hover/20 p-3">
           {imageUrl ? (
             // eslint-disable-next-line @next/next/no-img-element -- authenticated blob URL cannot use Next image optimization.
-            <img src={imageUrl} alt={fileMeta.filename} className="max-h-full max-w-full rounded-lg object-contain shadow-sm" />
-          ) : <p className="text-[12px] text-muted">图片预览不可用</p>}
+            <img src={imageUrl} alt={fileMeta.filename} className="max-h-full max-w-full rounded-[7px] object-contain shadow-sm" />
+          ) : <p className="text-[13px] text-muted">图片预览不可用</p>}
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto px-3.5 py-3">
@@ -216,15 +217,15 @@ function FileList({ files, activeId }: { files: ChatAttachment[]; activeId: stri
   if (files.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-        <Files className="mb-3 h-8 w-8 text-muted/30" />
+        <Files className="mb-3 h-8 w-8 text-muted" />
         <p className="text-[13px] text-muted">当前会话暂无上传文件</p>
-        <p className="mt-1 text-[11px] text-muted/60">支持 PDF、DOCX、TEX、TXT、MD、BIB 及 PNG/JPG/WebP</p>
+        <p className="mt-1 text-[12px] text-muted">支持 PDF、DOCX、TEX、TXT、MD、BIB 及 PNG/JPG/WebP</p>
       </div>
     );
   }
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-border-light px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted">本会话上传文件</div>
+      <div className="border-b border-border-light px-3 py-2 text-[12px] font-semibold uppercase tracking-wider text-muted">本会话上传文件</div>
       <div className="flex-1 overflow-y-auto px-2 py-2">
         <div className="space-y-1">
           {files.map((f) => {
@@ -235,14 +236,14 @@ function FileList({ files, activeId }: { files: ChatAttachment[]; activeId: stri
               <div key={f.id}>
               <button
                 onClick={() => { openFile(f); setRightPanelTab("viewer"); }}
-                className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-surface-hover/60 ${active ? "bg-surface-hover/60" : ""}`}
+                className={`flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-2 text-left transition-colors hover:bg-surface-hover/60 ${active ? "bg-surface-hover/60" : ""}`}
               >
-                <Icon className={`h-3.5 w-3.5 shrink-0 ${active ? "text-accent" : "text-muted/50"}`} />
+                <Icon className={`h-3.5 w-3.5 shrink-0 ${active ? "text-accent" : "text-muted"}`} />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[12.5px] text-fg-secondary" title={f.filename}>{f.filename}</div>
-                  <div className="text-[10px] text-muted/60">{attachmentMetaLabel(f)}</div>
+                  <div className="text-[12px] text-muted">{attachmentMetaLabel(f)}</div>
                 </div>
-                <ExternalLink className="h-3 w-3 shrink-0 text-muted/30" />
+                <ExternalLink className="h-3 w-3 shrink-0 text-muted" />
               </button>
               <div className="px-3 pb-2"><OpenReaderButton attachment={f} /></div>
               </div>

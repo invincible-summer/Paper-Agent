@@ -1,17 +1,20 @@
 "use client";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { PanelLeftOpen, PanelRightOpen, Plus, BookOpen } from "lucide-react";
-import { Nav } from "./Nav";
+import { AppRail } from "./AppRail";
 import { Sidebar } from "./Sidebar";
 import { RightSidebar } from "./RightSidebar";
 import { useUIStore } from "@/stores/ui";
 import { useChatStore } from "@/stores/chat";
 import { useAuthStore } from "@/stores/auth";
+import { useOverlayFocus } from "./useOverlayFocus";
+import { MobileNavigation } from "./AppRail";
+import { Button, IconButton } from "./WorkbenchUI";
 
-// Three-column shell: left sidebar (history, collapsible), main content,
-// right sidebar (file viewer + upload list, collapsible). Both sidebars
-// persist open/closed to localStorage.
+// Shell for the chat page: top-level app rail + left history sidebar + chat
+// content + right file panel. Both sidebars persist open/closed to
+// localStorage.
 //
 // Auth (multi-user deployments): guest mode is configurable. When production
 // disables guests, unauthenticated browsers are redirected to /login; otherwise
@@ -33,6 +36,16 @@ export function AppShell({
   const guestAccess = useAuthStore((s) => s.guestAccess);
   const token = useAuthStore((s) => s.token);
   const router = useRouter();
+  const [width, setWidth] = useState(1440);
+  useEffect(() => {
+    const resize = () => {
+      setWidth(window.innerWidth);
+      useUIStore.getState().hydrate();
+    };
+    setWidth(window.innerWidth);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
 
   // Apply persisted preferences AFTER mount — stores start with deterministic
   // defaults so the server HTML and the first client render always match.
@@ -57,71 +70,38 @@ export function AppShell({
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-bg">
-      {leftSidebarOpen ? (
-        <Sidebar onNewSession={onNewSession} onSelectHistory={onSelectHistory} onCollapse={toggleLeftSidebar} />
-      ) : (
-        <CollapsedRail side="left" onExpand={toggleLeftSidebar} onNewSession={onNewSession} />
-      )}
+    <div className="studio-shell">
+      <AppRail />
+      {leftSidebarOpen && <ShellPanel side="left" modal={width < 1024} onClose={toggleLeftSidebar}>
+        <Sidebar onNewSession={onNewSession} onSelectHistory={filename => { onSelectHistory(filename); if (width < 1024) useUIStore.getState().setLeftSidebarOpen(false); }} onCollapse={toggleLeftSidebar} />
+      </ShellPanel>}
 
-      <div className="flex flex-1 flex-col overflow-hidden">
-        <Nav />
+      <div className="studio-main">
+        <header className="studio-toolbar">
+          <MobileNavigation />
+          {!leftSidebarOpen && <IconButton label="展开左边栏" onClick={toggleLeftSidebar}><PanelLeftOpen size={17} /></IconButton>}
+          <div className="min-w-0 flex-1"><h1 className="studio-heading">研究对话</h1><p className="studio-caption">PAPER AGENT · RESEARCH STUDIO</p></div>
+          <Button aria-label="新对话" onClick={onNewSession}><Plus size={15} /><span className="max-sm:hidden">新对话</span></Button>
+          <Button aria-label="打开工作台空间" aria-expanded={rightSidebarOpen} onClick={() => { useUIStore.getState().setRightPanelTab("workbench"); useUIStore.getState().setRightSidebarOpen(!rightSidebarOpen); }}><BookOpen size={15} /><span className="max-sm:hidden">资料与阅读</span><PanelRightOpen size={14} /></Button>
+        </header>
         {children}
       </div>
 
-      {rightSidebarOpen ? (
+      {rightSidebarOpen && <ShellPanel side="right" modal={width < 1280} onClose={toggleRightSidebar}>
         <RightSidebar />
-      ) : (
-        <CollapsedRail side="right" onExpand={toggleRightSidebar} />
-      )}
+      </ShellPanel>}
     </div>
   );
 }
 
-function CollapsedRail({
-  side,
-  onExpand,
-  onNewSession,
-}: {
-  side: "left" | "right";
-  onExpand: () => void;
-  onNewSession?: () => void;
+function ShellPanel({ side, modal, onClose, children }: {
+  side: "left" | "right"; modal: boolean; onClose: () => void; children: React.ReactNode;
 }) {
-  if (side === "left") {
-    return (
-      <aside className="flex h-full w-12 shrink-0 flex-col items-center gap-2 border-r border-border-light bg-surface/50 py-3">
-        <div className="flex h-6 w-6 items-center justify-center rounded-lg bg-accent-soft/50">
-          <BookOpen className="h-3.5 w-3.5 text-accent" />
-        </div>
-        {onNewSession && (
-          <button
-            onClick={onNewSession}
-            className="flex h-8 w-8 items-center justify-center rounded-lg border border-border-light text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg"
-            title="新对话"
-          >
-            <Plus className="h-4 w-4" />
-          </button>
-        )}
-        <button
-          onClick={onExpand}
-          className="mt-auto flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-fg"
-          title="展开左边栏"
-        >
-          <PanelLeftOpen className="h-4 w-4" />
-        </button>
-      </aside>
-    );
-  }
-  return (
-    <aside className="flex h-full w-12 shrink-0 flex-col items-center gap-2 border-l border-border-light bg-surface/50 py-3">
-      <button
-        onClick={onExpand}
-        className="flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-fg"
-        title="展开右边栏"
-      >
-        <PanelRightOpen className="h-4 w-4" />
-      </button>
-      <button aria-label="打开工作台空间" title="打开工作台空间" onClick={() => { useUIStore.getState().setRightPanelTab("workbench"); useUIStore.getState().setRightSidebarOpen(true); }} className="flex flex-col items-center gap-2 rounded-lg px-1 py-3 text-accent hover:bg-surface-hover"><BookOpen className="h-4 w-4" /><span className="text-[10px] [writing-mode:vertical-rl]">工作台</span></button>
-    </aside>
-  );
+  const ref = useOverlayFocus(modal, onClose);
+  return <>
+    {modal && <button className="studio-scrim" aria-label="关闭面板" onClick={onClose} tabIndex={-1} />}
+    <div ref={ref} tabIndex={-1} role={modal ? "dialog" : undefined} aria-modal={modal || undefined}
+      aria-label={side === "left" ? "会话历史" : "当前会话资料"}
+      className={`studio-panel studio-panel-${side} ${modal ? "studio-drawer" : ""}`}>{children}</div>
+  </>;
 }

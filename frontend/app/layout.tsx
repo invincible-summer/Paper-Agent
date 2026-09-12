@@ -2,17 +2,14 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Paper Agent — Literature Survey & Review",
-  description: "AI-powered literature survey, review, and research direction advisor.",
+  title: "阅研 · Paper Agent — 研究工作台",
+  description: "检索文献、阅读原文、记录发现，在同一张研究桌上推进思考与写作。",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="zh" suppressHydrationWarning>
       <body className="min-h-screen bg-bg text-fg antialiased">
-        <script dangerouslySetInnerHTML={{
-          __html: `(function(){try{var p=new URLSearchParams(location.search);var t=p.get('theme');if(!t){t=localStorage.getItem('paper-agent-theme');}if(!t){t='light';}if(t==='dark'){document.documentElement.classList.add('dark');}}catch(e){}})()`
-        }} />
         {children}
       </body>
     </html>

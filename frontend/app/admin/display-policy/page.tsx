@@ -6,7 +6,7 @@ import {
   AlertTriangle, BookMarked, FileText, ImageIcon, LayoutGrid, ListChecks, Loader2, RotateCcw, Save,
 } from "lucide-react";
 import {
-  AdminHeader, AdminSection, AdminToggle, HelpModal, InfoButton, type HelpEntry,
+  AdminHeader, AdminSection, AdminSettingRow, AdminToggle, HelpModal, InfoButton, type HelpEntry,
 } from "@/components/admin/AdminUI";
 import {
   AdminApiError, getDisplayPolicy, updateDisplayPolicy,
@@ -188,48 +188,36 @@ export default function DisplayPolicyAdminPage() {
         subtitle="控制 /v1 通道的状态行、技能提示与引用关系图谱附件；不影响自有前端。"
         onRefresh={() => void refresh()} refreshing={loading} />
 
-      {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
-      {saved && !dirty && <div className="rounded-lg border border-success/40 bg-success/10 p-3 text-sm text-success">策略已保存，下一条 /v1 消息立即生效。</div>}
+      {error && <div className="rounded-[7px] border border-error/40 bg-error/10 p-3 text-[13px] text-error">{error}</div>}
+      {saved && !dirty && <div className="rounded-[7px] border border-success/40 bg-success/10 p-3 text-[13px] text-success">策略已保存，下一条 /v1 消息立即生效。</div>}
 
       <AdminSection title="工具状态行" icon={<ListChecks className="h-5 w-5 text-accent" />}
         info={<InfoButton onClick={() => setHelpItem(HELP.toolCards)} label="工具状态行说明" />}>
-        <div className="flex items-center justify-between gap-4">
-          <p className="text-sm text-muted">
+        <AdminSettingRow label="正文工具状态行" description={<p className="max-w-2xl text-[13px] text-muted">
             每个工具完成时在回复正文顶部显示一行状态摘要（如「🔎 文献检索 · 核心集 12 篇 / 候选 13 篇」）；
             思考折叠中的进度提示与文件附件始终保留，检索结果的完整论文表格不受此开关控制。
-          </p>
-          <AdminToggle checked={draft.tool_cards_enabled} label="工具状态行"
-            onChange={(next) => setDraft({ ...draft, tool_cards_enabled: next })} />
-        </div>
+          </p>} control={<AdminToggle checked={draft.tool_cards_enabled} label="工具状态行" onChange={(next) => setDraft({ ...draft, tool_cards_enabled: next })} />} />
       </AdminSection>
 
       <AdminSection title="工具错误提示" icon={<AlertTriangle className="h-5 w-5 text-warning" />}
         info={<InfoButton onClick={() => setHelpItem(HELP.toolErrors)} label="工具错误提示说明" />}>
-        <div className="flex items-center justify-between gap-4">
-          <p className="text-sm text-muted">
+        <AdminSettingRow label="工具错误提示" description={<p className="max-w-2xl text-[13px] text-muted">
             工具出错或超时时在正文顶部显示「⚠️ …」错误摘要行。默认关闭：正式输出不显示任何工具错误提示；
             错误仍会交给模型处理并在回答文字中说明，超时与调用控制逻辑不变。
-          </p>
-          <AdminToggle checked={draft.tool_error_cards_enabled} label="错误状态卡片"
-            onChange={(next) => setDraft({ ...draft, tool_error_cards_enabled: next })} />
-        </div>
+          </p>} control={<AdminToggle checked={draft.tool_error_cards_enabled} label="错误状态卡片" onChange={(next) => setDraft({ ...draft, tool_error_cards_enabled: next })} />} />
       </AdminSection>
 
       <AdminSection title="技能加载提示" icon={<BookMarked className="h-5 w-5 text-accent" />}
         info={<InfoButton onClick={() => setHelpItem(HELP.skill)} label="技能加载提示说明" />}>
-        <div className="flex items-center justify-between gap-4">
-          <p className="text-sm text-muted">
+        <AdminSettingRow label="技能加载提示" description={<p className="max-w-2xl text-[13px] text-muted">
             技能加载时在回复正文顶部显示「━━ 📘 技能 · 名称 ━━」提示行；思考折叠中的提示始终保留。
-          </p>
-          <AdminToggle checked={draft.skill_card_enabled} label="正文技能提示行"
-            onChange={(next) => setDraft({ ...draft, skill_card_enabled: next })} />
-        </div>
+          </p>} control={<AdminToggle checked={draft.skill_card_enabled} label="正文技能提示行" onChange={(next) => setDraft({ ...draft, skill_card_enabled: next })} />} />
       </AdminSection>
 
       <AdminSection title="引用关系图谱组合输出" icon={<ImageIcon className="h-5 w-5 text-accent" />}
         info={<InfoButton onClick={() => setHelpItem(HELP.researchMap)} label="图谱组合输出说明" />}>
         <div className="space-y-4">
-          <p className="text-sm text-muted">
+          <p className="text-[13px] text-muted">
             四个开关彼此独立。美化 SVG、正文 Mermaid、可执行 HTML 中至少启用一种；Markdown
             是可单独关闭的附加说明，不承担唯一图形展示职责。
           </p>
@@ -243,7 +231,7 @@ export default function DisplayPolicyAdminPage() {
             <AdminToggle checked={draft.research_map_markdown_enabled} label="附加 Markdown 说明"
               onChange={(next) => setMapToggle("research_map_markdown_enabled", next)} />
           </div>
-          <div className="grid gap-2 text-xs leading-5 text-muted sm:grid-cols-2">
+          <div className="grid gap-2 text-[12px] leading-5 text-muted sm:grid-cols-2">
             <p>SVG：自包含矢量图；Mermaid：不支持原生执行时显示源码，预算不足会整块省略。</p>
             <p>HTML：清小搭提供下载卡片，下载后在浏览器执行，不在主站同源页面内联。</p>
             <p>Markdown：普通关系清单，不嵌 Mermaid，可复制论文、DOI/来源和聚合成员。</p>
@@ -255,7 +243,7 @@ export default function DisplayPolicyAdminPage() {
       <AdminSection title="BibTeX 导出格式" icon={<FileText className="h-5 w-5 text-accent" />}
         info={<InfoButton onClick={() => setHelpItem(HELP.bibtexExport)} label="BibTeX 导出格式说明" />}>
         <div className="space-y-3">
-          <p className="text-sm text-muted">
+          <p className="text-[13px] text-muted">
             清小搭侧无法下载 .bib 格式附件，参考文献导出可借助 .md 格式传递；.md 文件内容与
             .bib 完全一致，改回扩展名即可使用。GB/T 7714（.txt）与自有 Web 前端不受此设置影响。
           </p>
@@ -265,7 +253,7 @@ export default function DisplayPolicyAdminPage() {
               return (
                 <button key={key} type="button" role="radio" aria-checked={active}
                   onClick={() => setDraft({ ...draft, bibtex_export_mode: key })}
-                  className={`h-10 rounded-lg border px-3 text-sm transition-colors ${
+                  className={`h-10 rounded-[7px] border px-3 text-[13px] transition-colors ${
                     active ? "border-accent bg-accent/10 font-medium text-accent"
                       : "border-border-light text-fg-secondary hover:bg-surface-hover hover:text-fg"}`}>
                   {name}
@@ -273,7 +261,7 @@ export default function DisplayPolicyAdminPage() {
               );
             })}
           </div>
-          <p className="text-xs leading-5 text-muted">
+          <p className="text-[12px] leading-5 text-muted">
             {BIBTEX_EXPORT_MODES.find((m) => m.key === draft.bibtex_export_mode)?.hint}
             {" "}模式不为「仅导出 .bib」时，正式输出最后一行会提示用户手动转存为 .bib。
           </p>
@@ -281,21 +269,21 @@ export default function DisplayPolicyAdminPage() {
       </AdminSection>
     </div>
 
-    <div className="sticky bottom-0 -mx-4 border-t border-border-light bg-bg/90 px-4 backdrop-blur sm:-mx-8 sm:px-8">
+    <div className="admin-save-bar">
       <div className="flex flex-wrap items-center justify-between gap-3 py-3">
-        <div className="flex items-center gap-2 text-xs text-muted">
+        <div className="flex items-center gap-2 text-[12px] text-muted">
           <InfoButton onClick={() => setHelpItem(HELP.save)} label="保存与版本说明" />
           <span>版本 v{policy.version} · 上次由 {policy.updated_by} 更新 · 保存后立即生效</span>
         </div>
         <div className="flex gap-2">
           {dirty && (
             <button onClick={() => setDraft({ ...policy })}
-              className="flex h-9 items-center gap-1.5 rounded-lg border border-border-light px-4 text-sm text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg">
+              className="flex h-9 items-center gap-1.5 rounded-[7px] border border-border-light px-4 text-[13px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg">
               <RotateCcw className="h-4 w-4" />重置修改
             </button>
           )}
           <button disabled={working || !dirty} onClick={() => void save()}
-            className="flex h-9 items-center gap-1.5 rounded-lg bg-accent px-5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">
+            className="flex h-9 items-center gap-1.5 rounded-[7px] bg-accent px-5 text-[13px] font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">
             {working ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
             保存策略
           </button>

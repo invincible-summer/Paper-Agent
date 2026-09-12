@@ -3,6 +3,9 @@ import { useState, useEffect, memo } from "react";
 import { OpenReaderButton } from "@/components/reader/OpenReaderButton";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import { Brain, ChevronDown, ChevronRight, Loader2, Sparkles, Search, Map, BookOpen, FileText, Download, Copy, Check, RefreshCw, Route, ExternalLink, Quote, ClipboardCheck, FileCheck, FileDown, ShieldCheck, FileInput, Images, Image as ImageIcon, BarChart3, ZoomIn } from "lucide-react";
 import { MessageSquareQuote } from "lucide-react";
 import { useUIStore } from "@/stores/ui";
@@ -88,16 +91,16 @@ function CardHeader({ name, result, expanded, onToggle, meta_text }: {
   return (
     <button
       onClick={onToggle}
-      className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left transition-colors hover:bg-surface-hover/60"
+      className="flex w-full items-center gap-2.5 rounded-[7px] px-3 py-2 text-left transition-colors hover:bg-surface-hover/60"
     >
       <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent-soft/60">
         <Icon className="h-3.5 w-3.5 text-accent" />
       </div>
       <span className="text-[13px] font-medium text-fg-secondary">{meta.label}</span>
       <StatusDot status={statusOf(result)} />
-      {meta_text && <span className="truncate text-xs text-muted">{meta_text}</span>}
-      {r.error && <span className="truncate text-xs text-error/70">{r.error.message}</span>}
-      <ChevronRight className={`ml-auto h-3.5 w-3.5 shrink-0 text-muted/50 transition-transform ${expanded ? "rotate-90" : ""}`} />
+      {meta_text && <span className="truncate text-[12px] text-muted">{meta_text}</span>}
+      {r.error && <span className="truncate text-[12px] text-error/70">{r.error.message}</span>}
+      <ChevronRight className={`ml-auto h-3.5 w-3.5 shrink-0 text-muted transition-transform ${expanded ? "rotate-90" : ""}`} />
     </button>
   );
 }
@@ -114,9 +117,9 @@ function AssistantActions({ msg, isLast, disabled, onRegenerate }: {
     } catch { /* clipboard unavailable */ }
   };
   return (
-    <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+    <div className="message-actions mt-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
       <button onClick={copy}
-        className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted transition-colors hover:bg-surface-hover hover:text-fg"
+        className="flex items-center gap-1 rounded-md px-2 py-1 text-[12px] text-muted transition-colors hover:bg-surface-hover hover:text-fg"
         title="复制 Markdown"
       >
         {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
@@ -124,7 +127,7 @@ function AssistantActions({ msg, isLast, disabled, onRegenerate }: {
       </button>
       {isLast && onRegenerate && (
         <button onClick={onRegenerate} disabled={disabled}
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-40"
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-[12px] text-muted transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-40"
           title="重新生成回答"
         >
           <RefreshCw className="h-3 w-3" />
@@ -141,12 +144,12 @@ function FileChip({ attach }: { attach: ChatAttachment }) {
   return (
     <span className="inline-flex items-center gap-1.5"><button
       onClick={() => openFile(attach)}
-      className="flex max-w-[300px] items-center gap-1.5 rounded-lg border border-border-light bg-surface px-2 py-1 text-[11px] text-fg-secondary transition-colors hover:border-accent/30 hover:bg-surface-hover/60 hover:text-fg"
+      className="flex max-w-[300px] items-center gap-1.5 rounded-[7px] border border-border-light bg-surface px-2 py-1 text-[12px] text-fg-secondary transition-colors hover:border-accent/30 hover:bg-surface-hover/60 hover:text-fg"
       title={`${attach.filename} — 点击${image ? "预览图片" : "查看提取文本"}`}
     >
       {image ? <ImageIcon className="h-3 w-3 shrink-0 text-accent" /> : <FileText className="h-3 w-3 shrink-0 text-accent" />}
       <span className="max-w-[180px] truncate">{attach.filename}</span>
-      <span className="tnum whitespace-nowrap text-muted/60">{attachmentMetaLabel(attach)}</span>
+      <span className="tnum whitespace-nowrap text-muted">{attachmentMetaLabel(attach)}</span>
     </button><OpenReaderButton attachment={attach} compact /></span>
   );
 }
@@ -184,7 +187,7 @@ function SearchResultCard({ result }: { result: Record<string, unknown> }) {
       {expanded && !isError && (
         <div className="mt-1.5 space-y-2 pl-1">
           {sourceNotices.map((notice, index) => (
-            <div key={`source-notice-${index}`} className="rounded-lg border border-warning/25 bg-warning/5 px-2.5 py-2 text-[11px] text-fg-secondary">
+            <div key={`source-notice-${index}`} className="rounded-[7px] border border-warning/25 bg-warning/5 px-2.5 py-2 text-[12px] text-fg-secondary">
               {notice}
             </div>
           ))}
@@ -197,13 +200,13 @@ function SearchResultCard({ result }: { result: Record<string, unknown> }) {
           )}
           <div className="space-y-1.5">
             {papers.map((p, i) => (
-              <div key={p.id || i} className="flex items-start gap-2.5 rounded-xl border border-border-light bg-surface px-3 py-2">
-                <span className="tnum mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-accent-soft/60 text-[10px] font-bold text-accent">
+              <div key={p.id || i} className="flex items-start gap-2.5 rounded-[7px] border border-border-light bg-surface px-3 py-2">
+                <span className="tnum mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-accent-soft/60 text-[12px] font-bold text-accent">
                   {i + 1}
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="text-[13px] font-medium leading-snug text-fg">{p.title}</p>
-                  <p className="mt-0.5 text-[11px] text-muted">
+                  <p className="mt-0.5 text-[12px] text-muted">
                     {p.year || "n.d."} · 被引 <span className="tnum">{p.citation_count}</span>
                     {p.relevance_score >= 0 && <> · 相关度 <span className="tnum">{p.relevance_score.toFixed(2)}</span></>}
                   </p>
@@ -211,7 +214,7 @@ function SearchResultCard({ result }: { result: Record<string, unknown> }) {
                 <div className="mt-0.5 flex shrink-0 items-center gap-1.5">
                   {paperUrl(p) && (
                     <a href={paperUrl(p)} target="_blank" rel="noreferrer"
-                      className="text-muted/50 transition-colors hover:text-accent" title="打开原文">
+                      className="text-muted transition-colors hover:text-accent" title="打开原文">
                       <ExternalLink className="h-3.5 w-3.5" />
                     </a>
                   )}
@@ -222,17 +225,17 @@ function SearchResultCard({ result }: { result: Record<string, unknown> }) {
           {candidates.length > 0 && (
             <div>
               <button onClick={() => setShowCandidates(!showCandidates)}
-                className="flex items-center gap-1 px-1 py-1 text-[11px] text-muted transition-colors hover:text-fg-secondary">
+                className="flex items-center gap-1 px-1 py-1 text-[12px] text-muted transition-colors hover:text-fg-secondary">
                 <ChevronRight className={`h-3 w-3 transition-transform ${showCandidates ? "rotate-90" : ""}`} />
                 候选论文（{candidates.length}）
               </button>
               {showCandidates && (
                 <ul className="mt-1 space-y-1 px-1">
                   {candidates.map((c, i) => (
-                    <li key={c.id || i} className="flex items-center gap-1.5 text-[12px] text-fg-secondary">
+                    <li key={c.id || i} className="flex items-center gap-1.5 text-[13px] text-fg-secondary">
                       <span className="text-muted">- </span>
                       <span className="min-w-0 truncate">{c.title}</span>
-                      <span className="text-muted/60 tnum shrink-0">{c.year || ""}</span>
+                      <span className="text-muted tnum shrink-0">{c.year || ""}</span>
                     </li>
                   ))}
                 </ul>
@@ -264,8 +267,8 @@ function ResearchMapCard({ result }: { result: Record<string, unknown> }) {
       {expanded && !isError && (
         <div className="mt-1.5 space-y-3 pl-1">
           {landscape && (
-            <div className="rounded-xl border border-border-light bg-surface p-3.5">
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-accent">领域脉络</div>
+            <div className="rounded-[7px] border border-border-light bg-surface p-3.5">
+              <div className="mb-1 text-[12px] font-semibold uppercase tracking-wide text-accent">领域脉络</div>
               <p className="whitespace-pre-line text-[13px] leading-relaxed text-fg-secondary">{landscape}</p>
             </div>
           )}
@@ -275,19 +278,19 @@ function ResearchMapCard({ result }: { result: Record<string, unknown> }) {
           {clusters.length > 0 && (
             <div className="space-y-2">
               {clusters.map((c) => (
-                <details key={c.id} className="rounded-xl border border-border-light bg-surface">
+                <details key={c.id} className="rounded-[7px] border border-border-light bg-surface">
                   <summary className="flex cursor-pointer items-center gap-2 p-3">
-                    <span className="tnum flex h-5 w-5 items-center justify-center rounded-md bg-accent-soft/60 text-[10px] font-bold text-accent">{c.id + 1}</span>
-                    <span className="text-sm font-semibold">{c.label}</span>
-                    <span className="rounded-full bg-surface-hover px-2 py-0.5 text-[10px] text-muted tnum">{c.papers.length} 篇</span>
+                    <span className="tnum flex h-5 w-5 items-center justify-center rounded-md bg-accent-soft/60 text-[12px] font-bold text-accent">{c.id + 1}</span>
+                    <span className="text-[13px] font-semibold">{c.label}</span>
+                    <span className="rounded-full bg-surface-hover px-2 py-0.5 text-[12px] text-muted tnum">{c.papers.length} 篇</span>
                   </summary>
                   <div className="border-t border-border-light p-3">
-                    {c.overview && <p className="mb-2 text-sm italic leading-relaxed text-muted">{c.overview}</p>}
-                    <ul className="space-y-1 text-sm text-fg-secondary">
+                    {c.overview && <p className="mb-2 text-[13px] italic leading-relaxed text-muted">{c.overview}</p>}
+                    <ul className="space-y-1 text-[13px] text-fg-secondary">
                       {c.papers.map(p => (
                         <li key={p.id} className="flex gap-2">
                           <span className="text-muted">-</span>
-                          <span>{p.title}<span className="ml-1 text-[11px] text-muted/60 tnum">{p.year || ""}</span></span>
+                          <span>{p.title}<span className="ml-1 text-[12px] text-muted tnum">{p.year || ""}</span></span>
                         </li>
                       ))}
                     </ul>
@@ -297,11 +300,11 @@ function ResearchMapCard({ result }: { result: Record<string, unknown> }) {
             </div>
           )}
           {timeline.length > 0 && (
-            <div className="rounded-xl border border-border-light bg-surface p-3.5">
-              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-accent">时间脉络</div>
+            <div className="rounded-[7px] border border-border-light bg-surface p-3.5">
+              <div className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-accent">时间脉络</div>
               <div className="space-y-1.5">
                 {timeline.map(t => (
-                  <div key={t.year} className="flex items-start gap-2.5 text-[12px]">
+                  <div key={t.year} className="flex items-start gap-2.5 text-[13px]">
                     <span className="tnum w-10 shrink-0 font-semibold text-accent">{t.year}</span>
                     <span className="text-fg-secondary">
                       {t.papers.slice(0, 3).map(p => p.title).join("；")}
@@ -339,14 +342,14 @@ function ReadingPathCard({ result }: { result: Record<string, unknown> }) {
       {expanded && !isError && path.length > 0 && (
         <ol className="mt-1.5 space-y-2 pl-1">
           {path.map((p, i) => (
-            <li key={p.paper_id || i} className="flex items-start gap-2.5 rounded-xl border border-border-light bg-surface px-3 py-2.5">
+            <li key={p.paper_id || i} className="flex items-start gap-2.5 rounded-[7px] border border-border-light bg-surface px-3 py-2.5">
               <span className="font-serif-display tnum mt-0.5 text-[15px] font-bold text-accent/70">{i + 1}</span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
                   <span className={`badge ${ROLE_BADGE[p.role] || "badge-muted"}`}>{p.role}</span>
                   <p className="text-[13px] font-medium leading-snug text-fg">{p.title}</p>
                 </div>
-                {p.reason && <p className="mt-1 text-[12px] leading-relaxed text-muted">{p.reason}</p>}
+                {p.reason && <p className="mt-1 text-[13px] leading-relaxed text-muted">{p.reason}</p>}
               </div>
             </li>
           ))}
@@ -375,16 +378,16 @@ function ReviewCard({ result }: { result: Record<string, unknown> }) {
           <div className="flex justify-end">
               {files.map((file) => (
                 <button key={file.fileName} onClick={() => void downloadProtectedFile(file.url || `/files/${file.fileName}`, file.fileName)}
-                  className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface-hover hover:text-fg"
+                  className="flex items-center gap-1.5 rounded-[7px] px-2.5 py-1.5 text-[12px] font-medium text-muted transition-colors hover:bg-surface-hover hover:text-fg"
                   title={`下载 ${file.displayName || file.fileName}`}>
                   <Download className="h-3.5 w-3.5" />
                   {file.displayName || file.fileName}
                 </button>
               ))}
           </div>
-          <div className="max-h-[520px] overflow-y-auto rounded-xl border border-border-light bg-surface p-4">
-            <div className="chat-prose text-sm leading-relaxed text-fg-secondary">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{review}</ReactMarkdown>
+          <div className="max-h-[520px] overflow-y-auto rounded-[7px] border border-border-light bg-surface p-4">
+            <div className="chat-prose text-[13px] leading-relaxed text-fg-secondary">
+              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[[rehypeKatex, { trust: false, strict: "ignore", maxExpand: 1000, maxSize: 15 }]]}>{review}</ReactMarkdown>
             </div>
           </div>
         </div>
@@ -465,8 +468,8 @@ function DeepReadCard({ result }: { result: Record<string, unknown> }) {
       {expanded && !isError && (
         <div className="mt-1.5 max-h-[560px] space-y-2 overflow-y-auto pl-1">
           {attachments.length > 0 && (
-            <div className="rounded-xl border border-border-light bg-surface p-3">
-              <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted">
+            <div className="rounded-[7px] border border-border-light bg-surface p-3">
+              <div className="mb-2 text-[12px] font-medium uppercase tracking-wide text-muted">
                 {lang === "zh" ? "上传附件" : "Uploaded attachments"}
               </div>
               <div className="space-y-1.5">
@@ -479,13 +482,13 @@ function DeepReadCard({ result }: { result: Record<string, unknown> }) {
                       ? (lang === "zh" ? "已降级为文本理解" : "Degraded to text understanding")
                       : (a.status || (lang === "zh" ? "已处理" : "Processed"));
                   return (
-                    <div key={a.id} className="flex items-start gap-2 text-xs text-fg-secondary">
-                      <FileCheck className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${ready ? "text-emerald-500" : degraded ? "text-amber-500" : "text-accent"}`} />
+                    <div key={a.id} className="flex items-start gap-2 text-[12px] text-fg-secondary">
+                      <FileCheck className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${ready ? "text-success" : degraded ? "text-warning" : "text-accent"}`} />
                       <div className="min-w-0 flex-1">
                         {a.filename && <div className="truncate font-medium text-fg" title={a.filename}>{a.filename}</div>}
                         <span>{statusText}</span>
                         {(a.element_count || 0) > 0 && <span className="ml-1.5 text-muted">· {a.element_count} {lang === "zh" ? "个图表/公式元素" : "visual elements"}</span>}
-                        {a.error && <div className="mt-0.5 break-words text-[11px] text-error/70">{a.error}</div>}
+                        {a.error && <div className="mt-0.5 break-words text-[12px] text-error/70">{a.error}</div>}
                       </div>
                     </div>
                   );
@@ -497,12 +500,12 @@ function DeepReadCard({ result }: { result: Record<string, unknown> }) {
             <DeepReadPaperEntry key={pid} pid={pid} summary={s} lang={lang} />
           ))}
           {failures.length > 0 && (
-            <div className="rounded-xl border border-error/20 bg-error/5 p-3">
-              <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-error/80">
+            <div className="rounded-[7px] border border-error/20 bg-error/5 p-3">
+              <div className="mb-1 text-[12px] font-medium uppercase tracking-wide text-error/80">
                 {lang === "zh" ? "提取失败" : "Extraction failed"}
               </div>
               {failures.map((f, i) => (
-                <div key={i} className="text-xs text-fg-secondary">
+                <div key={i} className="text-[12px] text-fg-secondary">
                   <span className="font-medium">{f.title}</span>
                   <span className="ml-1.5 text-error/70">({f.reason})</span>
                 </div>
@@ -538,25 +541,25 @@ function DeepReadPaperEntry({ pid, summary, lang }: { pid: string; summary: Deep
         ? (lang === "zh" ? "扫描 OCR 未恢复，已降级" : "Scan OCR unavailable; degraded")
         : (lang === "zh" ? "OCR 未尝试" : "OCR not attempted");
   return (
-    <div className="rounded-xl border border-border-light bg-surface">
+    <div className="rounded-[7px] border border-border-light bg-surface">
       <button onClick={() => setOpen(!open)}
         className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-surface-hover/60">
         <BookOpen className="h-3.5 w-3.5 shrink-0 text-accent" />
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-fg">{title}</span>
-        <span className="shrink-0 text-[11px] text-success">
+        <span className="shrink-0 text-[12px] text-success">
           {preview}
         </span>
         {elemCount > 0 && (
-          <span className="shrink-0 rounded bg-accent-soft/50 px-1.5 py-0.5 text-[10px] font-medium text-accent">
+          <span className="shrink-0 rounded bg-accent-soft/50 px-1.5 py-0.5 text-[12px] font-medium text-accent">
             {elemCount} {lang === "zh" ? "图表" : "exhibits"}
           </span>
         )}
-        <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-muted/50 transition-transform ${open ? "rotate-90" : ""}`} />
+        <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`} />
       </button>
       {open && (fields.length > 0 || elemCount > 0 || outline.length > 0 || Object.keys(info).length > 0) && (
         <div className="space-y-2 border-t border-border-light p-3">
           {Object.keys(info).length > 0 && (
-            <div className="rounded-lg bg-surface-hover/40 p-2 text-[11px] text-muted">
+            <div className="rounded-[7px] bg-surface-hover/40 p-2 text-[12px] text-muted">
               <div className="flex flex-wrap gap-x-3 gap-y-1">
                 <span>{info.document_ready ? (lang === "zh" ? "文档已解析" : "Document parsed") : (lang === "zh" ? "尚未完成解析" : "Not fully parsed")}</span>
                 {info.parse_status && <span>{lang === "zh" ? "解析状态" : "Parse"}: {info.parse_status}</span>}
@@ -570,22 +573,22 @@ function DeepReadPaperEntry({ pid, summary, lang }: { pid: string; summary: Deep
             </div>
           )}
           {outline.length > 0 && (
-            <details className="rounded-lg border border-border-light bg-surface-hover/20 p-2">
-              <summary className="cursor-pointer text-[11px] font-medium text-fg-secondary">
+            <details className="rounded-[7px] border border-border-light bg-surface-hover/20 p-2">
+              <summary className="cursor-pointer text-[12px] font-medium text-fg-secondary">
                 {lang === "zh" ? `完整章节目录（${outline.length}）` : `Section outline (${outline.length})`}
               </summary>
-              <ol className="mt-1.5 space-y-0.5 text-[11px] text-muted">
+              <ol className="mt-1.5 space-y-0.5 text-[12px] text-muted">
                 {outline.map((sec, i) => {
                   const start = sec.page_start || 0;
                   const end = sec.page_end || start;
                   const pages = start ? (end && end !== start ? `p.${start}-${end}` : `p.${start}`) : "";
-                  return <li key={`${sec.title}-${i}`} className="flex gap-2"><span className="min-w-0 flex-1">{sec.title}</span><span className="shrink-0 text-muted/60">{pages}</span></li>;
+                  return <li key={`${sec.title}-${i}`} className="flex gap-2"><span className="min-w-0 flex-1">{sec.title}</span><span className="shrink-0 text-muted">{pages}</span></li>;
                 })}
               </ol>
             </details>
           )}
           {fields.map(([label, value], i) => (
-            <div key={i} className="text-sm text-fg-secondary">
+            <div key={i} className="text-[13px] text-fg-secondary">
               <span className="font-medium">{label}:</span>{" "}
               {Array.isArray(value) ? (
                 <ul className="ml-4 mt-1 list-disc">
@@ -596,7 +599,7 @@ function DeepReadPaperEntry({ pid, summary, lang }: { pid: string; summary: Deep
           ))}
           {elemCount > 0 && (
             <div className="pt-1">
-              <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+              <div className="mb-1 text-[12px] font-medium uppercase tracking-wide text-muted">
                 {lang === "zh" ? "图表元素（点击深入解读）" : "Exhibits (click to explain)"}
               </div>
               <div className="flex flex-wrap gap-1.5">
@@ -609,14 +612,14 @@ function DeepReadPaperEntry({ pid, summary, lang }: { pid: string; summary: Deep
                     <button key={el.element_id}
                       onClick={() => setComposerDraft(`请详细解读 ${el.element_id}`)}
                       title={el.caption || el.element_id}
-                      className="flex max-w-full items-center gap-1 rounded-lg border border-border-light bg-surface-hover/40 px-1.5 py-1 text-left text-[11px] transition-colors hover:bg-surface-hover/80">
+                      className="flex max-w-full items-center gap-1 rounded-[7px] border border-border-light bg-surface-hover/40 px-1.5 py-1 text-left text-[12px] transition-colors hover:bg-surface-hover/80">
                       <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-medium ${
                         isTable ? "bg-accent-soft/60 text-accent"
                         : isFormula ? "bg-success/15 text-success"
                         : "bg-warning/15 text-warning"}`}>
                         {badge}
                       </span>
-                      {el.page ? <span className="shrink-0 text-muted/50">p.{el.page}</span> : null}
+                      {el.page ? <span className="shrink-0 text-muted">p.{el.page}</span> : null}
                       <span className="truncate text-muted">{cap || el.element_id}</span>
                     </button>
                   );
@@ -647,21 +650,21 @@ function AnswerCard({ result }: { result: Record<string, unknown> }) {
         meta_text={isError ? undefined : `${answer.length} 字 · ${sources.length} 个来源`} />
       {expanded && !isError && answer && (
         <div className="mt-1.5 space-y-2 pl-1">
-          <div className="max-h-[480px] overflow-y-auto rounded-xl border border-border-light bg-surface p-4">
-            <div className="chat-prose text-sm leading-relaxed text-fg-secondary">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer}</ReactMarkdown>
+          <div className="max-h-[480px] overflow-y-auto rounded-[7px] border border-border-light bg-surface p-4">
+            <div className="chat-prose text-[13px] leading-relaxed text-fg-secondary">
+              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[[rehypeKatex, { trust: false, strict: "ignore", maxExpand: 1000, maxSize: 15 }]]}>{answer}</ReactMarkdown>
             </div>
           </div>
           {sources.length > 0 && (
-            <div className="rounded-xl border border-border-light/70 bg-surface/40 p-3">
-              <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">引用来源</div>
+            <div className="rounded-[7px] border border-border-light/70 bg-surface/40 p-3">
+              <div className="mb-1.5 text-[12px] font-medium uppercase tracking-wide text-muted">引用来源</div>
               <ul className="space-y-1">
                 {sources.map((s) => (
-                  <li key={s.paper_id} className="flex items-start gap-1.5 text-xs text-fg-secondary">
+                  <li key={s.paper_id} className="flex items-start gap-1.5 text-[12px] text-fg-secondary">
                     <FileText className="mt-0.5 h-3 w-3 shrink-0 text-accent/70" />
                     <span className="truncate">{s.title || s.paper_id}</span>
                     {s.sections && s.sections.length > 0 && (
-                      <span className="shrink-0 text-muted/70">[{s.sections.join(", ")}]</span>
+                      <span className="shrink-0 text-muted">[{s.sections.join(", ")}]</span>
                     )}
                   </li>
                 ))}
@@ -706,17 +709,17 @@ function BibtexCard({ result }: { result: Record<string, unknown> }) {
         <div className="mt-1.5 space-y-2 pl-1">
           <div className="flex justify-end gap-1">
             <button onClick={handleCopy}
-              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface-hover hover:text-fg">
+              className="flex items-center gap-1.5 rounded-[7px] px-2.5 py-1.5 text-[12px] font-medium text-muted transition-colors hover:bg-surface-hover hover:text-fg">
               {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
               {copied ? "已复制" : "复制"}
             </button>
             <button onClick={handleDownload}
-              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface-hover hover:text-fg">
+              className="flex items-center gap-1.5 rounded-[7px] px-2.5 py-1.5 text-[12px] font-medium text-muted transition-colors hover:bg-surface-hover hover:text-fg">
               <Download className="h-3.5 w-3.5" />
               下载 .{ext}
             </button>
           </div>
-          <pre className="max-h-[420px] overflow-auto rounded-xl border border-border-light bg-surface-sunken p-3.5 text-xs leading-relaxed text-fg-secondary">{bibtex}</pre>
+          <pre className="max-h-[420px] overflow-auto rounded-[7px] border border-border-light bg-surface-sunken p-3.5 text-[12px] leading-relaxed text-fg-secondary">{bibtex}</pre>
         </div>
       )}
     </div>
@@ -742,11 +745,11 @@ function ReportCard({ result, name = "export_report" }: { result: Record<string,
               <button type="button" onClick={() => {
                 void downloadProtectedFile(f.url || `/files/${f.fileName}`, f.fileName);
               }}
-                className="flex w-full items-center gap-2 rounded-lg border border-border-light bg-surface px-3 py-2 text-left text-xs text-fg-secondary transition-colors hover:bg-surface-hover">
+                className="flex w-full items-center gap-2 rounded-[7px] border border-border-light bg-surface px-3 py-2 text-left text-[12px] text-fg-secondary transition-colors hover:bg-surface-hover">
                 <Download className="h-3.5 w-3.5 shrink-0 text-accent" />
                 <span className="font-medium">{f.fileName}</span>
                 {f.size ? (
-                  <span className="shrink-0 text-muted/60">{(f.size / 1024).toFixed(1)} KB</span>
+                  <span className="shrink-0 text-muted">{(f.size / 1024).toFixed(1)} KB</span>
                 ) : null}
               </button>
             </li>
@@ -774,9 +777,9 @@ function StructureCheckCard({ result, name = "check_structure" }: { result: Reco
         onToggle={() => setExpanded(!expanded)} meta_text={meta} />
       {expanded && !isError && report && (
         <div className="mt-1.5 pl-1">
-          <div className="max-h-[420px] overflow-y-auto rounded-xl border border-border-light bg-surface p-4">
-            <div className="chat-prose text-sm leading-relaxed text-fg-secondary">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{report}</ReactMarkdown>
+          <div className="max-h-[420px] overflow-y-auto rounded-[7px] border border-border-light bg-surface p-4">
+            <div className="chat-prose text-[13px] leading-relaxed text-fg-secondary">
+              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[[rehypeKatex, { trust: false, strict: "ignore", maxExpand: 1000, maxSize: 15 }]]}>{report}</ReactMarkdown>
             </div>
           </div>
         </div>
@@ -821,17 +824,17 @@ function IntegritySweepCard({ result }: { result: Record<string, unknown> }) {
             const st = INTEGRITY_STATUS[r.status] || INTEGRITY_STATUS.unknown;
             return (
               <li key={r.paper_id}
-                className="rounded-lg border border-border-light bg-surface px-3 py-2">
+                className="rounded-[7px] border border-border-light bg-surface px-3 py-2">
                 <div className="flex items-center gap-2">
-                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${st.badge}`}>
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[12px] font-medium ${st.badge}`}>
                     {st.label}
                   </span>
-                  <span className="truncate text-xs font-medium text-fg-secondary">
+                  <span className="truncate text-[12px] font-medium text-fg-secondary">
                     {r.title || r.paper_id}
                   </span>
                 </div>
                 {r.note && (
-                  <p className="mt-1 text-[11px] leading-relaxed text-muted">{r.note}</p>
+                  <p className="mt-1 text-[12px] leading-relaxed text-muted">{r.note}</p>
                 )}
               </li>
             );
@@ -863,23 +866,23 @@ function BibImportCard({ result }: { result: Record<string, unknown> }) {
         <div className="mt-1.5 space-y-1.5 pl-1">
           <ul className="space-y-1">
             {entries.map((e) => (
-              <li key={e.id} className="flex items-start gap-1.5 text-xs text-fg-secondary">
+              <li key={e.id} className="flex items-start gap-1.5 text-[12px] text-fg-secondary">
                 <FileInput className="mt-0.5 h-3 w-3 shrink-0 text-accent/70" />
                 <span className="truncate">{e.title || e.id}</span>
                 {e.doi
                   ? <span className="shrink-0 text-success/70">DOI</span>
-                  : <span className="shrink-0 text-muted/60">未校验</span>}
+                  : <span className="shrink-0 text-muted">未校验</span>}
               </li>
             ))}
           </ul>
           {failures.length > 0 && (
-            <div className="rounded-lg border border-border-light/60 bg-surface/40 p-2.5">
-              <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+            <div className="rounded-[7px] border border-border-light/60 bg-surface/40 p-2.5">
+              <div className="mb-1 text-[12px] font-medium uppercase tracking-wide text-muted">
                 跳过 {failures.length} 条
               </div>
               <ul className="space-y-0.5">
                 {failures.slice(0, 8).map((f, i) => (
-                  <li key={i} className="text-[11px] text-muted">
+                  <li key={i} className="text-[12px] text-muted">
                     {f.key ? `${f.key}：` : ""}{f.reason}
                   </li>
                 ))}
@@ -914,10 +917,10 @@ function ExhibitIndexCard({ result }: { result: Record<string, unknown> }) {
       {expanded && !isError && groups.length > 0 && (
         <div className="mt-1.5 space-y-2 pl-1">
           {groups.map((g) => (
-            <div key={g.paper_id} className="rounded-xl border border-border-light bg-surface p-2.5">
-              <div className="mb-1.5 truncate text-xs font-medium text-fg-secondary">
+            <div key={g.paper_id} className="rounded-[7px] border border-border-light bg-surface p-2.5">
+              <div className="mb-1.5 truncate text-[12px] font-medium text-fg-secondary">
                 {g.title || g.paper_id}
-                <span className="ml-1.5 text-muted/60">({g.captions.length})</span>
+                <span className="ml-1.5 text-muted">({g.captions.length})</span>
               </div>
               <ul className="space-y-1">
                 {g.captions.map((c, i) => (
@@ -925,14 +928,14 @@ function ExhibitIndexCard({ result }: { result: Record<string, unknown> }) {
                     <button
                       onClick={() => setComposerDraft(
                         `针对「${c.num}」的 caption 追问：${c.caption.slice(0, 80)}`)}
-                      className="flex w-full items-start gap-1.5 rounded-lg px-1.5 py-1 text-left text-[11px] leading-relaxed text-fg-secondary transition-colors hover:bg-surface-hover/60"
+                      className="flex w-full items-start gap-1.5 rounded-[7px] px-1.5 py-1 text-left text-[12px] leading-relaxed text-fg-secondary transition-colors hover:bg-surface-hover/60"
                     >
                       <span className={`mt-0.5 shrink-0 rounded px-1 py-0.5 text-[9px] font-medium ${
                         c.type === "table" ? "bg-accent-soft/60 text-accent" : "bg-warning/15 text-warning"}`}>
                         {c.type === "table" ? "表" : "图"}
                       </span>
                       <span className="shrink-0 font-medium text-fg/80">{c.num}</span>
-                      {c.page && <span className="shrink-0 text-muted/50">p.{c.page}</span>}
+                      {c.page && <span className="shrink-0 text-muted">p.{c.page}</span>}
                       <span className="line-clamp-2 text-muted">{c.caption}</span>
                     </button>
                   </li>
@@ -941,13 +944,13 @@ function ExhibitIndexCard({ result }: { result: Record<string, unknown> }) {
             </div>
           ))}
           {missing.length > 0 && (
-            <div className="rounded-lg border border-border-light/60 bg-surface/40 p-2.5">
-              <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+            <div className="rounded-[7px] border border-border-light/60 bg-surface/40 p-2.5">
+              <div className="mb-1 text-[12px] font-medium uppercase tracking-wide text-muted">
                 {missing.length} 个附件未解析
               </div>
               <ul className="space-y-0.5">
                 {missing.slice(0, 8).map((m) => (
-                  <li key={m.id} className="truncate text-[11px] text-muted">{m.title || m.id}</li>
+                  <li key={m.id} className="truncate text-[12px] text-muted">{m.title || m.id}</li>
                 ))}
               </ul>
             </div>
@@ -1002,7 +1005,7 @@ function ExplainElementCard({ result }: { result: Record<string, unknown> }) {
   }, [element?.asset_url]);
   if (!isError && !element) {
     return (
-      <div className="my-2 rounded-xl border border-warning/30 bg-warning/5 p-3 text-xs text-fg-secondary">
+      <div className="my-2 rounded-[7px] border border-warning/30 bg-warning/5 p-3 text-[12px] text-fg-secondary">
         未找到该元素。请先上传论文文件并使用 exhibit_index 列出可用图表。
       </div>
     );
@@ -1031,58 +1034,58 @@ function ExplainElementCard({ result }: { result: Record<string, unknown> }) {
       {expanded && !isError && element && (
         <div className="mt-1.5 space-y-2 pl-1">
           {element.caption && (
-            <div className="rounded-lg border border-border-light bg-surface p-2.5 text-[13px] font-medium text-fg">
+            <div className="rounded-[7px] border border-border-light bg-surface p-2.5 text-[13px] font-medium text-fg">
               {element.caption}
             </div>
           )}
           {/* Figure: thumbnail + VLM description */}
           {(assetSrc || element.asset_url) && (
             <img src={assetSrc || element.asset_url || ""} alt={element.caption || element.element_id}
-              className="max-h-80 w-auto rounded-lg border border-border-light bg-surface object-contain"
+              className="max-h-80 w-auto rounded-[7px] border border-border-light bg-surface object-contain"
               loading="lazy" />
           )}
           {desc && (
-            <div className="text-sm text-fg-secondary">{desc}</div>
+            <div className="text-[13px] text-fg-secondary">{desc}</div>
           )}
           {components.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {components.map((c, i) => (
-                <span key={i} className="rounded bg-accent-soft/40 px-1.5 py-0.5 text-[11px] text-accent">{c}</span>
+                <span key={i} className="rounded bg-accent-soft/40 px-1.5 py-0.5 text-[12px] text-accent">{c}</span>
               ))}
             </div>
           )}
           {relations.length > 0 && (
-            <ul className="ml-4 list-disc text-xs text-fg-secondary">
+            <ul className="ml-4 list-disc text-[12px] text-fg-secondary">
               {relations.map((r, i) => <li key={i}>{r}</li>)}
             </ul>
           )}
           {/* Table: structured markdown */}
           {isTable && tableMd && (
-            <div className="overflow-x-auto rounded-lg border border-border-light bg-surface p-2.5">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{tableMd}</ReactMarkdown>
+            <div className="overflow-x-auto rounded-[7px] border border-border-light bg-surface p-2.5">
+              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[[rehypeKatex, { trust: false, strict: "ignore", maxExpand: 1000, maxSize: 15 }]]}>{tableMd}</ReactMarkdown>
             </div>
           )}
           {axes.length > 0 && (
-            <div className="text-xs text-muted">比较维度：{axes.join(" / ")}</div>
+            <div className="text-[12px] text-muted">比较维度：{axes.join(" / ")}</div>
           )}
           {/* Formula: LaTeX source (monospace; no KaTeX dependency) */}
           {isFormula && latex && (
-            <pre className="overflow-x-auto rounded-lg border border-border-light bg-surface p-2.5 text-[13px] leading-relaxed text-fg">
+            <pre className="overflow-x-auto rounded-[7px] border border-border-light bg-surface p-2.5 text-[13px] leading-relaxed text-fg">
               <code>{latex}</code>
             </pre>
           )}
           {Object.keys(variables).length > 0 && (
-            <ul className="ml-4 list-disc text-xs text-fg-secondary">
+            <ul className="ml-4 list-disc text-[12px] text-fg-secondary">
               {Object.entries(variables).map(([sym, meaning]) => (
                 <li key={sym}><code className="text-fg">{sym}</code> — {meaning}</li>
               ))}
             </ul>
           )}
           {role && (
-            <div className="text-xs text-muted">作用：{role}</div>
+            <div className="text-[12px] text-muted">作用：{role}</div>
           )}
           {!desc && !tableMd && !latex && (
-            <div className="text-xs text-muted">该元素暂无 VLM 语义解读（可能未配置多模态模型或解析时被跳过）。</div>
+            <div className="text-[12px] text-muted">该元素暂无 VLM 语义解读（可能未配置多模态模型或解析时被跳过）。</div>
           )}
         </div>
       )}
@@ -1131,11 +1134,11 @@ function CensusTopList({ title, rows }: { title: string; rows: CensusBucket[] })
   const top = Math.max(...rows.map((r) => r.count), 1);
   return (
     <div>
-      <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted">{title}</div>
+      <div className="mb-1 text-[12px] font-medium uppercase tracking-wide text-muted">{title}</div>
       <ul className="space-y-1">
         {rows.map((r, i) => (
-          <li key={r.key || i} className="flex items-center gap-2 text-xs">
-            <span className="w-4 shrink-0 text-muted/60">{i + 1}</span>
+          <li key={r.key || i} className="flex items-center gap-2 text-[12px]">
+            <span className="w-4 shrink-0 text-muted">{i + 1}</span>
             <span className="w-40 shrink-0 truncate text-fg-secondary">{r.name}</span>
             <span className="relative h-1.5 flex-1 overflow-hidden rounded bg-border-light/60">
               <span className="absolute inset-y-0 left-0 rounded bg-accent/70"
@@ -1165,13 +1168,13 @@ function FieldCensusCard({ result }: { result: Record<string, unknown> }) {
       {expanded && !isError && (yearly.length > 0 || authors.length > 0) && (
         <div className="mt-1.5 space-y-3 pl-1">
           {portrait && (
-            <div className="rounded-xl border border-border-light bg-surface p-3 text-xs leading-relaxed text-fg-secondary">
+            <div className="rounded-[7px] border border-border-light bg-surface p-3 text-[12px] leading-relaxed text-fg-secondary">
               {portrait}
             </div>
           )}
           {yearly.length > 0 && (
-            <div className="rounded-xl border border-border-light bg-surface p-3">
-              <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+            <div className="rounded-[7px] border border-border-light bg-surface p-3">
+              <div className="mb-1 text-[12px] font-medium uppercase tracking-wide text-muted">
                 年度发文趋势
               </div>
               <FieldCensusTrend yearly={yearly} />
@@ -1218,7 +1221,7 @@ function ToolCard({ name, result }: { name: string; result?: unknown }) {
       <CardHeader name={toolName} result={result} expanded={expanded}
         onToggle={() => setExpanded(!expanded)} meta_text={meta_text} />
       {expanded && result != null && (
-        <pre className="ml-9 mt-0.5 overflow-x-auto rounded-lg bg-surface-sunken p-2.5 text-[11px] leading-relaxed text-muted">
+        <pre className="ml-9 mt-0.5 overflow-x-auto rounded-[7px] bg-surface-sunken p-2.5 text-[12px] leading-relaxed text-muted">
           {JSON.stringify(result, null, 2).slice(0, 600)}
         </pre>
       )}
@@ -1235,21 +1238,21 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming: boole
     <div className="mb-2">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 py-1 text-xs transition-colors hover:opacity-80"
+        className="flex items-center gap-1.5 py-1 text-[12px] transition-colors hover:opacity-80"
       >
         {isStreaming ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
         ) : (
-          <Brain className="h-3.5 w-3.5 text-muted/60" />
+          <Brain className="h-3.5 w-3.5 text-muted" />
         )}
         <span className={`font-medium ${isStreaming ? "text-accent" : "text-muted"}`}>
           {isStreaming ? "思考中" : "已深度思考"}
         </span>
-        {!isStreaming && <span className="text-muted/50">· 点击查看</span>}
-        <ChevronDown className={`h-3 w-3 text-muted/50 transition-transform ${open ? "" : "-rotate-90"}`} />
+        {!isStreaming && <span className="text-muted">· 点击查看</span>}
+        <ChevronDown className={`h-3 w-3 text-muted transition-transform ${open ? "" : "-rotate-90"}`} />
       </button>
       {open && (
-        <div className="mt-1.5 rounded-xl bg-surface-hover/40 px-3.5 py-2.5">
+        <div className="mt-1.5 rounded-[7px] bg-surface-hover/40 px-3.5 py-2.5">
           <p className="whitespace-pre-wrap text-[13px] leading-[1.7] text-muted">{text}</p>
         </div>
       )}
@@ -1260,14 +1263,14 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming: boole
 function Avatar({ role }: { role: "user" | "assistant" }) {
   if (role === "user") {
     return (
-      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-slate-500 to-slate-700 text-[11px] font-medium text-white">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-border-light bg-surface-hover text-[12px] font-medium text-fg-secondary">
         我
       </div>
     );
   }
   return (
-    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-accent to-accent-hover shadow-sm">
-      <Sparkles className="h-3.5 w-3.5 text-white" />
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-accent/20 bg-accent-soft text-accent">
+      <Sparkles className="h-3.5 w-3.5 text-accent" />
     </div>
   );
 }
@@ -1286,8 +1289,8 @@ export const ChatMessage = memo(function ChatMessage({ msg, isLast, disabled, on
     return (
       <div className="flex items-start justify-end gap-2.5 px-1 py-3">
         <div className="flex max-w-[70%] flex-col items-end">
-          <div className="rounded-[18px] rounded-tr-md bg-accent px-4 py-2.5 text-[14px] leading-[1.6] text-white shadow-sm">
-            {msg.readingPublication ? <div className="whitespace-pre-wrap"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="underline">{children}</a>, img: () => null }}>{msg.content}</ReactMarkdown></div> : <p className="whitespace-pre-wrap">{msg.content}</p>}
+          <div className="rounded-[9px] rounded-tr-md bg-accent px-4 py-2.5 text-[13px] leading-[1.7] text-white shadow-sm">
+            {msg.readingPublication ? <div className="whitespace-pre-wrap"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[[rehypeKatex, { trust: false, strict: "ignore", maxExpand: 1000, maxSize: 15 }]]} components={{ a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="underline">{children}</a>, img: () => null }}>{msg.content}</ReactMarkdown></div> : <p className="whitespace-pre-wrap">{msg.content}</p>}
           </div>
           {msg.attachments && msg.attachments.length > 0 && (
             <div className="mt-1.5 flex flex-wrap justify-end gap-1.5">
@@ -1313,7 +1316,7 @@ export const ChatMessage = memo(function ChatMessage({ msg, isLast, disabled, on
         {msg.content && (
           <div className="py-0.5">
             <div className="chat-prose">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[[rehypeKatex, { trust: false, strict: "ignore", maxExpand: 1000, maxSize: 15 }]]}>{msg.content}</ReactMarkdown>
             </div>
             <AssistantActions msg={msg} isLast={isLast} disabled={disabled} onRegenerate={onRegenerate} />
           </div>
@@ -1357,13 +1360,13 @@ export function StreamingMessage({
             <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
             <span className="text-[13px] text-muted">{stepLabel}...</span>
             {heartbeatElapsed > 0 && (
-              <span className="tnum text-[11px] text-muted/50">{heartbeatElapsed}s</span>
+              <span className="tnum text-[12px] text-muted">{heartbeatElapsed}s</span>
             )}
           </div>
         )}
         {thinking && <ThinkingBlock text={thinking} isStreaming={true} />}
         {activeTool && (
-          <div className="my-1.5 flex items-center gap-2.5 rounded-xl px-3 py-2">
+          <div className="my-1.5 flex items-center gap-2.5 rounded-[7px] px-3 py-2">
             <div className="flex h-6 w-6 items-center justify-center rounded-md bg-accent-soft/60">
               <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
             </div>
@@ -1373,7 +1376,7 @@ export function StreamingMessage({
                 : `正在执行 ${(TOOL_META[activeTool] || {}).label || activeTool}...`}
             </span>
             {heartbeatElapsed > 0 && (
-              <span className="tnum ml-auto text-[11px] text-muted/50">{heartbeatElapsed}s</span>
+              <span className="tnum ml-auto text-[12px] text-muted">{heartbeatElapsed}s</span>
             )}
           </div>
         )}
@@ -1383,7 +1386,7 @@ export function StreamingMessage({
         {answer && (
           <div className="py-0.5">
             <div className="chat-prose">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[[rehypeKatex, { trust: false, strict: "ignore", maxExpand: 1000, maxSize: 15 }]]}>{answer}</ReactMarkdown>
               <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-accent align-middle" />
             </div>
           </div>

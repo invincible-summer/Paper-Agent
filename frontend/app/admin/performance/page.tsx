@@ -135,61 +135,61 @@ export default function PerformancePage() {
         subtitle="首帧、研究地图与工具预算" />
       <HelpModal item={helpItem} onClose={() => setHelpItem(null)} />
       <div className="space-y-6">
-      <AdminSection title="启动预热" info={<InfoButton onClick={() => setHelpItem({title: "启动预热说明", entries: warmupOptions.map(([v,l,h]) => [l,h])})} />}><p className="text-sm opacity-75 mt-1">只执行本地 Python 导入和 LLM 客户端构造，不调用 LLM/VLM、不下载模型、不增加外网带宽；blocking/background 会提前产生约 9–12 秒 CPU 峰值和约 290 MB 常驻内存。</p>
-        <div className="mt-4 space-y-3">{warmupOptions.map(([value, label, help]) => <label key={value} className="flex items-start gap-3"><input type="radio" checked={warmup === value} onChange={() => setWarmup(value)} /><span><b>{label}</b><span className="block text-sm opacity-70">{help}</span></span></label>)}</div>
+      <AdminSection title="启动预热" info={<InfoButton onClick={() => setHelpItem({title: "启动预热说明", entries: warmupOptions.map(([v,l,h]) => [l,h])})} />}><p className="text-[13px] opacity-75 mt-1">只执行本地 Python 导入和 LLM 客户端构造，不调用 LLM/VLM、不下载模型、不增加外网带宽；blocking/background 会提前产生约 9–12 秒 CPU 峰值和约 290 MB 常驻内存。</p>
+        <div className="mt-4 space-y-3">{warmupOptions.map(([value, label, help]) => <label key={value} className="flex items-start gap-3"><input type="radio" checked={warmup === value} onChange={() => setWarmup(value)} /><span><b>{label}</b><span className="block text-[13px] opacity-70">{help}</span></span></label>)}</div>
       </AdminSection>
-      <AdminSection title="地图引文增强" info={<InfoButton onClick={() => setHelpItem({title: "地图引文说明", entries: citationOptions.map(([v,l,h]) => [l,h])})} />}><p className="text-sm opacity-75 mt-1">OpenAlex 请求由后端批量发起，只取元数据，不下载 PDF，不增加浏览器请求。模式立即生效。</p>
-        <div className="mt-4 space-y-3">{citationOptions.map(([value, label, help]) => <label key={value} className="flex items-start gap-3"><input type="radio" checked={citation === value} onChange={() => setCitation(value)} disabled={!data?.openalex_enabled} /><span><b>{label}</b><span className="block text-sm opacity-70">{help}</span></span></label>)}</div>
+      <AdminSection title="地图引文增强" info={<InfoButton onClick={() => setHelpItem({title: "地图引文说明", entries: citationOptions.map(([v,l,h]) => [l,h])})} />}><p className="text-[13px] opacity-75 mt-1">OpenAlex 请求由后端批量发起，只取元数据，不下载 PDF，不增加浏览器请求。模式立即生效。</p>
+        <div className="mt-4 space-y-3">{citationOptions.map(([value, label, help]) => <label key={value} className="flex items-start gap-3"><input type="radio" checked={citation === value} onChange={() => setCitation(value)} disabled={!data?.openalex_enabled} /><span><b>{label}</b><span className="block text-[13px] opacity-70">{help}</span></span></label>)}</div>
         {data && !data.openalex_enabled && <p className="mt-3 text-warning">已禁用：{data.map_citation_disabled_reason}。有效模式为 off，保证零 OpenAlex 请求。</p>}
       </AdminSection>
-      {data && <div className="rounded-xl border border-border-light bg-surface-hover/60 p-4 text-sm">当前进程：{data.prewarm.prewarm_state} · 模式 {data.prewarm.active_mode} · {Math.round(data.prewarm.duration_ms)} ms{data.prewarm.last_error && <span className="text-error"> · {data.prewarm.last_error}</span>}</div>}
-      {message && <p className="text-sm">{message}</p>}
-      <button disabled={busy || !data} onClick={save} className="flex h-10 items-center rounded-lg bg-accent px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">{busy ? "保存中…" : "保存性能策略"}</button>
+      {data && <div className="rounded-[7px] border border-border-light bg-surface-hover/60 p-4 text-[13px]">当前进程：{data.prewarm.prewarm_state} · 模式 {data.prewarm.active_mode} · {Math.round(data.prewarm.duration_ms)} ms{data.prewarm.last_error && <span className="text-error"> · {data.prewarm.last_error}</span>}</div>}
+      {message && <p className="text-[13px]">{message}</p>}
+      <button disabled={busy || !data} onClick={save} className="flex h-10 items-center rounded-[7px] bg-accent px-5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">{busy ? "保存中…" : "保存性能策略"}</button>
 
       {budgets && <AdminSection title="工具时限预算" icon={<Timer className="h-5 w-5 text-accent" />}
         info={<InfoButton onClick={() => setHelpItem(BUDGET_HELP)} label="工具时限预算说明" />}>
-        <p className="text-sm opacity-75">为每个工具单独设定单次调用的最长执行时间。实际生效值 = min(预算, 整轮剩余 − 预留量)；保存后立即生效，无需重启。把鼠标悬停在各行可查看建议上限的说明。</p>
+        <p className="text-[13px] opacity-75">为每个工具单独设定单次调用的最长执行时间。实际生效值 = min(预算, 整轮剩余 − 预留量)；保存后立即生效，无需重启。把鼠标悬停在各行可查看建议上限的说明。</p>
 
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <label className="rounded-xl border border-border-light p-4 text-sm" title="从整轮剩余时间中为最终答案生成与流式收尾预留的秒数，对所有工具生效。建议 8 秒；预留过小会导致工具挤占收尾时间，过大会压缩工具可用时长。">
+          <label className="rounded-[7px] border border-border-light p-4 text-[13px]" title="从整轮剩余时间中为最终答案生成与流式收尾预留的秒数，对所有工具生效。建议 8 秒；预留过小会导致工具挤占收尾时间，过大会压缩工具可用时长。">
             <span className="font-medium">整轮预留量（秒）</span>
-            <span className="mt-1 block text-xs text-muted">为最终答案生成与流式收尾预留，对所有工具生效</span>
+            <span className="mt-1 block text-[12px] text-muted">为最终答案生成与流式收尾预留，对所有工具生效</span>
             <input type="number" min={budgets.limits.min_reserve} max={budgets.limits.max_reserve} value={draftReserve}
               onChange={(e) => setDraftReserve(Number(e.target.value))}
-              className={`mt-2 w-32 rounded-lg border px-3 py-2 ${draftReserve !== budgets.policy.reserve_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
-            <span className="ml-2 text-xs text-muted">建议 8s</span>
+              className={`mt-2 w-32 rounded-[7px] border px-3 py-2 ${draftReserve !== budgets.policy.reserve_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
+            <span className="ml-2 text-[12px] text-muted">建议 8s</span>
           </label>
-          <label className="rounded-xl border border-border-light p-4 text-sm" title="清小搭 /v1 整轮软时限；触发后停止启动新工作并生成降级总结回答。必须比硬时限至少小 5 秒，为收尾留出时间。">
+          <label className="rounded-[7px] border border-border-light p-4 text-[13px]" title="清小搭 /v1 整轮软时限；触发后停止启动新工作并生成降级总结回答。必须比硬时限至少小 5 秒，为收尾留出时间。">
             <span className="font-medium">清小搭整轮软时限（秒）</span>
-            <span className="mt-1 block text-xs text-muted">30 至 硬时限−5 秒；与工具预算、预留量共同限制 /v1，Web 不受影响</span>
+            <span className="mt-1 block text-[12px] text-muted">30 至 硬时限−5 秒；与工具预算、预留量共同限制 /v1，Web 不受影响</span>
             <input type="number" min={30} max={Math.max(30, draftApiTurnHard - 5)} value={draftApiTurnSoft}
               onChange={(e) => setDraftApiTurnSoft(Number(e.target.value))}
-              className={`mt-2 w-32 rounded-lg border px-3 py-2 ${draftApiTurnSoft !== budgets.policy.api_turn_soft_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
-            <span className="ml-2 text-xs text-muted">默认 95s · 当前硬时限 {draftApiTurnHard}s</span>
-            {draftApiTurnSoft > Math.max(30, draftApiTurnHard - 5) && <span className="mt-1 block text-xs text-warning">软时限最多 {(draftApiTurnHard - 5)}s：请先调大硬时限，或降低软时限。</span>}
+              className={`mt-2 w-32 rounded-[7px] border px-3 py-2 ${draftApiTurnSoft !== budgets.policy.api_turn_soft_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
+            <span className="ml-2 text-[12px] text-muted">默认 95s · 当前硬时限 {draftApiTurnHard}s</span>
+            {draftApiTurnSoft > Math.max(30, draftApiTurnHard - 5) && <span className="mt-1 block text-[12px] text-warning">软时限最多 {(draftApiTurnHard - 5)}s：请先调大硬时限，或降低软时限。</span>}
           </label>
-          <label className="rounded-xl border border-border-light p-4 text-sm" title="清小搭 /v1 整轮硬时限；超过后强制终止请求（非流式返回 504，流式直接断开）。软时限至多比它小 5 秒；逐工具预算上限跟随该值。">
+          <label className="rounded-[7px] border border-border-light p-4 text-[13px]" title="清小搭 /v1 整轮硬时限；超过后强制终止请求（非流式返回 504，流式直接断开）。软时限至多比它小 5 秒；逐工具预算上限跟随该值。">
             <span className="font-medium">清小搭整轮硬时限（秒）</span>
-            <span className="mt-1 block text-xs text-muted">最小 35 秒，无固定上限；软时限至多 硬时限−5，逐工具预算上限跟随该值</span>
+            <span className="mt-1 block text-[12px] text-muted">最小 35 秒，无固定上限；软时限至多 硬时限−5，逐工具预算上限跟随该值</span>
             <input type="number" min={35} value={draftApiTurnHard}
               onChange={(e) => setDraftApiTurnHard(Number(e.target.value))}
-              className={`mt-2 w-32 rounded-lg border px-3 py-2 ${draftApiTurnHard !== budgets.policy.api_turn_hard_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
-            <span className="ml-2 text-xs text-muted">默认 105s</span>
-            {draftApiTurnHard > 120 && <span className="mt-1 block text-xs text-warning">超过清小搭网关 120 秒的部分仅直连 /v1 的调用能真正用满；经网关转发的请求仍会在 120 秒被网关掐断。</span>}
+              className={`mt-2 w-32 rounded-[7px] border px-3 py-2 ${draftApiTurnHard !== budgets.policy.api_turn_hard_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
+            <span className="ml-2 text-[12px] text-muted">默认 105s</span>
+            {draftApiTurnHard > 120 && <span className="mt-1 block text-[12px] text-warning">超过清小搭网关 120 秒的部分仅直连 /v1 的调用能真正用满；经网关转发的请求仍会在 120 秒被网关掐断。</span>}
           </label>
-          <label className="rounded-xl border border-border-light p-4 text-sm" title="未在下方列出的工具（以及未来新增工具）使用的默认预算。">
+          <label className="rounded-[7px] border border-border-light p-4 text-[13px]" title="未在下方列出的工具（以及未来新增工具）使用的默认预算。">
             <span className="font-medium">默认预算（秒）</span>
-            <span className="mt-1 block text-xs text-muted">未列出 / 未来新增工具使用的默认值</span>
+            <span className="mt-1 block text-[12px] text-muted">未列出 / 未来新增工具使用的默认值</span>
             <input type="number" min={budgets.limits.min_seconds} max={budgets.limits.max_seconds} value={draftDefault}
               onChange={(e) => setDraftDefault(Number(e.target.value))}
-              className={`mt-2 w-32 rounded-lg border px-3 py-2 ${draftDefault !== budgets.policy.default_budget_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
-            <span className="ml-2 text-xs text-muted">代码默认 30s</span>
+              className={`mt-2 w-32 rounded-[7px] border px-3 py-2 ${draftDefault !== budgets.policy.default_budget_seconds ? "border-accent" : "border-border-light"} bg-bg`} />
+            <span className="ml-2 text-[12px] text-muted">代码默认 30s</span>
           </label>
         </div>
 
         <div className="mt-5 space-y-5">
           {grouped.map(([category, items]) => <div key={category}>
-            <h3 className="mb-2 text-sm font-semibold text-fg-secondary">{category}</h3>
+            <h3 className="mb-2 text-[13px] font-semibold text-fg-secondary">{category}</h3>
             <div className="space-y-2">
               {items.map((item) => <ToolBudgetRow key={item.name} item={item}
                 value={draftValues[item.name] ?? item.current_seconds}
@@ -201,17 +201,17 @@ export default function PerformancePage() {
           </div>)}
         </div>
 
-        {budgetMessage && <p className="mt-4 text-sm">{budgetMessage}</p>}
+        {budgetMessage && <p className="mt-4 text-[13px]">{budgetMessage}</p>}
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button disabled={!budgetDirty || savingBudgets} onClick={() => void saveBudgets()}
-            className="flex h-9 items-center gap-1.5 rounded-lg bg-accent px-5 text-sm text-white disabled:opacity-50">
+            className="flex h-9 items-center gap-1.5 rounded-[7px] bg-accent px-5 text-[13px] text-white disabled:opacity-50">
             {savingBudgets ? "保存中…" : <><Save className="h-4 w-4" />保存工具时限</>}
           </button>
           {budgetDirty && <button onClick={resetBudgetDrafts}
-            className="flex h-9 items-center gap-1.5 rounded-lg border border-border-light px-4 text-sm hover:bg-surface-hover">
+            className="flex h-9 items-center gap-1.5 rounded-[7px] border border-border-light px-4 text-[13px] hover:bg-surface-hover">
             <RotateCcw className="h-4 w-4" />恢复代码默认值
           </button>}
-          <span className="text-xs text-muted">版本 v{budgets.policy.version} · 保存后下一次工具调用立即生效</span>
+          <span className="text-[12px] text-muted">版本 v{budgets.policy.version} · 保存后下一次工具调用立即生效</span>
         </div>
       </AdminSection>}
       </div>
@@ -238,35 +238,35 @@ function ToolBudgetRow({ item, value, reserve, limits, breaker, onChange, onReco
   const overRecommended = value > item.recommended_max;
   const exceedsApiTurn = value + reserve > limits.api_turn_soft_seconds;
   const edited = value !== item.current_seconds;
-  return <div className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4 ${edited ? "border-accent/50" : "border-border-light"}`}>
+  return <div className={`flex flex-wrap items-center justify-between gap-3 rounded-[7px] border p-4 ${edited ? "border-accent/50" : "border-border-light"}`}>
     <div className="min-w-0 flex-1">
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-medium">{item.label}</span>
-        <code className="rounded bg-surface-hover px-1.5 py-0.5 text-[10px] text-muted">{item.name}</code>
-        {item.overridden && <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent" title="当前值来自管理员覆盖，而非代码默认">已自定义</span>}
-        {breaker?.state === "open" && <span className="flex items-center gap-1.5 rounded bg-error/15 px-1.5 py-0.5 text-[10px] text-error">
+        <code className="rounded bg-surface-hover px-1.5 py-0.5 text-[12px] text-muted">{item.name}</code>
+        {item.overridden && <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[12px] text-accent" title="当前值来自管理员覆盖，而非代码默认">已自定义</span>}
+        {breaker?.state === "open" && <span className="flex items-center gap-1.5 rounded bg-error/15 px-1.5 py-0.5 text-[12px] text-error">
           已熔断 {Math.ceil(breaker.remaining_seconds)}s
           <button type="button" onClick={onRecover} title="立即清除熔断状态"
             className="flex items-center gap-1 rounded bg-error/10 px-1.5 py-0.5 hover:bg-error/20">
             <Zap className="h-3 w-3" />恢复
           </button>
         </span>}
-        {breaker?.state === "half_open" && <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] text-warning">半开探测中</span>}
+        {breaker?.state === "half_open" && <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[12px] text-warning">半开探测中</span>}
         {breaker && breaker.state === "closed" && breaker.consecutive_failures > 0
-          && <span className="rounded bg-warning/10 px-1.5 py-0.5 text-[10px] text-warning">连续失败 {breaker.consecutive_failures}/3</span>}
+          && <span className="rounded bg-warning/10 px-1.5 py-0.5 text-[12px] text-warning">连续失败 {breaker.consecutive_failures}/3</span>}
       </div>
-      <p className="mt-1 text-xs leading-relaxed text-muted">{item.description}</p>
-      <p className="mt-1 text-xs text-fg-secondary" title={`建议不超过 ${item.recommended_max} 秒；代码默认 ${item.default_seconds} 秒。`}>
+      <p className="mt-1 text-[12px] leading-relaxed text-muted">{item.description}</p>
+      <p className="mt-1 text-[12px] text-fg-secondary" title={`建议不超过 ${item.recommended_max} 秒；代码默认 ${item.default_seconds} 秒。`}>
         建议 ≤{item.recommended_max}s · 代码默认 {item.default_seconds}s
         {value !== item.default_seconds && ` · 当前 ${value}s`}
       </p>
-      {overRecommended && <p className="mt-1 text-xs text-warning">已超过建议上限 {item.recommended_max}s：请先确认网络与渠道状况，超时前无法完成的调用仍会作废。</p>}
-      {exceedsApiTurn && <p className="mt-1 text-xs text-warning">预算 + 预留 &gt; /v1 整轮 {limits.api_turn_soft_seconds}s：超出部分仅 Web 通道（{limits.web_turn_soft_seconds}s）生效。</p>}
+      {overRecommended && <p className="mt-1 text-[12px] text-warning">已超过建议上限 {item.recommended_max}s：请先确认网络与渠道状况，超时前无法完成的调用仍会作废。</p>}
+      {exceedsApiTurn && <p className="mt-1 text-[12px] text-warning">预算 + 预留 &gt; /v1 整轮 {limits.api_turn_soft_seconds}s：超出部分仅 Web 通道（{limits.web_turn_soft_seconds}s）生效。</p>}
     </div>
-    <label className="flex shrink-0 items-center gap-2 text-sm">
+    <label className="flex shrink-0 items-center gap-2 text-[13px]">
       <input type="number" min={limits.min_seconds} max={limits.max_seconds} value={Number.isFinite(value) ? value : ""}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="w-24 rounded-lg border border-border-light bg-bg px-3 py-2 text-right tabular-nums" />
+        className="w-24 rounded-[7px] border border-border-light bg-bg px-3 py-2 text-right tabular-nums" />
       <span className="text-muted">秒</span>
     </label>
   </div>;

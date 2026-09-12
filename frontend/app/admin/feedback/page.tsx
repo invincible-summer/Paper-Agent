@@ -113,13 +113,13 @@ export default function FeedbackAdminPage() {
         subtitle="用户从「反馈」页面提交的问题报告与功能建议；仅管理员可见。"
         onRefresh={() => void refresh(filter)} refreshing={loading} />
 
-      {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
+      {error && <div className="rounded-[7px] border border-error/40 bg-error/10 p-3 text-[13px] text-error">{error}</div>}
 
       <div className="flex flex-wrap gap-2">
         {filterTabs.map(({ key, label, count }) => (
           <button key={key} type="button" onClick={() => applyFilter(key)}
             aria-pressed={filter === key}
-            className={`flex h-8 items-center gap-1.5 rounded-full border px-3.5 text-xs transition-colors ${
+            className={`flex h-8 items-center gap-1.5 rounded-full border px-3.5 text-[12px] transition-colors ${
               filter === key
                 ? "border-accent bg-accent-soft/70 font-medium text-accent"
                 : "border-border-light text-fg-secondary hover:bg-surface-hover hover:text-fg"
@@ -133,17 +133,17 @@ export default function FeedbackAdminPage() {
       </div>
 
       {items.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-border-light bg-surface p-10 text-center text-sm text-muted">
+        <div className="rounded-[9px] border border-dashed border-border-light bg-surface p-10 text-center text-[13px] text-muted">
           {filter === "all" ? "还没有收到任何反馈" : filter === "open" ? "没有待处理的反馈" : "没有已处理的反馈"}
         </div>
       ) : (
         <ul className="space-y-3">
           {items.map((item) => (
             <li key={item.id}
-              className={`rounded-2xl border bg-surface p-4 transition-colors ${
+              className={`rounded-[9px] border bg-surface p-4 transition-colors ${
                 item.status === "resolved" ? "border-border-light opacity-75" : "border-accent/25"
               }`}>
-              <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+              <div className="mb-2 flex flex-wrap items-center gap-2 text-[12px]">
                 <span className={`rounded-full border px-2 py-0.5 ${
                   CATEGORY_STYLES[item.category] ?? CATEGORY_STYLES["其他"]
                 }`}>{item.category}</span>
@@ -160,13 +160,13 @@ export default function FeedbackAdminPage() {
                   {item.username || "匿名"} · {ROLE_LABELS[item.role] ?? item.role} · {formatTime(item.created_at)}
                 </span>
               </div>
-              <p className="whitespace-pre-wrap text-sm leading-6 text-fg">{item.content}</p>
+              <p className="whitespace-pre-wrap text-[13px] leading-6 text-fg">{item.content}</p>
               {item.contact && (
-                <p className="mt-2 text-xs text-muted">联系方式：<span className="text-fg-secondary">{item.contact}</span></p>
+                <p className="mt-2 text-[12px] text-muted">联系方式：<span className="text-fg-secondary">{item.contact}</span></p>
               )}
               <div className="mt-3 flex flex-wrap justify-end gap-2">
                 <button type="button" onClick={() => void toggleStatus(item)} disabled={workingId === item.id}
-                  className="flex h-8 items-center gap-1.5 rounded-lg border border-border-light px-3 text-xs text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-50">
+                  className="flex h-8 items-center gap-1.5 rounded-[7px] border border-border-light px-3 text-[12px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-50">
                   {workingId === item.id
                     ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     : item.status === "open"
@@ -175,7 +175,7 @@ export default function FeedbackAdminPage() {
                   {item.status === "open" ? "标记已处理" : "重新打开"}
                 </button>
                 <button type="button" onClick={() => setPendingDelete(item)}
-                  className="flex h-8 items-center gap-1.5 rounded-lg border border-error/30 px-3 text-xs text-error transition-colors hover:bg-error/10 disabled:opacity-50">
+                  className="flex h-8 items-center gap-1.5 rounded-[7px] border border-error/30 px-3 text-[12px] text-error transition-colors hover:bg-error/10 disabled:opacity-50">
                   <Trash2 className="h-3.5 w-3.5" />
                   删除
                 </button>

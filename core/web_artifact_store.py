@@ -121,6 +121,37 @@ def web_artifact_has_owner(kind: str, artifact_id: str) -> bool:
     return row is not None
 
 
+def list_web_artifacts(owner_id: str, kind: str) -> list[dict[str, Any]]:
+    """List one owner's artifacts of a kind, newest first.
+
+    Only rows registered in the index are returned; legacy files that were
+    never referenced through an owner-checked endpoint stay invisible until
+    the owner resolves them once (owned_web_attachment migrates on demand).
+    """
+    if kind not in _ALLOWED_KINDS or not owner_id.strip() or not WEB_ARTIFACT_DB.is_file():
+        return []
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT artifact_id, metadata_json, created_at FROM web_artifact_owners
+            WHERE kind=? AND owner_id=? ORDER BY created_at DESC, artifact_id
+            """,
+            (kind, owner_id),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            metadata = {}
+        out.append({
+            "id": row["artifact_id"],
+            "created_at": row["created_at"],
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        })
+    return out
+
+
 def _legacy_history_attachment(artifact_id: str, owner_id: str) -> dict[str, Any] | None:
     """Recover ownership for web uploads created before this index existed."""
     try:

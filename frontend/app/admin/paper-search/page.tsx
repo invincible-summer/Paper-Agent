@@ -120,7 +120,7 @@ export default function PaperSearchAdminPage() {
     }
   };
 
-  if (!data) return <div className="py-16 text-sm text-muted">{error || "加载中…"}</div>;
+  if (!data) return <div className="py-16 text-[13px] text-muted">{error || "加载中…"}</div>;
 
   const catalog = data.source_catalog;
   const visible = catalog.filter((source) => {
@@ -138,22 +138,22 @@ export default function PaperSearchAdminPage() {
       <AdminHeader title="论文平台" icon={<Search className="h-5 w-5" />}
         subtitle="平台只提供论文搜索与有效摘要获取；网络论文全文探测、下载和自动升级已永久下线。" />
 
-      {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
-      {notice && <div className="rounded-lg border border-success/40 bg-success/10 p-3 text-sm text-success">{notice}</div>}
+      {error && <div className="rounded-[7px] border border-error/40 bg-error/10 p-3 text-[13px] text-error">{error}</div>}
+      {notice && <div className="rounded-[7px] border border-success/40 bg-success/10 p-3 text-[13px] text-success">{notice}</div>}
 
       <AdminSection title="能力矩阵" icon={<Activity className="h-5 w-5 text-accent" />}>
         <div className="mb-4 flex flex-wrap items-center gap-2">
           <button onClick={() => void runBatch()} disabled={busy}
-            className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-accent px-3 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">
+            className="inline-flex h-9 items-center gap-1.5 rounded-[7px] bg-accent px-3 text-[12px] font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">
             <Play className="h-3.5 w-3.5" />检测所有平台
           </button>
           <button onClick={() => void load()} disabled={busy}
-            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-border-light px-3 text-xs text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-50">
+            className="inline-flex h-9 items-center gap-1.5 rounded-[7px] border border-border-light px-3 text-[12px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-50">
             <RefreshCw className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />刷新
           </button>
           {(["all", "ok", "slow", "failed", "disabled", "unchecked"] as Filter[]).map((item) => (
             <button key={item} onClick={() => setFilter(item)}
-              className={`h-8 rounded-full px-2.5 text-xs transition-colors ${
+              className={`h-8 rounded-full px-2.5 text-[12px] transition-colors ${
                 filter === item
                   ? "bg-accent-soft/70 font-medium text-accent"
                   : "border border-border-light text-muted hover:bg-surface-hover hover:text-fg"
@@ -162,8 +162,8 @@ export default function PaperSearchAdminPage() {
             </button>
           ))}
         </div>
-        <div className="overflow-x-auto rounded-xl border border-border-light">
-          <table className="min-w-[860px] w-full text-left text-xs">
+        <div className="overflow-x-auto rounded-[7px] border border-border-light">
+          <table className="min-w-[860px] w-full text-left text-[12px]">
             <thead className="bg-surface-hover text-muted">
               <tr>
                 <th className="px-3 py-3">平台</th>
@@ -188,7 +188,7 @@ export default function PaperSearchAdminPage() {
       </AdminSection>
 
       <AdminSection title="全局检索策略" icon={<Settings2 className="h-5 w-5 text-accent" />}>
-        <div className="grid gap-4 text-sm md:grid-cols-3">
+        <div className="grid gap-4 text-[13px] md:grid-cols-3">
           <label>
             路由模式
             <select value={data.policy.routing_mode} disabled={busy}
@@ -211,7 +211,7 @@ export default function PaperSearchAdminPage() {
               className={`${GLOBAL_INPUT_CLASS} mt-1 tnum`} />
           </label>
         </div>
-        <p className="mt-3 text-xs text-muted">数字输入在失焦或切换后立即保存；检索时限改动会影响下一次论文搜索的内部预算。</p>
+        <p className="mt-3 text-[12px] text-muted">数字输入在失焦或切换后立即保存；检索时限改动会影响下一次论文搜索的内部预算。</p>
       </AdminSection>
     </div>
 
@@ -223,7 +223,7 @@ export default function PaperSearchAdminPage() {
   </>;
 }
 
-const GLOBAL_INPUT_CLASS = "h-9 w-full rounded-lg border border-border-light bg-bg px-2.5 text-sm outline-none transition-colors focus:border-accent/50";
+const GLOBAL_INPUT_CLASS = "h-9 w-full rounded-[7px] border border-border-light bg-bg px-2.5 text-[13px] outline-none transition-colors focus:border-accent/50";
 
 function SourceRow({ source, policy, diagnostic, busy, onRun, onToggle }: {
   source: PaperSearchPolicyResponse["source_catalog"][number];
@@ -239,13 +239,13 @@ function SourceRow({ source, policy, diagnostic, busy, onRun, onToggle }: {
     <tr className="align-top">
       <td className="px-3 py-3">
         <div className="font-medium text-fg">{source.display_name}</div>
-        <div className="mt-1 text-[11px] text-muted">{source.id}</div>
+        <div className="mt-1 text-[12px] text-muted">{source.id}</div>
       </td>
       <td className="px-3 py-3">
-        <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] ${tone(source.configuration_status === "ready" ? "ok" : "not_configured")}`}>
+        <span className={`inline-flex rounded-full border px-2 py-0.5 text-[12px] ${tone(source.configuration_status === "ready" ? "ok" : "not_configured")}`}>
           {configurationLabel(source.configuration_status)}
         </span>
-        <div className="mt-1 text-[11px] text-muted">{diagnosticMethodLabel()}</div>
+        <div className="mt-1 text-[12px] text-muted">{diagnosticMethodLabel()}</div>
       </td>
       {CAPABILITIES.map(({ key, action }) => {
         const state = states[key];
@@ -258,21 +258,21 @@ function SourceRow({ source, policy, diagnostic, busy, onRun, onToggle }: {
             <div className="flex items-center gap-2">
               <AdminToggle checked={Boolean(state?.enabled)} disabled={busy}
                 onChange={(enabled) => onToggle(key, enabled)} label="" />
-              <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] ${tone(metric?.status || state?.last_diagnostic_status)}`}>
+              <span className={`inline-flex rounded-full border px-2 py-0.5 text-[12px] ${tone(metric?.status || state?.last_diagnostic_status)}`}>
                 {statusLabel(metric?.status || state?.last_diagnostic_status)}
               </span>
             </div>
-            <div className="mt-1 text-[11px] text-muted">{metricText(key, metric, state)}</div>
-            <button disabled={busy} onClick={() => onRun(key)} className="mt-1 text-[11px] text-accent transition-opacity hover:opacity-80 disabled:opacity-50">
+            <div className="mt-1 text-[12px] text-muted">{metricText(key, metric, state)}</div>
+            <button disabled={busy} onClick={() => onRun(key)} className="mt-1 text-[12px] text-accent transition-opacity hover:opacity-80 disabled:opacity-50">
               {action}
             </button>
           </td>
         );
       })}
-      <td className="px-3 py-3 text-[11px] text-muted">
+      <td className="px-3 py-3 text-[12px] text-muted">
         {latest ? new Date(latest * 1000).toLocaleString() : diagnostic ? "本页刚完成检测" : "尚未检测"}
       </td>
-      <td className="max-w-[260px] px-3 py-3 text-[11px] leading-relaxed text-muted">
+      <td className="max-w-[260px] px-3 py-3 text-[12px] leading-relaxed text-muted">
         {source.coverage}<br />{source.operational_reason}
       </td>
     </tr>

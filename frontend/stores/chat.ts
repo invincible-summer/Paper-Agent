@@ -41,11 +41,9 @@ interface ChatState {
   topic: string;
   // Global UI preferences (moved from the deleted structured-page store).
   uiLang: "en" | "zh";
-  theme: "light" | "dark";
 
   hydratePrefs: () => void;
   setUiLang: (lang: "en" | "zh") => void;
-  setTheme: (theme: "light" | "dark") => void;
   setTopic: (topic: string) => void;
   setMessages: (msgs: ChatMessage[]) => void;
   addMessage: (msg: ChatMessage) => void;
@@ -91,29 +89,14 @@ export const useChatStore = create<ChatState>((set) => ({
   // Deterministic defaults matching the server render; real preferences are
   // applied by hydratePrefs() after mount (see stores/ui.ts note).
   uiLang: "zh",
-  theme: "light",
 
   hydratePrefs: () => {
     const lang = readLS("paper-agent-ui-lang");
-    const theme = readLS("paper-agent-theme");
-    set({
-      uiLang: lang === "en" ? "en" : "zh",
-      theme: theme === "dark" ? "dark" : "light",
-    });
-    if (typeof document !== "undefined") {
-      document.documentElement.classList.toggle("dark", theme === "dark");
-    }
+    set({ uiLang: lang === "en" ? "en" : "zh" });
   },
   setUiLang: (lang) => {
     set({ uiLang: lang });
     if (typeof window !== "undefined") localStorage.setItem("paper-agent-ui-lang", lang);
-  },
-  setTheme: (theme) => {
-    set({ theme });
-    if (typeof window !== "undefined") {
-      localStorage.setItem("paper-agent-theme", theme);
-      document.documentElement.classList.toggle("dark", theme === "dark");
-    }
   },
   setTopic: (topic) => set({ topic }),
   setMessages: (msgs) => set({ messages: msgs }),

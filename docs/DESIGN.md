@@ -118,12 +118,12 @@ Paper_Agent/
 │   ├── storage/                # database | vectorstore | genealogy
 │   └── export/                 # bibtex | report
 │
-├── frontend/                   # Next.js 14 chat 单页（纸墨书院设计令牌）
-│   ├── app/                    # page.tsx(重定向) chat/page.tsx layout globals.css
-│   ├── components/             # AppShell/Nav/Sidebar/RightSidebar/SettingsPopover
+├── frontend/                   # Next.js 14（阅研纸感令牌 + AppRail 顶级导航 + WorkbenchUI 页面原语）
+│   ├── app/                    # page.tsx(重定向) chat/ reader/ files/ login/ usage-doc/ feedback/ admin/
+│   ├── components/             # AppRail/AppFrame/AppShell/Sidebar/RightSidebar/SettingsPopover
 │   │                           # GenealogyGraph(SVG 谱系图) chat/(ChatInput/ChatMessage)
-│   ├── stores/                 # chat(会话+偏好) ui(边栏)
-│   └── lib/                    # chat-api(SSE) history-loader types i18n
+│   ├── stores/                 # chat(会话+偏好) ui(边栏+导航栏)
+│   └── lib/                    # chat-api(SSE) reader-api files-api papers-api history-loader types i18n
 │
 ├── tests/                      # pytest：纯函数 + stubbed-LLM（无真实 API）
 ├── config/settings.yaml        # 可调参数（.env 覆盖部分项）
@@ -181,11 +181,11 @@ Paper_Agent/
 
 ### 使用文档公告页
 
-`GET /api/v1/usage-document` 提供全局公开的 Markdown 使用文档，前端页面为 `/usage-doc`，聊天顶部 Nav 始终显示入口。文档正文与版本信息存储在 `data/users.db` 的单行 `usage_document` 表中，首次读取自动 seed 默认功能说明；保存使用 `expected_version` 乐观锁，避免多个管理员标签页互相覆盖。
+`GET /api/v1/usage-document` 提供全局公开的 Markdown 使用文档，前端页面为 `/usage-doc`，左侧导航「使用文档」始终显示入口。文档正文与版本信息存储在 `data/users.db` 的单行 `usage_document` 表中，首次读取自动 seed 默认功能说明；保存使用 `expected_version` 乐观锁，避免多个管理员标签页互相覆盖。
 
 ### 用户反馈页
 
-`POST /api/v1/feedback` 是用户反馈提交入口（前端页面 `/feedback`，Nav「反馈」按钮直达）：登录用户、游客（`X-Guest-Id`）与本地模式均可提交，body 为严格 Pydantic（`category` ∈ 问题报告/功能建议/其他，`content` 1..4000 必填，`contact` ≤120 可选）。反馈记录存于 `data/users.db` 的 `feedback` 表（`core/feedback_store.py`，追加型记录，含提交者 id/用户名/角色、`open`/`resolved` 状态与处理审计字段）；同一提交者 60 秒内重复提交返回 429。反馈内容仅管理员可见：`GET /admin/feedback`（status 筛选 + 分页 + 全局计数）、`PUT /admin/feedback/{id}`（标记已处理/重新打开）、`DELETE /admin/feedback/{id}`，均通过 `_administrator` 鉴权，前端管理页为 `/admin/feedback`。
+`POST /api/v1/feedback` 是用户反馈提交入口（前端页面 `/feedback`，左侧导航「意见反馈」直达）：登录用户、游客（`X-Guest-Id`）与本地模式均可提交，body 为严格 Pydantic（`category` ∈ 问题报告/功能建议/其他，`content` 1..4000 必填，`contact` ≤120 可选）。反馈记录存于 `data/users.db` 的 `feedback` 表（`core/feedback_store.py`，追加型记录，含提交者 id/用户名/角色、`open`/`resolved` 状态与处理审计字段）；同一提交者 60 秒内重复提交返回 429。反馈内容仅管理员可见：`GET /admin/feedback`（status 筛选 + 分页 + 全局计数）、`PUT /admin/feedback/{id}`（标记已处理/重新打开）、`DELETE /admin/feedback/{id}`，均通过 `_administrator` 鉴权，前端管理页为 `/admin/feedback`。
 
 管理员在同一页面看到一个纯 Markdown 文本框，以及独立的“上传图片并插入”按钮；上传接口为 `POST /api/v1/admin/usage-document/assets`，仅管理员可用，图片写入 `data/usage_document/assets/`，服务端生成 UUID 文件名并只接受 PNG/JPEG/GIF/WebP raster 文件（单文件 ≤10MB）。上传响应返回 Markdown 图片语法，前端按当前 textarea 光标位置插入；普通用户、游客和未登录访问者均只能读取。文档渲染复用 `react-markdown` + `remark-gfm`，不启用原始 HTML，链接协议和图片地址经过安全过滤。
 
@@ -538,9 +538,11 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 - **附件 UI**：选择器与拖拽支持 PDF/DOCX/TEX/TXT/MD/BIB/PNG/JPG/JPEG/WebP。统一 `ChatAttachment` 保存扩展名、MIME、`multimodal_status`、元素数与预览 URL；图片通过带 `authHeaders()` 的 fetch 取 Blob URL 预览并在卸载时 revoke，不把受保护资源裸塞进 `<img src>`。右侧栏和消息 chip 显示“待按需理解 / 已理解 · N 个元素 / 视觉不可用 · 已降级 / 旧附件 · 仅文本”等状态，图片不显示误导性的“0 字”。deep_read/ask_papers 返回后会原位更新附件状态。
 - **流式渲染性能**：历史消息 `ChatMessage` 全部 `React.memo`（流式期间 msg 身份不变 → 旧消息零重渲染，markdown 不重解析）；thinking/answer delta 先入缓冲，**60ms 合帧**（~16 次/秒）再写 store（per-token setState 是卡顿与"成段吐出"的根因）；终态事件立即冲刷保证时序；`handleSend`/`handleRegenerate` 经 `useChatStore.getState()` 取 action 保持引用稳定（memo 不被回调身份击穿）；自动滚动仅在用户已贴近底部（240px）时触发。
 - **谱系图 v2**（`components/GenealogyGraph.tsx` + `lib/genealogy-layout.ts`，纯 SVG 零依赖）：**确定性布局纯函数**（输入确定→输出确定，Node 单测覆盖）：920px 固定内容宽、年份等距刻度（按年份序号而非真实间隔）、泳道按簇大小降序且高度随该簇最高 (簇,年) 桶自适应——每篇论文都是独立节点，绝不折叠为 "+N" 聚合点，同桶按被引降序堆叠、节点半径 3 档；920×560 固定视口 + fit-to-view + 滚轮缩放/拖拽平移/复位。**详情面板**（点节点展开）：元信息+角色徽章+摘要片段、引用关系双列（它引用的/被引用的，仅库内，点击跳转聚焦）、原文链接、**「深问这篇」**（经 `stores/ui.ts` 的 composerDraft 预填聊天输入框，打通图谱→RAG 问答）。**思想源流高亮**：聚焦节点时祖先引用链按年份渐变粗细（越老越粗）。顶部簇筛选 chips/候选集/语义边开关，底部谱系摘要统计行（核心/候选/引用边/语义边/奠基/桥梁）。
-- **设计**：「纸墨书院」令牌（`app/globals.css`）：宣纸底 + 墨色 + 黛青主色 + 朱砂点缀，serif 展示标题，tabular-nums 数字，亮/暗双主题（localStorage 持久化），全站语义 token（bg-surface / text-accent 等）统一取色；`/admin/*` 共享左侧分组侧栏布局（`app/admin/layout.tsx`，窄屏转为顶部横向导航），管理页沿用同一令牌配色。
-- **状态**：`stores/chat.ts`（会话+流式暂存+主题/语言偏好）、`stores/ui.ts`（边栏开合 + composerDraft 一次性聊天草稿）、`stores/auth.ts`（鉴权态：`/auth/config` + localStorage 令牌，mount 后 hydrate，SSR/水合安全）。
-- **多用户**：`/login` 根据 `REGISTRATION_OPEN/GUEST_ACCESS` 决定注册和游客入口；生产禁游客时 AppShell 强制未登录浏览器跳转。Nav 仅对 administrator 显示管理入口；`/admin/agent-keys` 提供创建（明文一次）、复制、列出、撤销长期 Agent Key及密码修改。所有 API 经 `authHeaders()` 自动带 Bearer 或（允许时）游客标识；预水合渲染确定性加载屏。
+- **设计**：「阅研」专业研究工作台，单一浅色暖纸底、苔绿主色、赭石标记、独立红色错误语义；正文14px、聊天15px、主要控件13px、辅助信息12px，宋体展示标题，6–10px圆角。`WorkbenchUI` 提供按钮、图标按钮、页面标题、面板、状态与空态；管理页复用分区标题、设置行及表格。登录为品牌介绍与表单双区，窄屏单列。聊天 Markdown 与工具正文支持受限 KaTeX（trust=false、展开与尺寸限制），流式合帧和历史 memo 保持。阅读器样式仅调整外壳，不修改 PDF 文本层或标记几何。
+- **顶级导航与布局**：`AppRail` 为56px功能轨，展开200px；聊天历史224px、资料320px，主区弹性伸展，正文最大820px。≥1280px默认常驻双侧栏；1024–1279px资料为覆盖抽屉；<1024px主导航和两侧栏为互斥抽屉，手机用顶栏入口。折叠后不保留重复竖轨，入口在主区工具栏；窄屏开关不写桌面偏好。`useOverlayFocus` 为抽屉、设置、管理帮助和确认弹窗提供焦点约束、Esc与焦点恢复。`AppFrame`承载非聊天用户页，PDF保持独立沉浸式布局，admin保留分组导航。
+- **文件中心**（`/files`，两个 URL 寻址 tab）：**论文集**聚合该用户全部会话的网络论文元数据（`GET /api/v1/papers`，按 DOI/id/标题去重、papers 优先于 candidates，返回截断摘要与关联会话；网络论文无本地全文，链接跳出版方）；**个人文件**列出该用户全部上传附件（`GET /api/v1/chat/files?kind=attachment|export`，读 `web_artifacts_owners` 索引 + 磁盘大小），`GET /api/v1/chat/file/{id}/raw` 以 owner 校验放开文档原件下载（图片 inline，文档一律 `attachment` + RFC 5987 中文名），PDF 可直接 `POST /reader/open` 进入阅研。所有端点沿用 `owned_web_artifact` 归属模式，跨账号不可见。
+- **状态**：`stores/chat.ts`（会话+流式暂存+语言偏好）、`stores/ui.ts`（边栏开合 + 顶级导航折叠 + composerDraft 一次性聊天草稿）、`stores/auth.ts`（鉴权态：`/auth/config` + localStorage 令牌，mount 后 hydrate，SSR/水合安全）。
+- **多用户**：`/login` 根据 `REGISTRATION_OPEN/GUEST_ACCESS` 决定注册和游客入口；生产禁游客时 AppShell 强制未登录浏览器跳转。AppRail 仅对 administrator 显示管理入口；`/admin/agent-keys` 提供创建（明文一次）、复制、列出、撤销长期 Agent Key及密码修改。所有 API 经 `authHeaders()` 自动带 Bearer 或（允许时）游客标识；预水合渲染确定性加载屏。
 - **SSE**：直连后端（`NEXT_PUBLIC_BACKEND_URL`，构建时注入）绕过代理缓冲；REST 走 Next 代理。
 - **历史恢复**：`lib/history-loader.ts` 恢复消息并把 map/review/summaries/path 注入对应 tool_call 渲染卡片。
 
@@ -548,9 +550,9 @@ OCR 状态严格区分三层：Docling 的数字文本/内置 OCR、仅扫描件
 
 ### 11.1 阅研工作台（`components/reader/`）
 
-`OpenReaderButton` 从当前会话 PDF 附件卡、文件列表或“只上传”后的附件打开新标签页。`POST /api/v1/reader/open` 校验原件 owner 并绑定到已有/新草稿会话，返回稳定 `session_id` 和历史 filename；不发送模型消息。新绑定的附件标记 `rag_index_pending`，首次真正对话时再补会话向量索引。
+`OpenReaderButton` 从当前会话 PDF 附件卡、文件列表或“只上传”后的附件打开新标签页；左侧导航「阅研」入口（`/reader`）与文件中心「个人文件」tab 也可跨会话打开任意已上传 PDF。`POST /api/v1/reader/open` 校验原件 owner 并绑定会话，返回稳定 `session_id` 和历史 filename；不发送模型消息。**打开是按论文幂等的**：未显式指定 `history_filename` 时自动复用该附件最近所在的会话（不存在时才创建草稿），因此同一篇论文从任何入口重复打开都回到同一个阅读会话——位置、笔记、划线与讨论跨入口保留，不同论文互不干扰。新绑定的附件标记 `rag_index_pending`，首次真正对话时再补会话向量索引。
 
-聊天右侧默认显示“工作台”空间及当前会话 PDF 列表，折叠边栏保留专用入口。`ReadingWorkbench` 使用独立三栏布局：目录/标记、原版 PDF、助读/发现；面板可折叠，小屏改为抽屉。`PdfReader` 通过 PDF.js 6.3.289 的 worker 在客户端渲染原始页面，以 text layer 提供选择，以受限链接层支持外部 HTTP(S) 和 PDF 内部跳转；不运行文档脚本。原始公式、表格和图片不重排。临时文字选择使用原页虚线下划线，保存标记使用实线，框选区域使用虚线/实线边框；选文不在助读栏重复显示，选择本身不自动展开边栏。可见页及相邻区域才分配画布，离开时取消 render 并释放；连续、单页、宽屏双页三种视图共享缩放与页码。worker/CMaps/fonts/WASM 在 `predev`/`prebuild` 从同版本依赖准备，Node 要求 >=22.13，生成资源不提交。
+宽屏聊天右侧默认显示“工作台”空间及当前会话 PDF 列表，折叠后通过顶栏“资料与阅读”进入。`ReadingWorkbench` 使用独立三栏布局：目录/标记、原版 PDF、助读/发现；面板可折叠，小屏改为抽屉。`PdfReader` 通过 PDF.js 6.3.289 的 worker 在客户端渲染原始页面，以 text layer 提供选择，以受限链接层支持外部 HTTP(S) 和 PDF 内部跳转；不运行文档脚本。原始公式、表格和图片不重排。临时文字选择使用原页虚线下划线，保存标记使用实线，框选区域使用虚线/实线边框；选文不在助读栏重复显示，选择本身不自动展开边栏。可见页及相邻区域才分配画布，离开时取消 render 并释放；连续、单页、宽屏双页三种视图共享缩放与页码。worker/CMaps/fonts/WASM 在 `predev`/`prebuild` 从同版本依赖准备，Node 要求 >=22.13，生成资源不提交。
 
 `/api/v1/reader/sessions/{sid}/documents/{aid}` 下提供 manifest/content、position、anchors、notes 和 actions。所有操作同时校验账号、会话成员关系和上传原件所有者；PDF 原件返回 `application/pdf`、private/no-store 与 nosniff，不使用公开文件别名。manifest 由 PyMuPDF 确定性获取页数、内置书签及 SHA-256，并按路径/stat 缓存；不等 Docling 或 VLM。锚点包含文档 fingerprint、物理页号、原文 quote 与未旋转页面归一化矩形；服务端核对选文与该页文本并重新定位矩形。无法精确定位时仅页级引用；文本未匹配拒绝伪造来源，文档版本变化使旧锚点失效。当前跨页选择要求分段。框选模式用 Pointer Events 捕获鼠标/触控矩形并转为未旋转归一化坐标，保存为 `precision=region, verified=false` 的用户区域锚点，不伪装成 OCR 或文本证据；可标记图片、表格、公式与扫描区域。问答收到区域坐标，按现有论文元素工具核对，未提供裁图识别能力时明确降级。
 

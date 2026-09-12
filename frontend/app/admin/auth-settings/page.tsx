@@ -6,7 +6,7 @@ import {
   Loader2, Mail, RotateCcw, Save, Send, ShieldCheck, Users,
 } from "lucide-react";
 import {
-  AdminHeader, AdminSection, AdminToggle, ConfirmModal, HelpModal, InfoButton,
+  AdminHeader, AdminSection, AdminSettingRow, AdminToggle, ConfirmModal, HelpModal, InfoButton,
   type HelpEntry,
 } from "@/components/admin/AdminUI";
 import {
@@ -201,46 +201,31 @@ export default function AuthSettingsAdminPage() {
         subtitle="运行时控制账号登录、游客访问、开放注册与邮箱要求；保存后立即生效。"
         onRefresh={() => void refresh()} refreshing={loading} />
 
-      {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
+      {error && <div className="rounded-[7px] border border-error/40 bg-error/10 p-3 text-[13px] text-error">{error}</div>}
       {saved && !dirty && !authDisabled && (
-        <div className="rounded-lg border border-success/40 bg-success/10 p-3 text-sm text-success">设置已保存并生效。</div>
+        <div className="rounded-[7px] border border-success/40 bg-success/10 p-3 text-[13px] text-success">设置已保存并生效。</div>
       )}
       {authDisabled && (
-        <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm text-fg-secondary">
+        <div className="rounded-[7px] border border-warning/40 bg-warning/10 p-3 text-[13px] text-fg-secondary">
           账号登录当前处于关闭状态：所有访问均按本地单用户运行，管理页与账号体系不再可用。
-          重新开启请在服务器执行 <code className="rounded bg-bg px-1.5 py-0.5 text-xs">scripts/enable_auth_required.py</code>。
+          重新开启请在服务器执行 <code className="rounded bg-bg px-1.5 py-0.5 text-[12px]">scripts/enable_auth_required.py</code>。
         </div>
       )}
       {loginControlsDisabled && !authDisabled && (
-        <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm text-fg-secondary">
+        <div className="rounded-[7px] border border-warning/40 bg-warning/10 p-3 text-[13px] text-fg-secondary">
           本地单用户模式运行中：游客、注册与邮箱开关均不生效。
         </div>
       )}
 
       <AdminSection title="认证模式" icon={<ShieldCheck className="h-5 w-5 text-accent" />}
         info={<InfoButton onClick={() => setHelpItem(HELP.authMode)} label="认证模式说明" />}>
-        <div className="flex items-center justify-between gap-4 py-1">
-          <span className="text-sm font-medium text-fg-secondary">账号登录</span>
-          <AdminToggle checked={draft.auth_required} label="账号登录"
-            onChange={(next) => setDraft({ ...draft, auth_required: next })} />
-        </div>
+        <AdminSettingRow label="账号登录" description="浏览器必须登录账号才能使用；关闭后按本地单用户运行。" control={<AdminToggle checked={draft.auth_required} label="账号登录" onChange={(next) => setDraft({ ...draft, auth_required: next })} />} />
       </AdminSection>
 
       <AdminSection title="注册与游客" icon={<Users className="h-5 w-5 text-accent" />}
         info={<InfoButton onClick={() => setHelpItem(HELP.register)} label="开放注册说明" />}>
-        <div className="flex items-center justify-between gap-4 py-1">
-          <span className="flex items-center gap-1.5 text-sm font-medium text-fg-secondary">
-            游客访问
-            <InfoButton onClick={() => setHelpItem(HELP.guest)} label="游客访问说明" />
-          </span>
-          <AdminToggle checked={draft.guest_access} label="游客访问" disabled={loginControlsDisabled}
-            onChange={(next) => setDraft({ ...draft, guest_access: next })} />
-        </div>
-        <div className="mt-3 flex items-center justify-between gap-4 border-t border-border-light pt-4">
-          <span className="text-sm font-medium text-fg-secondary">开放注册</span>
-          <AdminToggle checked={draft.registration_open} label="开放注册" disabled={loginControlsDisabled}
-            onChange={(next) => setDraft({ ...draft, registration_open: next })} />
-        </div>
+        <AdminSettingRow label={<span className="flex items-center gap-1.5">游客访问 <InfoButton onClick={() => setHelpItem(HELP.guest)} label="游客访问说明" /></span>} description="未登录浏览器使用隔离的游客身份。" control={<AdminToggle checked={draft.guest_access} label="游客访问" disabled={loginControlsDisabled} onChange={(next) => setDraft({ ...draft, guest_access: next })} />} />
+        <AdminSettingRow className="border-t border-border-light" label="开放注册" description="允许新用户自行创建账号。" control={<AdminToggle checked={draft.registration_open} label="开放注册" disabled={loginControlsDisabled} onChange={(next) => setDraft({ ...draft, registration_open: next })} />} />
       </AdminSection>
 
       <AdminSection title="注册邮箱要求" icon={<Mail className="h-5 w-5 text-accent" />}
@@ -252,12 +237,12 @@ export default function AuthSettingsAdminPage() {
               <button key={key} type="button" role="radio" aria-checked={active}
                 disabled={loginControlsDisabled}
                 onClick={() => setDraft({ ...draft, email_requirement: key })}
-                className={`h-10 rounded-lg border px-3 text-sm transition-colors disabled:opacity-50 ${
+                className={`h-10 rounded-[7px] border px-3 text-[13px] transition-colors disabled:opacity-50 ${
                   active ? "border-accent bg-accent/10 font-medium text-accent"
                     : "border-border-light text-fg-secondary hover:bg-surface-hover hover:text-fg"}`}>
                 {name}
                 {key === "verify" && verifyUnavailable
-                  ? <span className="ml-1.5 text-xs text-warning">（未配置 SMTP）</span> : null}
+                  ? <span className="ml-1.5 text-[12px] text-warning">（未配置 SMTP）</span> : null}
               </button>
             );
           })}
@@ -266,7 +251,7 @@ export default function AuthSettingsAdminPage() {
 
       <AdminSection title="SMTP 发信" icon={<Mail className="h-5 w-5 text-accent" />}
         info={<InfoButton onClick={() => setHelpItem(HELP.smtp)} label="SMTP 配置说明" />}>
-        <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-[13px]">
           <span className={smtp.configured ? "text-success" : "text-warning"}>
             {smtp.configured
               ? `已配置 · 发件人 ${smtp.sender}（${smtp.from_name}）`
@@ -276,36 +261,36 @@ export default function AuthSettingsAdminPage() {
         <div className="flex flex-wrap items-center gap-2">
           <input type="email" value={testTo} onChange={(e) => setTestTo(e.target.value)}
             placeholder="收件邮箱，如 you@example.com"
-            className="h-9 min-w-0 flex-1 rounded-lg border border-border-light bg-bg px-3 text-sm outline-none transition-colors focus:border-accent/50" />
+            className="h-9 min-w-0 flex-1 rounded-[7px] border border-border-light bg-bg px-3 text-[13px] outline-none transition-colors focus:border-accent/50" />
           <button type="button" onClick={() => void sendTest()} disabled={!smtp.configured || testing || !testTo.trim()}
-            className="flex h-9 items-center gap-1.5 rounded-lg border border-border-light px-4 text-sm text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-50">
+            className="flex h-9 items-center gap-1.5 rounded-[7px] border border-border-light px-4 text-[13px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-50">
             {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             发送测试邮件
           </button>
         </div>
         {testNotice && (
-          <p className={`mt-2 text-xs ${testNotice.startsWith("测试邮件已发送") ? "text-success" : "text-error"}`}>
+          <p className={`mt-2 text-[12px] ${testNotice.startsWith("测试邮件已发送") ? "text-success" : "text-error"}`}>
             {testNotice}
           </p>
         )}
       </AdminSection>
     </div>
 
-    <div className="sticky bottom-0 -mx-4 border-t border-border-light bg-bg/90 px-4 backdrop-blur sm:-mx-8 sm:px-8">
+    <div className="admin-save-bar">
       <div className="flex flex-wrap items-center justify-between gap-3 py-3">
-        <div className="flex items-center gap-2 text-xs text-muted">
+        <div className="flex items-center gap-2 text-[12px] text-muted">
           <InfoButton onClick={() => setHelpItem(HELP.save)} label="保存与版本说明" />
           <span>版本 v{settings.version} · 上次由 {settings.updated_by} 更新 · 保存后立即生效</span>
         </div>
         <div className="flex gap-2">
           {dirty && (
             <button onClick={() => setDraft({ ...settings })}
-              className="flex h-9 items-center gap-1.5 rounded-lg border border-border-light px-4 text-sm text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg">
+              className="flex h-9 items-center gap-1.5 rounded-[7px] border border-border-light px-4 text-[13px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg">
               <RotateCcw className="h-4 w-4" />重置修改
             </button>
           )}
           <button disabled={working || !dirty} onClick={save}
-            className="flex h-9 items-center gap-1.5 rounded-lg bg-accent px-5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">
+            className="flex h-9 items-center gap-1.5 rounded-[7px] bg-accent px-5 text-[13px] font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">
             {working ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
             保存设置
           </button>

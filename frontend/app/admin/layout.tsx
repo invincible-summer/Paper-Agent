@@ -54,19 +54,19 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname();
 
   return (
-    <div className="flex h-screen overflow-hidden bg-bg">
+    <div className="admin-shell flex overflow-hidden bg-bg">
       {/* 桌面侧栏 */}
       <aside className="hidden w-56 shrink-0 flex-col border-r border-border-light bg-surface lg:flex">
         <div className="flex items-center gap-2 px-4 py-4">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-accent-hover shadow-sm">
-            <SlidersHorizontal className="h-3.5 w-3.5 text-white" />
+          <div className="flex h-7 w-7 items-center justify-center rounded-[7px] border border-accent/20 bg-accent-soft text-accent">
+            <SlidersHorizontal className="h-3.5 w-3.5 text-accent" />
           </div>
-          <span className="text-sm font-bold tracking-tight">管理后台</span>
+          <div><span className="font-serif-display text-[18px]">阅研 · 管理</span><p className="mt-1 text-[9px] tracking-[.12em] text-muted">WORKSPACE SETTINGS</p></div>
         </div>
         <nav aria-label="管理后台导航" className="flex-1 overflow-y-auto px-3 pb-4">
           {NAV_GROUPS.map((group, gi) => (
             <div key={group.name} className={gi === 0 ? "" : "mt-5"}>
-              <p className="mb-1.5 flex items-center gap-1.5 px-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
+              <p className="mb-1.5 flex items-center gap-1.5 px-2 text-[12px] font-semibold uppercase tracking-wider text-muted">
                 <Wrench className="h-3 w-3" />
                 {group.name}
               </p>
@@ -76,7 +76,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
                   return (
                     <li key={href}>
                       <Link href={href} aria-current={active ? "page" : undefined}
-                        className={`flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[13px] ${navLinkClass(active)}`}>
+                        className={`flex h-9 items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] ${navLinkClass(active)}`}>
                         <Icon className={`h-4 w-4 shrink-0 ${active ? "text-accent" : "text-muted"}`} />
                         {label}
                       </Link>
@@ -89,7 +89,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
         </nav>
         <div className="border-t border-border-light p-3">
           <Link href="/chat"
-            className="flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[13px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg">
+            className="flex h-9 items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg">
             <ArrowBack />
             返回对话
           </Link>
@@ -104,7 +104,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
               <ArrowBack />
               返回对话
             </Link>
-            <span className="ml-1 text-sm font-bold tracking-tight">管理后台</span>
+            <span className="ml-1 text-[13px] font-bold tracking-tight">管理后台</span>
           </div>
           <nav aria-label="管理后台导航"
             className="flex gap-1.5 overflow-x-auto px-4 py-2.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -112,7 +112,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
               const active = pathname === href;
               return (
                 <Link key={href} href={href} aria-current={active ? "page" : undefined}
-                  className={`flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs ${navLinkClass(active)}`}>
+                  className={`flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-[12px] ${navLinkClass(active)}`}>
                   <Icon className="h-3.5 w-3.5 shrink-0" />
                   {label}
                 </Link>
@@ -123,7 +123,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
 
         {/* 统一内容容器：宽度、留白由布局收敛，页面只渲染内容片段 */}
         <div className="flex-1 overflow-y-auto">
-          <main className="mx-auto w-full max-w-4xl px-4 py-8 text-fg sm:px-8">{children}</main>
+          <main className="admin-canvas mx-auto w-full max-w-5xl px-4 py-8 text-fg sm:px-8">{children}</main>
         </div>
       </div>
     </div>

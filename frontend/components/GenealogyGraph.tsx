@@ -23,9 +23,10 @@ import { useUIStore } from "@/stores/ui";
  * - 顶部簇筛选 chips / 候选集开关 / 语义边开关；底部谱系摘要统计行。
  */
 
+// 苔绿-赭石系（与全站「阅研纸感」主题同源）：首色=主色橄榄绿，次色=赭石点缀。
 const CLUSTER_COLORS = [
-  "#256d66", "#c2402a", "#4a628a", "#8a6d3b", "#6b4a8a", "#3b7a4a",
-  "#a05a2c", "#4a8a82",
+  "#476d3a", "#b77837", "#315e4e", "#4a628a", "#6b4a8a", "#3b7a4a",
+  "#a05a2c", "#8a6d3b",
 ];
 const VIEW_W = 920;
 const VIEW_H = 560;
@@ -142,7 +143,7 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
   }, [focus, data.edges]);
 
   if (!layout.nodes.length) {
-    return <div className="p-4 text-center text-xs text-muted">暂无谱系图数据</div>;
+    return <div className="p-4 text-center text-[12px] text-muted">暂无谱系图数据</div>;
   }
 
   // Auto-fit the frame on both axes (capped upscale), then center.
@@ -252,15 +253,15 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
   })();
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border-light bg-surface" style={{ boxShadow: "var(--shadow-md)" }}>
+    <div className="overflow-hidden rounded-[7px] border border-border-light bg-surface" style={{ boxShadow: "var(--shadow-md)" }}>
       {/* Filter chips */}
       <div className="flex flex-wrap items-center gap-1.5 border-b border-border-light px-3 py-2">
         {clusterChips.map(([cid, count]) => {
           const hidden = hiddenClusters.has(cid);
           return (
             <button key={cid} onClick={() => toggleCluster(cid)}
-              className={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] transition-colors ${
-                hidden ? "border-border-light text-muted/40 line-through" : "border-border-light text-fg-secondary hover:border-accent/40"}`}>
+              className={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[12px] transition-colors ${
+                hidden ? "border-border-light text-muted line-through" : "border-border-light text-fg-secondary hover:border-accent/40"}`}>
               <span className="inline-block h-2 w-2 rounded-full"
                 style={{ background: CLUSTER_COLORS[cid % CLUSTER_COLORS.length], opacity: hidden ? 0.3 : 1 }} />
               {labelOf(cid)} · {count}
@@ -268,20 +269,20 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
           );
         })}
         <button onClick={() => setShowCandidates((s) => !s)}
-          className={`rounded-full border border-border-light px-2 py-0.5 text-[10px] transition-colors ${
-            showCandidates ? "text-fg-secondary hover:border-accent/40" : "text-muted/40 line-through"}`}>
+          className={`rounded-full border border-border-light px-2 py-0.5 text-[12px] transition-colors ${
+            showCandidates ? "text-fg-secondary hover:border-accent/40" : "text-muted line-through"}`}>
           候选集
         </button>
         <button onClick={() => setShowSemantic((s) => !s)}
-          className={`rounded-full border border-border-light px-2 py-0.5 text-[10px] transition-colors ${
-            showSemantic ? "text-fg-secondary hover:border-accent/40" : "text-muted/40 line-through"}`}>
+          className={`rounded-full border border-border-light px-2 py-0.5 text-[12px] transition-colors ${
+            showSemantic ? "text-fg-secondary hover:border-accent/40" : "text-muted line-through"}`}>
           语义边
         </button>
-        <span className="ml-auto hidden text-[10px] text-muted/50 sm:inline">
+        <span className="ml-auto hidden text-[12px] text-muted sm:inline">
           悬停看论文信息 · 点击节点看详情 · 点击边看关系 · 拖拽平移 · 右下角缩放
         </span>
         <button onClick={() => setView({ dx: 0, dy: 0, k: 1 })}
-          className="rounded-full border border-border-light px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-accent/40 hover:text-fg-secondary">
+          className="rounded-full border border-border-light px-2 py-0.5 text-[12px] text-muted transition-colors hover:border-accent/40 hover:text-fg-secondary">
           复位
         </button>
       </div>
@@ -373,7 +374,7 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
         </svg>
 
         {/* Zoom controls (bottom-right, map-style) */}
-        <div className="absolute bottom-3 right-3 flex flex-col overflow-hidden rounded-lg border border-border-light bg-surface shadow-md">
+        <div className="absolute bottom-3 right-3 flex flex-col overflow-hidden rounded-[7px] border border-border-light bg-surface shadow-md">
           <button onClick={() => zoomBy(1.25)} title="放大" aria-label="放大"
             className="flex h-8 w-8 items-center justify-center text-fg-secondary transition-colors hover:bg-bg hover:text-accent">
             <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
@@ -390,9 +391,9 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
       </div>
 
       {/* Legend row */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border-light px-3 py-1.5 text-[10px] text-muted">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border-light px-3 py-1.5 text-[12px] text-muted">
         <span className="flex items-center gap-1">
-          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="none" stroke="#256d66" strokeWidth="1.4" /><circle cx="7" cy="7" r="6.2" fill="#256d66" opacity="0.18" /></svg>
+          <svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="none" stroke="#476d3a" strokeWidth="1.4" /><circle cx="7" cy="7" r="6.2" fill="#476d3a" opacity="0.18" /></svg>
           奠基
         </span>
         <span className="flex items-center gap-1">
@@ -411,7 +412,7 @@ export function GenealogyGraph({ data, clusterLabels }: { data: GraphData; clust
           <svg width="18" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="#b5b0a2" strokeWidth="1.2" strokeDasharray="3 2" /></svg>
           语义相似
         </span>
-        <span className="ml-auto text-muted/60">
+        <span className="ml-auto text-muted">
           核心集 <b className="tnum">{layout.stats.core}</b> · 候选 <b className="tnum">{layout.stats.candidates}</b>
           · 引用边 <b className="tnum">{layout.stats.citeEdges}</b> · 语义边 <b className="tnum">{layout.stats.semanticEdges}</b>
           · 奠基 <b className="tnum">{layout.stats.foundational}</b> · 桥梁 <b className="tnum">{layout.stats.bridge}</b>
@@ -499,12 +500,12 @@ function EdgeDetail({ edge, weight, fullById, labelOf, onJumpPaper, onClose }: {
   const b = fullById.get(edge.target);
 
   const card = (p: GraphNode | undefined) => {
-    if (!p) return <p className="text-[11px] text-muted/50">端点不在当前视图</p>;
+    if (!p) return <p className="text-[12px] text-muted">端点不在当前视图</p>;
     return (
       <button onClick={() => onJumpPaper(p.id)} title={p.title}
-        className="w-full rounded-lg border border-border-light px-2.5 py-1.5 text-left transition-colors hover:border-accent/40">
-        <p className="truncate text-[11px] font-medium text-fg">{p.title}</p>
-        <p className="mt-0.5 text-[10px] text-muted">
+        className="w-full rounded-[7px] border border-border-light px-2.5 py-1.5 text-left transition-colors hover:border-accent/40">
+        <p className="truncate text-[12px] font-medium text-fg">{p.title}</p>
+        <p className="mt-0.5 text-[12px] text-muted">
           <span className="tnum">{p.year > 0 ? p.year : "????"}</span>
           {` · 被引 `}<span className="tnum">{p.citation_count}</span>
           {` · `}{labelOf(p.cluster)}
@@ -517,15 +518,15 @@ function EdgeDetail({ edge, weight, fullById, labelOf, onJumpPaper, onClose }: {
   return (
     <div className="h-[190px] overflow-y-auto border-t border-border-light px-4 py-3">
       <div className="flex items-start justify-between gap-3">
-        <p className="text-[12px] font-semibold text-fg">
+        <p className="text-[13px] font-semibold text-fg">
           {isCite ? "引用关系" : "语义相似"}
           {!isCite && weight > 0 && (
-            <span className="tnum ml-2 text-[11px] font-normal text-muted">相似度 {weight.toFixed(2)}</span>
+            <span className="tnum ml-2 text-[12px] font-normal text-muted">相似度 {weight.toFixed(2)}</span>
           )}
         </p>
-        <button onClick={onClose} className="px-1.5 text-[13px] text-muted/60 hover:text-fg" title="关闭">×</button>
+        <button onClick={onClose} className="px-1.5 text-[13px] text-muted hover:text-fg" title="关闭">×</button>
       </div>
-      <p className="mt-1 text-[11px] text-muted">
+      <p className="mt-1 text-[12px] text-muted">
         {isCite
           ? "左侧论文引用了右侧论文（思想由被引方流向引用方）。点击任一卡片可跳到对应论文。"
           : "两篇论文研究内容相近（按摘要嵌入向量相似度连边，无引用方向）。点击任一卡片可跳到对应论文。"}
@@ -572,21 +573,21 @@ function PaperDetail({ paper, edges, fullById, clusterLabel, onJump, onClose, on
         {list.map((p) => (
           <li key={p.id}>
             <button onClick={() => onJump(p.id)}
-              className="w-full truncate text-left text-[11px] text-fg-secondary transition-colors hover:text-accent"
+              className="w-full truncate text-left text-[12px] text-fg-secondary transition-colors hover:text-accent"
               title={p.title}>
-              <span className="tnum text-muted/60">{p.year > 0 ? p.year : "????"}</span> · {p.title}
+              <span className="tnum text-muted">{p.year > 0 ? p.year : "????"}</span> · {p.title}
             </button>
           </li>
         ))}
       </ul>
-    ) : <p className="text-[11px] text-muted/50">{emptyText}</p>;
+    ) : <p className="text-[12px] text-muted">{emptyText}</p>;
 
   return (
     <div className="h-[190px] overflow-y-auto border-t border-border-light px-4 py-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-[13px] font-semibold leading-snug text-fg">{paper.title}</p>
-          <p className="mt-0.5 text-[11px] text-muted">
+          <p className="mt-0.5 text-[12px] text-muted">
             {(paper.authors || []).slice(0, 3).join(", ") || "作者未知"}
             {paper.year > 0 && ` · ${paper.year}`}
             {paper.venue && ` · ${paper.venue}`}
@@ -601,28 +602,28 @@ function PaperDetail({ paper, edges, fullById, clusterLabel, onJump, onClose, on
           {paper.url && (
             <a href={paper.url} target="_blank" rel="noreferrer"
               title="出版页面链接"
-              className="rounded-lg border border-border-light px-2 py-1 text-[11px] text-fg-secondary transition-colors hover:border-accent/40 hover:text-accent">
+              className="rounded-[7px] border border-border-light px-2 py-1 text-[12px] text-fg-secondary transition-colors hover:border-accent/40 hover:text-accent">
               原文链接
             </a>
           )}
           <button onClick={() => onDeepAsk(paper)}
-            className="rounded-lg bg-accent px-2 py-1 text-[11px] text-white transition-colors hover:bg-accent-hover">
+            className="rounded-[7px] bg-accent px-2 py-1 text-[12px] text-white transition-colors hover:bg-accent-hover">
             深问这篇
           </button>
-          <button onClick={onClose} className="px-1.5 text-[13px] text-muted/60 hover:text-fg" title="关闭">×</button>
+          <button onClick={onClose} className="px-1.5 text-[13px] text-muted hover:text-fg" title="关闭">×</button>
         </div>
       </div>
       {paper.abstract && (
-        <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-muted">{paper.abstract}…</p>
+        <p className="mt-1.5 line-clamp-2 text-[12px] leading-relaxed text-muted">{paper.abstract}…</p>
       )}
       <div className="mt-2 grid grid-cols-2 gap-4">
         <div>
-          <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted/70">
+          <p className="mb-0.5 text-[12px] font-semibold uppercase tracking-wide text-muted">
             它引用的（{citesOut.length}）</p>
           {relList(citesOut, "库内无被它引用的论文")}
         </div>
         <div>
-          <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted/70">
+          <p className="mb-0.5 text-[12px] font-semibold uppercase tracking-wide text-muted">
             被引用的（{citedBy.length}）</p>
           {relList(citedBy, "库内暂无引用它的论文")}
         </div>
@@ -630,4 +631,3 @@ function PaperDetail({ paper, edges, fullById, clusterLabel, onJump, onClose, on
     </div>
   );
 }
-

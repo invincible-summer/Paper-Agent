@@ -18,6 +18,7 @@ const config: Config = {
         "accent-hover": "rgb(var(--accent-hover) / <alpha-value>)",
         accent2: "rgb(var(--accent2) / <alpha-value>)",
         "accent2-soft": "rgb(var(--accent2-soft) / <alpha-value>)",
+        "accent2-hover": "rgb(var(--accent2-hover) / <alpha-value>)",
         "surface-sunken": "rgb(var(--surface-sunken) / <alpha-value>)",
         warning: "rgb(var(--warning) / <alpha-value>)",
         success: "rgb(var(--success) / <alpha-value>)",

@@ -5,7 +5,8 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft, BookOpenText, ImagePlus, Loader2, Save } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { Nav } from "@/components/Nav";
+import { AppFrame } from "@/components/AppFrame";
+import { EmptyState, PageHeader, SectionPanel, StatusNotice } from "@/components/WorkbenchUI";
 import {
   extractUsageDocOutline,
   UsageDocMobileOutline,
@@ -205,48 +206,25 @@ export default function UsageDocumentPage() {
   };
 
   return (
-    <div className="min-h-screen bg-bg text-fg">
-      <Nav />
-      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-8">
-        <div className="mb-6 flex items-start gap-3">
-          <button
-            type="button"
-            onClick={() => router.push("/chat")}
-            aria-label="返回对话"
-            title="返回对话"
-            className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border-light text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg"
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </button>
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft/50 text-accent">
-            <BookOpenText className="h-5 w-5" />
-          </div>
-          <div className="min-w-0">
-            <h1 className="text-2xl font-bold">使用文档</h1>
-            <p className="mt-1 text-sm text-muted">
-              智能体功能介绍、使用方法与注意事项
-              {document ? ` · 最后更新：${formatUpdatedAt(document.updated_at)}` : ""}
-            </p>
-          </div>
-        </div>
+    <AppFrame>
+      <div className="library-canvas !max-w-[1200px] flex-1 overflow-y-auto">
+        <PageHeader eyebrow="Guide" title="使用文档" description={`智能体功能介绍、使用方法与注意事项${document ? ` · 最后更新：${formatUpdatedAt(document.updated_at)}` : ""}`} icon={<BookOpenText className="h-5 w-5" />} actions={<button type="button" onClick={() => router.push("/chat")} className="btn-secondary"><ArrowLeft className="h-3.5 w-3.5" />返回对话</button>} />
 
-        {error && <div className="mb-4 rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
-        {notice && <div className="mb-4 rounded-lg border border-success/40 bg-success/10 p-3 text-sm text-success">{notice}</div>}
+        {error && <div className="mb-4"><StatusNotice tone="error">{error}</StatusNotice></div>}
+        {notice && <div className="mb-4"><StatusNotice tone="success">{notice}</StatusNotice></div>}
 
         {loading ? (
-          <div className="flex min-h-48 items-center justify-center rounded-2xl border border-border-light bg-surface">
-            <Loader2 className="h-6 w-6 animate-spin text-accent" />
-          </div>
+          <div className="workbench-panel"><EmptyState loading title="正在读取文档" /></div>
         ) : document ? (
           <>
             {isAdministrator && (
-              <section className="mb-6 rounded-2xl border border-accent/30 bg-surface p-5 shadow-sm">
+              <SectionPanel className="mb-6 border-accent/30 p-5">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <h2 className="font-semibold">管理员编辑</h2>
-                    <p className="mt-1 text-xs text-muted">使用 Markdown 编写文档；图片可通过按钮上传并插入光标位置。</p>
+                    <p className="mt-1 text-[12px] text-muted">使用 Markdown 编写文档；图片可通过按钮上传并插入光标位置。</p>
                   </div>
-                  <span className="text-xs text-muted">版本 {document.version} · {formatUpdatedAt(document.updated_at)}</span>
+                  <span className="text-[12px] text-muted">版本 {document.version} · {formatUpdatedAt(document.updated_at)}</span>
                 </div>
                 <textarea
                   ref={textareaRef}
@@ -254,7 +232,7 @@ export default function UsageDocumentPage() {
                   onChange={(event) => setDraft(event.target.value)}
                   spellCheck={false}
                   aria-label="使用文档 Markdown 内容"
-                  className="min-h-[28rem] w-full resize-y rounded-xl border border-border-light bg-bg p-4 font-mono text-sm leading-6 text-fg outline-none transition-colors focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
+                  className="min-h-[28rem] w-full resize-y rounded-[7px] border border-border-light bg-bg p-4 font-mono text-[13px] leading-6 text-fg outline-none transition-colors focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
                 />
                 <input
                   ref={fileRef}
@@ -271,7 +249,7 @@ export default function UsageDocumentPage() {
                     type="button"
                     onClick={() => fileRef.current?.click()}
                     disabled={uploading || saving}
-                    className="flex items-center gap-1.5 rounded-lg border border-border-light px-3 py-2 text-sm text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-50"
+                    className="flex items-center gap-1.5 rounded-[7px] border border-border-light px-3 py-2 text-[13px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-50"
                   >
                     {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImagePlus className="h-4 w-4" />}
                     {uploading ? "上传中…" : "上传图片并插入"}
@@ -280,27 +258,27 @@ export default function UsageDocumentPage() {
                     type="button"
                     onClick={() => void handleSave()}
                     disabled={saving || uploading || draft === document.content}
-                    className="flex items-center gap-1.5 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
+                    className="flex items-center gap-1.5 rounded-[7px] bg-accent px-4 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
                   >
                     {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                     {saving ? "保存中…" : "保存文档"}
                   </button>
                 </div>
-              </section>
+              </SectionPanel>
             )}
 
             <div className="flex items-start gap-8">
               <UsageDocOutline items={outline} />
               <div className="min-w-0 flex-1">
                 <UsageDocMobileOutline items={outline} />
-                <article className="rounded-2xl border border-border-light bg-surface p-5 shadow-sm sm:p-8">
+                <article className="workbench-panel p-5 sm:p-8">
                   <MarkdownContent content={document.content} outline={outline} />
                 </article>
               </div>
             </div>
           </>
         ) : null}
-      </main>
-    </div>
+      </div>
+    </AppFrame>
   );
 }

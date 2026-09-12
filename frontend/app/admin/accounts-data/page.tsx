@@ -127,12 +127,12 @@ export default function AccountsDataAdminPage() {
   if (!user || user.role !== "administrator") {
     return (
       <div className="flex min-h-[60vh] items-center justify-center px-4">
-        <div className="max-w-md rounded-2xl border border-border-light bg-surface p-8 text-center shadow-sm">
+        <div className="max-w-md rounded-[9px] border border-border-light bg-surface p-8 text-center shadow-sm">
           <ShieldCheck className="mx-auto mb-3 h-10 w-10 text-muted" />
           <h1 className="text-lg font-semibold text-fg">无权访问管理页面</h1>
-          <p className="mt-2 text-sm text-muted">仅管理员账号可以清理各账号数据。</p>
+          <p className="mt-2 text-[13px] text-muted">仅管理员账号可以清理各账号数据。</p>
           <button onClick={() => router.replace("/chat")}
-            className="mt-5 rounded-lg bg-accent px-4 py-2 text-white">返回对话</button>
+            className="mt-5 rounded-[7px] bg-accent px-4 py-2 text-white">返回对话</button>
         </div>
       </div>
     );
@@ -148,30 +148,30 @@ export default function AccountsDataAdminPage() {
           subtitle="统一查看并不可恢复地清除各账号的历史、上传文件、Trace 与 API 私有数据。"
           onRefresh={() => void refresh()} refreshing={loading} />
 
-        {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
-        {notice && <div className="rounded-lg border border-success/40 bg-success/10 p-3 text-sm text-success">{notice}</div>}
+        {error && <div className="rounded-[7px] border border-error/40 bg-error/10 p-3 text-[13px] text-error">{error}</div>}
+        {notice && <div className="rounded-[7px] border border-success/40 bg-success/10 p-3 text-[13px] text-success">{notice}</div>}
 
         <section className="grid gap-4 md:grid-cols-2">
-          <div className="rounded-xl border border-border-light bg-surface p-4">
+          <div className="rounded-[7px] border border-border-light bg-surface p-4">
             <Database className="mb-2 h-5 w-5 text-accent" />
             <div className="tnum text-2xl font-bold">{items.length}</div>
-            <div className="text-sm text-muted">可管理的账号 / Agent Key</div>
+            <div className="text-[13px] text-muted">可管理的账号 / Agent Key</div>
           </div>
-          <div className="rounded-xl border border-border-light bg-surface p-4">
+          <div className="rounded-[7px] border border-border-light bg-surface p-4">
             <HardDrive className="mb-2 h-5 w-5 text-accent" />
             <div className="tnum text-2xl font-bold">{bytes(totalOwned)}</div>
-            <div className="text-sm text-muted">账号私有文件与历史占用</div>
+            <div className="text-[13px] text-muted">账号私有文件与历史占用</div>
           </div>
         </section>
 
-        <section className="overflow-hidden rounded-xl border border-border-light bg-surface">
+        <section className="overflow-hidden rounded-[7px] border border-border-light bg-surface">
           <div className="flex min-h-11 items-center justify-between gap-2 border-b border-border-light px-4 py-2.5">
             <h2 className="font-semibold">账号清单</h2>
             <InfoButton onClick={() => setHelpItem(HELP.accountDelete)} label="账号数据删除说明" />
           </div>
           <div className="max-h-[65vh] overflow-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="sticky top-0 bg-surface text-[11px] uppercase text-muted">
+            <table className="w-full text-left text-[13px]">
+              <thead className="sticky top-0 bg-surface text-[12px] uppercase text-muted">
                 <tr>
                   <th className="px-4 py-2">账号</th>
                   <th className="px-3 py-2">历史</th>
@@ -192,7 +192,7 @@ export default function AccountsDataAdminPage() {
                             : <KeyRound className="h-4 w-4 text-accent2" />}
                           <div className="min-w-0">
                             <div className="truncate font-medium">{item.label}</div>
-                            <div className="text-[11px] text-muted">
+                            <div className="text-[12px] text-muted">
                               {item.account_type === "web_user" ? item.role : `Agent Key ${item.account_id.slice(0, 8)}`}
                               {item.disabled ? " · 已停用/撤销" : ""}
                             </div>
@@ -201,11 +201,11 @@ export default function AccountsDataAdminPage() {
                       </td>
                   <td className="tnum px-3 py-2 text-muted">
                     {item.history_count} 个 · {bytes(item.history_bytes)}
-                    <div className="text-[11px] text-muted/70">{item.paper_count} 篇论文记录</div>
+                    <div className="text-[12px] text-muted">{item.paper_count} 篇论文记录</div>
                   </td>
                   <td className="tnum px-3 py-2 text-muted">
                     {item.upload_count} 个 · {bytes(item.upload_bytes)}
-                    <div className="text-[11px] text-muted/70">{item.attachment_count} 个附件引用</div>
+                    <div className="text-[12px] text-muted">{item.attachment_count} 个附件引用</div>
                   </td>
                   <td className="tnum px-3 py-2 text-muted">
                     {item.trace_count} 个 · {bytes(item.trace_bytes)}
@@ -218,7 +218,7 @@ export default function AccountsDataAdminPage() {
                   <td className="px-3 py-2">
                     <button onClick={() => setConfirmDelete(item)}
                       disabled={busy !== null}
-                      className="flex items-center gap-1 rounded-lg border border-error/40 px-2.5 py-1.5 text-xs text-error hover:bg-error/10 disabled:opacity-50">
+                      className="flex items-center gap-1 rounded-[7px] border border-error/40 px-2.5 py-1.5 text-[12px] text-error hover:bg-error/10 disabled:opacity-50">
                       {busy === item.account_id
                         ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         : <Trash2 className="h-3.5 w-3.5" />}

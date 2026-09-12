@@ -162,13 +162,13 @@ export function ChatInput({
   ];
 
   return (
-    <div className="px-4 pb-5 pt-2">
-      <div className="mx-auto max-w-[760px]">
+    <div className="composer">
+      <div className="mx-auto max-w-[820px]">
         <div
           onDragOver={(e) => { e.preventDefault(); if (!disabled && !uploading) setDragOver(true); }}
           onDragLeave={(e) => { if (e.currentTarget === e.target) setDragOver(false); }}
           onDrop={handleDrop}
-          className={`flex items-end gap-2 rounded-[22px] border bg-surface px-4 py-2.5 shadow-md transition-colors focus-within:border-accent/30 ${dragOver ? "border-accent/60 bg-accent-soft/20" : "border-border-light"}`}
+          className={`composer-box flex items-end gap-2 rounded-[9px] border bg-surface px-3.5 py-3 transition-colors focus-within:border-accent/50 ${dragOver ? "border-accent/60 bg-accent-soft/20" : "border-border"}`}
         >
           {/* D-087: paperclip attach button */}
           <button
@@ -195,7 +195,7 @@ export function ChatInput({
             placeholder="输入你的问题..."
             disabled={disabled}
             rows={1}
-            className="flex-1 resize-none bg-transparent text-[14px] leading-[1.6] text-fg outline-none placeholder:text-muted/40 disabled:opacity-50"
+            className="flex-1 resize-none bg-transparent text-[14px] leading-[1.6] text-fg outline-none placeholder:text-muted disabled:opacity-50"
             style={{ maxHeight: "180px" }}
           />
           {/* D-088: the send button doubles as the stop button while a turn
@@ -203,7 +203,7 @@ export function ChatInput({
           {disabled && onStop ? (
             <button
               onClick={onStop}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white transition-all hover:bg-red-500 shadow-sm"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white transition-all hover:bg-error shadow-sm"
               title="停止生成"
             >
               <Square className="h-3.5 w-3.5 fill-current" />
@@ -211,11 +211,12 @@ export function ChatInput({
           ) : (
           <button
             onClick={() => void handleSubmit()}
+            aria-label="发送消息"
             disabled={!canSend}
             className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all ${
               canSend
                 ? "bg-accent text-white hover:bg-accent-hover shadow-sm"
-                : "bg-surface-hover/60 text-muted/40"
+                : "bg-surface-hover/60 text-muted"
             }`}
           >
             {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : disabled ? <Square className="h-3.5 w-3.5" /> : <ArrowUp className="h-4 w-4" />}
@@ -228,14 +229,14 @@ export function ChatInput({
             {allChips.map((c) => {
               const clickable = c.kind === "done";
               return (
-              <span key={`${c.kind}-${c.idx}`} className={`flex items-center gap-1.5 rounded-lg border border-border-light bg-surface px-2 py-1 text-[11px] text-fg-secondary ${clickable ? "cursor-pointer transition-colors hover:border-accent/30 hover:bg-surface-hover/60 hover:text-fg" : ""}`}
+              <span key={`${c.kind}-${c.idx}`} className={`flex items-center gap-1.5 rounded-[7px] border border-border-light bg-surface px-2 py-1 text-[12px] text-fg-secondary ${clickable ? "cursor-pointer transition-colors hover:border-accent/30 hover:bg-surface-hover/60 hover:text-fg" : ""}`}
                 title={clickable ? `${c.name} — 点击在右侧${c.image ? "预览图片" : "查看提取文本"}` : c.name}
                 onClick={() => { if (!clickable) return; const a = uploaded[c.idx]; if (a) openFile(a); }}
               >
                 {c.image ? <ImageIcon className="h-3 w-3 text-accent" /> : <FileText className="h-3 w-3 text-accent" />}
                 <span className="max-w-[180px] truncate">{c.name}</span>
-                <span className="text-muted/60">{c.meta}</span>
-                <button onClick={(e) => { e.stopPropagation(); c.kind === "done" ? removeUploaded(c.idx) : removePending(c.idx); }} className="text-muted/50 hover:text-red-500" title="移除">
+                <span className="text-muted">{c.meta}</span>
+                <button onClick={(e) => { e.stopPropagation(); c.kind === "done" ? removeUploaded(c.idx) : removePending(c.idx); }} className="text-muted hover:text-error" title="移除">
                   <X className="h-3 w-3" />
                 </button>
               </span>
@@ -244,14 +245,14 @@ export function ChatInput({
           </div>
         )}
         {(pending.some(f => /\.pdf$/i.test(f.name)) || uploaded.some(a => /\.pdf$/i.test(a.filename))) && (
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-muted">
             {pending.length > 0 && <button type="button" disabled={disabled || uploading} onClick={() => void prepareReading()} className="rounded-md border border-accent/20 px-3 py-1 text-accent">{uploading ? "正在准备…" : "只上传，开始阅读"}</button>}
             {uploaded.map(a => <OpenReaderButton key={a.id} attachment={a} />)}
           </div>
         )}
-        {uploadError && <p className="mt-1 text-[11px] text-red-500/70">{uploadError}</p>}
-        <p className="mt-2 text-center text-[11px] text-muted/40">
-          AI 生成内容仅供参考，请核实引用的原始文献
+        {uploadError && <p className="mt-1 text-[12px] text-error/70">{uploadError}</p>}
+        <p className="mt-2 flex flex-wrap justify-between gap-1 text-[12px] text-muted">
+          <span>Enter 发送 · Shift + Enter 换行</span><span>请以原始文献核实 AI 生成内容</span>
         </p>
       </div>
     </div>

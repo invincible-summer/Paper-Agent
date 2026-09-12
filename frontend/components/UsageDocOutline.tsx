@@ -158,7 +158,7 @@ export function UsageDocOutline({ items }: { items: UsageDocOutlineItem[] }) {
   return (
     <nav aria-label="本页目录" className="hidden w-56 shrink-0 lg:block">
       <div className="sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto py-1 pr-2">
-        <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold tracking-wide text-muted">
+        <p className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-muted">
           <ListTree className="h-3.5 w-3.5" />
           本页目录
         </p>
@@ -173,7 +173,7 @@ export function UsageDocOutline({ items }: { items: UsageDocOutlineItem[] }) {
                   onClick={(event) => handleOutlineClick(event, item.id, scrollTo)}
                   title={item.text}
                   className={[
-                    "-ml-px block truncate border-l py-1 pr-2 text-sm leading-5 transition-colors",
+                    "-ml-px block truncate border-l py-1 pr-2 text-[13px] leading-5 transition-colors",
                     INDENT_CLASSES[depth],
                     active
                       ? "border-accent font-medium text-accent"
@@ -198,8 +198,8 @@ export function UsageDocMobileOutline({ items }: { items: UsageDocOutlineItem[] 
   const minLevel = Math.min(...entries.map((item) => item.level));
 
   return (
-    <details className="mb-4 rounded-xl border border-border-light bg-surface lg:hidden">
-      <summary className="flex cursor-pointer select-none items-center gap-1.5 px-4 py-3 text-sm font-medium text-fg-secondary">
+    <details className="mb-4 rounded-[7px] border border-border-light bg-surface lg:hidden">
+      <summary className="flex cursor-pointer select-none items-center gap-1.5 px-4 py-3 text-[13px] font-medium text-fg-secondary">
         <ListTree className="h-4 w-4" />
         本页目录
       </summary>
@@ -213,7 +213,7 @@ export function UsageDocMobileOutline({ items }: { items: UsageDocOutlineItem[] 
                 href={`#${item.id}`}
                 onClick={(event) => handleOutlineClick(event, item.id, scrollTo)}
                 className={[
-                  "block truncate py-1.5 text-sm leading-5 transition-colors",
+                  "block truncate py-1.5 text-[13px] leading-5 transition-colors",
                   INDENT_CLASSES[depth],
                   active ? "font-medium text-accent" : "text-fg-secondary hover:text-fg",
                 ].join(" ")}

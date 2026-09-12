@@ -11,7 +11,7 @@ export function OpenReaderButton({ attachment, compact = false }: { attachment: 
   if (!/\.pdf$/i.test(attachment.filename) && attachment.ext !== "pdf") return null;
   const open = async () => {
     const state = useChatStore.getState();
-    if (state.isResponding && !state.currentChatFilename) { setError("首轮对话保存后即可打开工作台"); return; }
+    if (state.isResponding && !state.currentChatFilename) { setError("本轮回复结束后即可打开工作台"); return; }
     // 同步开窗保留主聊天流式轮次和草稿，也避免异步请求后被弹窗拦截。
     const target = window.open("about:blank", "_blank");
     if (!target) { setError("请允许此站点打开阅读标签页，再试一次"); return; }
@@ -19,6 +19,7 @@ export function OpenReaderButton({ attachment, compact = false }: { attachment: 
     target.document.body.textContent = "正在准备阅读工作台…";
     setBusy(true); setError("");
     try {
+      // history_filename 可为空：后端会复用该论文已有的阅读会话（进度/笔记保留）。
       const bound = await openReader(attachment.id, state.currentChatFilename);
       const current = useChatStore.getState();
       if (current.currentChatFilename === state.currentChatFilename && (state.currentChatFilename || current.messages === state.messages)) {

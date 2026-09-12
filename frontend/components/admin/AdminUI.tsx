@@ -4,6 +4,8 @@
  *  one help modal, one toggle and one confirm modal so all /admin pages stay
  *  aligned. Cross-page navigation lives in app/admin/layout.tsx (sidebar). */
 import { useState, type ReactNode } from "react";
+import { useOverlayFocus } from "../useOverlayFocus";
+import { Button } from "../WorkbenchUI";
 import {
   AlertTriangle, HelpCircle, RefreshCw,
 } from "lucide-react";
@@ -27,14 +29,15 @@ export interface HelpEntry {
 
 /** HelpModal — click-outside-to-close dialog rendering title + label/desc rows. */
 export function HelpModal({ item, onClose }: { item: HelpEntry | null; onClose: () => void }) {
+  const ref = useOverlayFocus(Boolean(item), onClose);
   if (!item) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+    <div ref={ref} tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center bg-fg/40 p-4"
       onClick={onClose} role="dialog" aria-modal="true" aria-label={item.title}>
-      <div className="max-h-[85vh] w-full max-w-2xl overflow-auto rounded-xl bg-surface p-6 shadow-lg"
+      <div className="max-h-[85vh] w-full max-w-2xl overflow-auto rounded-[7px] bg-surface p-6 shadow-lg"
         onClick={(e) => e.stopPropagation()}>
         <h2 className="mb-4 text-xl font-bold">{item.title}</h2>
-        <dl className="grid gap-3 text-sm">
+        <dl className="grid gap-3 text-[13px]">
           {item.entries.map(([k, v]) => (
             <div key={k}>
               <dt className="font-semibold">{k}</dt>
@@ -43,7 +46,7 @@ export function HelpModal({ item, onClose }: { item: HelpEntry | null; onClose: 
           ))}
         </dl>
         <button onClick={onClose}
-          className="mt-5 rounded-lg bg-accent px-4 py-2 text-white hover:bg-accent-hover">
+          className="mt-5 rounded-[7px] bg-accent px-4 py-2 text-white hover:bg-accent-hover">
           我知道了
         </button>
       </div>
@@ -60,8 +63,8 @@ export function AdminSection({ title, icon, info, children, className = "" }: {
   className?: string;
 }) {
   return (
-    <section className={`rounded-2xl border border-border-light bg-surface p-5 ${className}`}>
-      <div className="mb-4 flex min-h-9 items-center justify-between gap-2">
+    <section className={`workbench-panel p-5 ${className}`}>
+      <div className="admin-section-heading flex min-h-9 items-center justify-between gap-2">
         <h2 className="flex items-center gap-2 font-semibold">
           {icon}<span>{title}</span>
         </h2>
@@ -93,6 +96,34 @@ export function AdminToggle({ checked, onChange, disabled = false, label }: {
   );
 }
 
+export function AdminSettingRow({ label, description, control, className = "" }: {
+  label: ReactNode;
+  description?: ReactNode;
+  control: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={`admin-setting-row flex items-center justify-between gap-4 py-2 ${className}`}>
+      <div className="min-w-0">
+        <div className="text-[13px] font-medium text-fg-secondary">{label}</div>
+        {description && <div className="mt-1 text-[12px] leading-relaxed text-muted">{description}</div>}
+      </div>
+      <div className="shrink-0">{control}</div>
+    </div>
+  );
+}
+
+export function AdminNotice({ tone = "info", children }: {
+  tone?: "info" | "success" | "warning" | "error";
+  children: ReactNode;
+}) {
+  return <div className="my-0"><div className={`status-notice status-notice-${tone}`}>{children}</div></div>;
+}
+
+export function AdminTable({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return <div className={`admin-table overflow-x-auto rounded-[7px] border border-border-light bg-surface ${className}`}>{children}</div>;
+}
+
 /** ConfirmModal — click-outside-to-close confirmation dialog. When
  *  ``confirmText`` is set (high-risk actions) the confirm button stays
  *  disabled until the administrator types exactly that text. */
@@ -108,31 +139,28 @@ export function ConfirmModal({ title, body, confirmText, confirmLabel = "确认�
   onClose: () => void;
 }) {
   const [typed, setTyped] = useState("");
+  const ref = useOverlayFocus(true, () => { if (!busy) onClose(); });
   const armed = !confirmText || typed.trim() === confirmText;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose} role="dialog" aria-modal="true" aria-label={title}>
-      <div className="w-full max-w-lg rounded-xl bg-surface p-6 shadow-lg"
+    <div ref={ref} tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center bg-fg/40 p-4"
+      onClick={() => { if (!busy) onClose(); }} role="dialog" aria-modal="true" aria-label={title}>
+      <div className="w-full max-w-lg rounded-[7px] bg-surface p-6 shadow-lg"
         onClick={(e) => e.stopPropagation()}>
         {danger && <AlertTriangle className="mb-3 h-7 w-7 text-warning" />}
         <h2 className="text-xl font-bold">{title}</h2>
-        <p className="mt-3 whitespace-pre-line text-sm text-muted">{body}</p>
+        <p className="mt-3 whitespace-pre-line text-[13px] text-muted">{body}</p>
         {confirmText && (
           <input value={typed} onChange={(e) => setTyped(e.target.value)}
             autoFocus placeholder={`请输入「${confirmText}」以确认`}
-            className="mt-4 w-full rounded-lg border border-border-light bg-bg px-3 py-2 text-sm outline-none transition-colors focus:border-accent/50" />
+            className="mt-4 w-full rounded-[7px] border border-border-light bg-bg px-3 py-2 text-[13px] outline-none transition-colors focus:border-accent/50" />
         )}
         <div className="mt-5 flex justify-end gap-2">
-          <button onClick={onClose} disabled={busy}
-            className="rounded-lg border border-border-light px-4 py-2 text-sm text-fg-secondary hover:bg-surface-hover disabled:opacity-50">
+          <Button onClick={onClose} disabled={busy}>
             取消
-          </button>
-          <button onClick={onConfirm} disabled={!armed || busy}
-            className={`rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50 ${
-              danger ? "bg-error hover:bg-error/90" : "bg-accent hover:bg-accent-hover"
-            }`}>
+          </Button>
+          <Button onClick={onConfirm} disabled={!armed} busy={busy} tone={danger ? "danger" : "primary"}>
             {busy ? "执行中…" : confirmLabel}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -149,21 +177,22 @@ export function AdminHeader({ title, subtitle, icon, onRefresh, refreshing }: {
   refreshing?: boolean;
 }) {
   return (
-    <header className="flex flex-wrap items-center justify-between gap-3">
+    <header className="page-header">
       <div className="flex min-w-0 items-center gap-3">
         {icon && (
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent-soft/60 text-accent">
+          <div className="page-header-icon">
             {icon}
           </div>
         )}
         <div className="min-w-0">
-          <h1 className="truncate text-xl font-bold tracking-tight">{title}</h1>
-          {subtitle && <p className="truncate text-xs text-muted">{subtitle}</p>}
+          <p className="page-eyebrow">WORKSPACE ADMINISTRATION</p>
+          <h1 className="page-title !text-[26px]">{title}</h1>
+          {subtitle && <p className="page-description">{subtitle}</p>}
         </div>
       </div>
       {onRefresh && (
         <button onClick={onRefresh} disabled={refreshing} aria-label="刷新" title="刷新"
-          className="flex h-9 w-9 items-center justify-center rounded-lg text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-60">
+          className="flex h-9 w-9 items-center justify-center rounded-[7px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-60">
           <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
         </button>
       )}

@@ -250,39 +250,38 @@ export default function ChatPage() {
       <div className="flex flex-1 flex-col overflow-hidden">
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
           {isEmpty ? (
-            <div className="flex min-h-full flex-col items-center justify-center px-6">
-              <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-accent-hover shadow-lg shadow-accent/20">
-                <Sparkles className="h-7 w-7 text-white" />
+            <div className="chat-welcome">
+              <div className="chat-welcome-mark">
+                <Sparkles className="h-4 w-4" /><span>阅研 · RESEARCH STUDIO</span>
               </div>
-              <h1 className="font-serif-display mb-2 text-[22px] font-bold tracking-tight text-fg">
-                你好，我是 Paper Agent
-              </h1>
-              <p className="mb-8 max-w-md text-center text-[14px] leading-relaxed text-muted">
-                告诉我你的研究主题——我来检索文献、深读论文、绘制研究地图与谱系图、
-                规划阅读路径、撰写文献综述。上传 PDF 后，还可以进入「阅研」工作台，
-                在原文中划选翻译、追问和记录自己的发现。
+              <h2 className="chat-welcome-title">
+                从一个问题，<br />走向新的发现。
+              </h2>
+              <p className="chat-welcome-description">
+                在这里检索文献、梳理线索、推敲观点。告诉我你想研究什么，
+                或上传一篇论文，从原文开始阅读。
               </p>
-              <div className="grid w-full max-w-lg grid-cols-2 gap-2.5">
+              <div className="grid w-full grid-cols-1 gap-3 sm:grid-cols-2">
                 {SUGGESTIONS.map((s) => (
                   <button
                     key={s.text}
                     onClick={() => handleSend(s.text)}
-                    className="group flex items-start gap-3 rounded-xl border border-border-light bg-surface px-4 py-3 text-left transition-all hover:border-accent/25 hover:bg-surface-hover/40 hover:shadow-sm"
+                    className="chat-suggestion group"
                   >
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft/40 transition-colors group-hover:bg-accent-soft/60">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] bg-accent-soft/40 transition-colors group-hover:bg-accent-soft/60">
                       <s.icon className="h-4 w-4 text-accent" />
                     </div>
                     <div className="min-w-0">
                       <p className="text-[13px] font-medium text-fg">{s.text}</p>
-                      <p className="mt-0.5 text-[11px] text-muted/60">{s.desc}</p>
+                      <p className="mt-0.5 text-[12px] text-muted">{s.desc}</p>
                     </div>
-                    <ArrowRight className="ml-auto h-3.5 w-3.5 shrink-0 text-muted/30 transition-all group-hover:translate-x-0.5 group-hover:text-accent/50" />
+                    <ArrowRight className="ml-auto h-3.5 w-3.5 shrink-0 text-muted transition-all group-hover:translate-x-0.5 group-hover:text-accent/50" />
                   </button>
                 ))}
               </div>
             </div>
           ) : (
-            <div className="mx-auto max-w-[760px] px-4 pb-4">
+            <div className="mx-auto w-full max-w-[820px] px-5 py-5">
               {store.messages.map((msg, i) => (
                 <ChatMessage key={i} msg={msg}
                   isLast={!store.isResponding && i === store.messages.length - 1 && msg.role === "assistant"}

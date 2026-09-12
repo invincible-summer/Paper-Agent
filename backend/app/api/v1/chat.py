@@ -41,6 +41,21 @@ def _extract_text(filename: str, raw: bytes) -> str:
         return ""
 
 
+def _legacy_local_metadata(aid: str, metadata: dict | None = None) -> dict | None:
+    """Bind a pre-index local upload to the local identity; None on conflict.
+
+    In auth-off development every caller is the local user, but the index may
+    still hold rows from a multi-user era — those files stay invisible rather
+    than raising on the duplicate-owner insert.
+    """
+    from core.web_artifact_store import register_web_artifact
+    try:
+        register_web_artifact("attachment", aid, "local", metadata or {})
+    except ValueError:
+        return None
+    return dict(metadata or {})
+
+
 def _owned_web_attachments(items: list[dict], user_id: str) -> list[dict]:
     """Return canonical attachment metadata restricted to one web owner."""
     import re as _re
@@ -62,8 +77,9 @@ def _owned_web_attachments(items: list[dict], user_id: str) -> list[dict]:
             # alone, and is immediately bound to the local identity.
             if find_original(aid) is None and not text_path(aid).is_file():
                 raise HTTPException(404, "attachment not found")
-            metadata = dict(item)
-            register_web_artifact("attachment", aid, user_id, metadata)
+            metadata = _legacy_local_metadata(aid, dict(item))
+            if metadata is None:
+                raise HTTPException(404, "attachment not found")
         if metadata is None:
             raise HTTPException(404, "attachment not found")
         if find_original(aid) is None and not text_path(aid).is_file():
@@ -375,12 +391,61 @@ async def upload_chat_files(files: list[UploadFile] = File(...),
     return {"attachments": results}
 
 
+@router.get("/files")
+def list_chat_files(kind: str = "attachment", authorization: str | None = Header(None),
+                    x_guest_id: str | None = Header(None)):
+    """List the current user's uploaded attachments (file center).
+
+    Rows come from the ownership index, so another user's ids never appear.
+    Disk size is stat'ed from the stored original when present.
+    """
+    import re as _re
+    from core.web_artifact_store import list_web_artifacts
+    from tools.ingest.attachments import find_original
+
+    user = current_user(authorization, x_guest_id)
+    if kind not in ("attachment", "export"):
+        raise HTTPException(400, "kind must be attachment or export")
+    files: list[dict] = []
+    for row in list_web_artifacts(user["id"], kind):
+        aid = row["id"]
+        if not _re.fullmatch(r"[a-f0-9]{32}", aid):
+            continue
+        metadata = row["metadata"]
+        size = None
+        fp = find_original(aid)
+        if fp is not None:
+            try:
+                size = fp.stat().st_size
+            except OSError:
+                size = None
+        files.append({
+            "id": aid,
+            "filename": metadata.get("filename", ""),
+            "ext": metadata.get("ext", ""),
+            "media_type": metadata.get("media_type", ""),
+            "char_count": metadata.get("char_count", 0),
+            "multimodal_status": metadata.get("multimodal_status", ""),
+            "element_count": metadata.get("element_count", 0),
+            "created_at": row["created_at"],
+            "size": size,
+        })
+    return {"files": files}
+
+
 @router.get("/file/{file_id}/raw")
 def get_chat_file_raw(file_id: str, authorization: str | None = Header(None),
                       x_guest_id: str | None = Header(None)):
-    """Serve a stored original through an id-only, extension-whitelisted lookup."""
+    """Serve a stored original through an id-only, extension-whitelisted lookup.
+
+    Raster images stay inline (chat preview); every other supported document
+    type is served as a download via Content-Disposition: attachment so the
+    browser never renders an untrusted document inline.
+    """
     import re as _re
-    from tools.ingest.attachments import IMAGE_EXTENSIONS, find_original, media_type_for
+    from urllib.parse import quote
+    from tools.ingest.attachments import (IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS,
+                                          find_original, media_type_for)
 
     user = current_user(authorization, x_guest_id)
     if not _re.fullmatch(r"[a-f0-9]{32}", file_id):
@@ -388,20 +453,25 @@ def get_chat_file_raw(file_id: str, authorization: str | None = Header(None),
     from core.web_artifact_store import owned_web_attachment
     metadata = owned_web_attachment(file_id, user["id"])
     if metadata is None and user["id"] == "local" and find_original(file_id) is not None:
-        from core.web_artifact_store import register_web_artifact
-        register_web_artifact("attachment", file_id, user["id"])
-        metadata = {}
+        metadata = _legacy_local_metadata(file_id)
     if metadata is None:
         raise HTTPException(404, "file not found")
     fp = find_original(file_id)
     if fp is None:
         raise HTTPException(404, "file not found")
     ext = fp.suffix.lower().lstrip(".")
-    # Browser-inline preview is deliberately restricted to safe raster images.
-    if ext not in IMAGE_EXTENSIONS:
-        raise HTTPException(400, "raw preview is only available for images")
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(400, "unsupported file type")
+    if ext in IMAGE_EXTENSIONS:
+        disposition = f'inline; filename="{file_id}.{ext}"'
+    else:
+        # RFC 5987 encoded so original (often CJK) filenames survive download.
+        filename = metadata.get("filename") or f"{file_id}.{ext}"
+        disposition = (f"attachment; filename=\"{file_id}.{ext}\"; "
+                       f"filename*=utf-8''{quote(filename)}")
     return FileResponse(fp, media_type=media_type_for(ext),
-                        headers={"Content-Disposition": f'inline; filename="{file_id}.{ext}"'})
+                        headers={"Content-Disposition": disposition,
+                                 "X-Content-Type-Options": "nosniff"})
 
 
 @router.get("/file/{file_id}")
@@ -422,9 +492,7 @@ def get_chat_file(file_id: str, authorization: str | None = Header(None),
     from core.web_artifact_store import owned_web_attachment
     metadata = owned_web_attachment(file_id, user["id"])
     if metadata is None and user["id"] == "local" and (_UPLOAD_DIR / f"{file_id}.txt").is_file():
-        from core.web_artifact_store import register_web_artifact
-        register_web_artifact("attachment", file_id, user["id"])
-        metadata = {}
+        metadata = _legacy_local_metadata(file_id)
     if metadata is None:
         raise HTTPException(404, "file not found")
     fp = _UPLOAD_DIR / f"{file_id}.txt"

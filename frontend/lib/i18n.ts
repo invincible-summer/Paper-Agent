@@ -4,13 +4,6 @@ const _S: Record<string, Record<Lang, string>> = {
   app_title: { en: "Paper Agent", zh: "论文智能助手" },
   app_subtitle: { en: "Literature Survey & Review", zh: "文献调研与综述" },
   settings: { en: "Settings", zh: "设置" },
-  settings_theme: { en: "Theme", zh: "主题" },
-  settings_theme_hint: {
-    en: "Switch between light and dark interface style.",
-    zh: "切换浅色和深色界面风格。",
-  },
-  settings_theme_light: { en: "Light", zh: "浅色" },
-  settings_theme_dark: { en: "Dark", zh: "深色" },
   settings_language: { en: "Language", zh: "语言" },
   settings_language_hint: {
     en: "Controls the UI language (titles, labels, buttons). Does not affect LLM output language.",

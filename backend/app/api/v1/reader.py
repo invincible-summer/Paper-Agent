@@ -127,14 +127,41 @@ async def _anchor(uid, sid, aid, anchor_id, path):
     return anchor
 
 
+def _latest_session_with_attachment(uid: str, aid: str) -> str | None:
+    """Filename of the owner's newest session that already carries this attachment.
+
+    Keeps /reader/open idempotent per document: reopening the same paper from
+    any entry point reuses its session, so reading position, notes and threads
+    persist instead of forking a fresh draft each time.
+    """
+    import json as _json
+    from core.history_store import HISTORY_DIR, _owner_of
+
+    try:
+        files = sorted(HISTORY_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    for fp in files:
+        try:
+            data = _json.loads(fp.read_text(encoding="utf-8"))
+        except (OSError, _json.JSONDecodeError):
+            continue
+        if _owner_of(data) != uid:
+            continue
+        if any(isinstance(a, dict) and a.get("id") == aid for a in data.get("attachments") or []):
+            return fp.name
+    return None
+
+
 @router.post("/open")
 async def open_document(req: OpenRequest, uid: str = Depends(owner)):
     from app.api.v1.chat import _owned_web_attachments
     attachment = _owned_web_attachments([{"id": req.attachment_id}], uid)[0]
     if attachment.get("ext", "").lower() != "pdf":
         raise HTTPException(422, "第一版工作台支持 PDF，请选择 PDF 原件")
-    async with locked_session(uid, req.history_filename or f"draft-{req.attachment_id}"):
-        session = load_chat_history(req.history_filename, user_id=uid) if req.history_filename else None
+    filename = req.history_filename or _latest_session_with_attachment(uid, req.attachment_id)
+    async with locked_session(uid, filename or f"draft-{req.attachment_id}"):
+        session = load_chat_history(filename, user_id=uid) if filename else None
         if req.history_filename and session is None:
             raise HTTPException(404, "会话不存在")
         if session is None:

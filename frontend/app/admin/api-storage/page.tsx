@@ -59,7 +59,7 @@ function bytes(value: number) {
   return `${(value / 1024 ** 3).toFixed(2)} GiB`;
 }
 
-const inputClass = "h-9 rounded-lg border border-border-light bg-bg px-2.5 text-sm text-fg outline-none transition-colors focus:border-accent/50";
+const inputClass = "h-9 rounded-[7px] border border-border-light bg-bg px-2.5 text-[13px] text-fg outline-none transition-colors focus:border-accent/50";
 
 interface ConfirmState {
   title: string;
@@ -171,23 +171,23 @@ export default function ApiStorageAdminPage() {
         subtitle="仅管理清小搭 /v1 数据，不影响自制前端持久化。"
         onRefresh={() => void refresh()} refreshing={loading} />
 
-      {error && <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error">{error}</div>}
+      {error && <div className="rounded-[7px] border border-error/40 bg-error/10 p-3 text-[13px] text-error">{error}</div>}
 
       <section className="grid gap-4 md:grid-cols-3">
-        <div className="rounded-xl border border-border-light bg-surface p-4">
+        <div className="rounded-[7px] border border-border-light bg-surface p-4">
           <Database className="mb-2 h-5 w-5 text-accent" />
           <div className="tnum text-2xl font-bold">{bytes(usage?.total_bytes ?? 0)}</div>
-          <div className="text-sm text-muted">API artifact 逻辑容量</div>
+          <div className="text-[13px] text-muted">API artifact 逻辑容量</div>
         </div>
-        <div className="rounded-xl border border-border-light bg-surface p-4">
+        <div className="rounded-[7px] border border-border-light bg-surface p-4">
           <ShieldCheck className="mb-2 h-5 w-5 text-accent" />
           <div className="tnum text-2xl font-bold">{status?.disk_percent?.toFixed(1) ?? "--"}%</div>
-          <div className="text-sm text-muted">服务器磁盘占用</div>
+          <div className="text-[13px] text-muted">服务器磁盘占用</div>
         </div>
-        <div className={`rounded-xl border p-4 ${status?.heavy_writes_paused ? "border-warning bg-warning/10" : "border-border-light bg-surface"}`}>
+        <div className={`rounded-[7px] border p-4 ${status?.heavy_writes_paused ? "border-warning bg-warning/10" : "border-border-light bg-surface"}`}>
           <AlertTriangle className="mb-2 h-5 w-5 text-warning" />
           <div className="text-lg font-bold">{status?.heavy_writes_paused ? "文件重任务已暂停" : "文件重任务正常"}</div>
-          <div className="text-sm text-muted">普通文字问答始终可用</div>
+          <div className="text-[13px] text-muted">普通文字问答始终可用</div>
         </div>
       </section>
 
@@ -202,7 +202,7 @@ export default function ApiStorageAdminPage() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDraft({ ...draft, ...PRESETS[name] }); }
                 }}
-                className={`flex h-11 cursor-pointer items-center justify-between gap-2 rounded-lg border px-4 text-left text-sm transition-colors ${
+                className={`flex h-11 cursor-pointer items-center justify-between gap-2 rounded-[7px] border px-4 text-left text-[13px] transition-colors ${
                   active ? "border-accent bg-accent/10 font-medium text-accent" : "border-border-light hover:bg-surface-hover"}`}>
                 <span>{PRESET_NAMES[name]}</span>
                 <span className="flex items-center gap-1">
@@ -217,10 +217,10 @@ export default function ApiStorageAdminPage() {
 
       <AdminSection title="API 文件输入"
         info={<InfoButton onClick={() => show("max_upload_bytes")} label="API 文件上限说明" />}>
-        <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 text-[13px]">
           <div>
             <div className="font-medium">API 远程文件上限</div>
-            <div className="mt-1 max-w-2xl text-xs text-muted">
+            <div className="mt-1 max-w-2xl text-[12px] text-muted">
               仅影响清小搭 /v1 的 file.url 下载和 API 私有附件保存；默认 200 MiB，最多 200 MiB。
               不影响 Web /chat/upload 的 20 MiB 限制。DOC/XLS/XLSX 当前只保存、不解析。
             </div>
@@ -230,7 +230,7 @@ export default function ApiStorageAdminPage() {
               value={Math.round(draft.max_upload_bytes / (1024 * 1024))}
               onChange={(e) => setDraft({ ...draft, preset: "custom", max_upload_bytes: Number(e.target.value) * 1024 * 1024 })}
               className={`${inputClass} tnum w-24 text-right`} />
-            <span className="w-10 text-xs text-muted">MiB</span>
+            <span className="w-10 text-[12px] text-muted">MiB</span>
           </label>
         </div>
       </AdminSection>
@@ -239,13 +239,13 @@ export default function ApiStorageAdminPage() {
         <AdminSection title="关键保留期"
           info={<InfoButton onClick={() => show("ttl")} label="保留期说明" />}>
           {TTL_FIELDS.map(([key, label]) => (
-            <label key={key} className="mb-3 flex items-center justify-between gap-3 text-sm">
+            <label key={key} className="mb-3 flex items-center justify-between gap-3 text-[13px]">
               <span>{label}</span>
               <span className="flex items-center gap-1.5">
                 <input type="number" min={1} value={Math.round(draft[key] / 3600)}
                   onChange={(e) => setDraft({ ...draft, preset: "custom", [key]: Number(e.target.value) * 3600 })}
                   className={`${inputClass} tnum w-24 text-right`} />
-                <span className="w-7 text-xs text-muted">小时</span>
+                <span className="w-7 text-[12px] text-muted">小时</span>
               </span>
             </label>
           ))}
@@ -254,7 +254,7 @@ export default function ApiStorageAdminPage() {
         <AdminSection title="磁盘阈值"
           info={<InfoButton onClick={() => show("thresholds")} label="磁盘阈值说明" />}>
           {THRESHOLD_FIELDS.map(([key, label]) => (
-            <label key={key} className="mb-3 flex items-center justify-between text-sm">
+            <label key={key} className="mb-3 flex items-center justify-between text-[13px]">
               <span>{label}</span>
               <input type="number" disabled={key === "hard_stop_threshold_percent"} value={draft[key]}
                 onChange={(e) => setDraft({ ...draft, preset: "custom", [key]: Number(e.target.value) })}
@@ -289,11 +289,11 @@ export default function ApiStorageAdminPage() {
         info={<InfoButton onClick={() => show("cleanup")} label="清理操作说明" />}>
         <div className="flex flex-wrap gap-3">
           <button disabled={working} onClick={() => void requestAction("immediate_cleanup")}
-            className="flex h-9 items-center gap-2 rounded-lg border border-warning px-4 text-sm text-warning transition-colors hover:bg-warning/10 disabled:opacity-50">
+            className="flex h-9 items-center gap-2 rounded-[7px] border border-warning px-4 text-[13px] text-warning transition-colors hover:bg-warning/10 disabled:opacity-50">
             <Trash2 className="h-4 w-4" />预览并立即清理
           </button>
           <button disabled={working} onClick={() => void requestAction("legacy_scan")}
-            className="h-9 rounded-lg border border-border-light px-4 text-sm text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-50">
+            className="h-9 rounded-[7px] border border-border-light px-4 text-[13px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg disabled:opacity-50">
             扫描 API 遗留文件
           </button>
         </div>
@@ -302,7 +302,7 @@ export default function ApiStorageAdminPage() {
       <AdminSection title="分类容量">
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {usage?.categories.map((item) => (
-            <div key={`${item.category}-${item.status}`} className="rounded-lg border border-border-light p-3 text-sm">
+            <div key={`${item.category}-${item.status}`} className="rounded-[7px] border border-border-light p-3 text-[13px]">
               <div className="font-medium">{item.category}</div>
               <div className="tnum text-muted">{item.status} · {item.count} 个 · {bytes(item.bytes)}</div>
             </div>
@@ -311,7 +311,7 @@ export default function ApiStorageAdminPage() {
       </AdminSection>
 
       <AdminSection title="最近清理记录">
-        <div className="space-y-2 text-sm">
+        <div className="space-y-2 text-[13px]">
           {runs.slice(0, 8).map((run) => (
             <div key={String(run.id)} className="flex justify-between rounded border border-border-light p-2">
               <span>{String(run.mode)} · {String(run.status)}</span>
@@ -323,18 +323,18 @@ export default function ApiStorageAdminPage() {
       </AdminSection>
     </div>
 
-    <div className="sticky bottom-0 -mx-4 border-t border-border-light bg-bg/90 px-4 backdrop-blur sm:-mx-8 sm:px-8">
+    <div className="admin-save-bar">
       <div className="flex flex-wrap items-center justify-between gap-3 py-3">
-        <span className="text-xs text-muted">版本 v{policy.version} · 上次由 {policy.updated_by} 更新</span>
+        <span className="text-[12px] text-muted">版本 v{policy.version} · 上次由 {policy.updated_by} 更新</span>
         <div className="flex gap-2">
           {dirty && (
             <button onClick={() => setDraft({ ...policy })}
-              className="flex h-9 items-center gap-1.5 rounded-lg border border-border-light px-4 text-sm text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg">
+              className="flex h-9 items-center gap-1.5 rounded-[7px] border border-border-light px-4 text-[13px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg">
               <RotateCcw className="h-4 w-4" />重置修改
             </button>
           )}
           <button disabled={working || !dirty} onClick={() => void save()}
-            className="flex h-9 items-center gap-1.5 rounded-lg bg-accent px-5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">
+            className="flex h-9 items-center gap-1.5 rounded-[7px] bg-accent px-5 text-[13px] font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50">
             {working ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
             保存策略
           </button>
